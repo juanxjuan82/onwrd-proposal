@@ -16,7 +16,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen bg-black text-white flex flex-col md:flex-row">
       <aside className="w-full md:w-[200px] border-r border-[#222222] bg-black flex-shrink-0 flex flex-col">
         <div className="px-6 py-8 flex flex-col flex-1">
-          <div className="mb-12 px-4">
+          <div className="mb-12">
             <img
               src="/onwrd-logo-white.png"
               alt="ONWRD"
