@@ -1,0 +1,1 @@
+- [Proposal Desk Architecture](proposal-desk.md) — full RFP→proposal workflow built; key schema, route, and AI model decisions.

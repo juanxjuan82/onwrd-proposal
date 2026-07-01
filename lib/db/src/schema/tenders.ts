@@ -14,8 +14,10 @@ export const tendersTable = pgTable("tenders", {
   valueAmount: text("value_amount"),
   sourceUrl: text("source_url"),
   contactInfo: text("contact_info"),
-  status: text("status").notNull().default("open"),
+  rawText: text("raw_text"),
+  status: text("status").notNull().default("opportunity_found"),
   recommendationScore: integer("recommendation_score").notNull().default(0),
+  requirementsExtractedAt: timestamp("requirements_extracted_at"),
   proposalId: integer("proposal_id").references(() => proposalsTable.id, {
     onDelete: "set null",
   }),

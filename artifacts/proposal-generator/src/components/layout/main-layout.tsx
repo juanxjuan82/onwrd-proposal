@@ -1,5 +1,5 @@
 import { Link, useLocation } from "wouter";
-import { Plus, LayoutDashboard, Briefcase } from "lucide-react";
+import { Plus, LayoutDashboard, Briefcase, Target, BookOpen, Settings } from "lucide-react";
 import { GoogleConnect } from "@/components/google-connect";
 
 export function MainLayout({ children }: { children: React.ReactNode }) {
@@ -34,12 +34,36 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
               New Proposal
             </Link>
             <Link
+              href="/opportunities"
+              className={navItem(location.startsWith("/opportunities"))}
+              data-testid="nav-opportunities"
+            >
+              <Target className="w-5 h-5 flex-shrink-0" />
+              Opportunities
+            </Link>
+            <Link
               href="/tenders"
               className={navItem(location.startsWith("/tenders"))}
               data-testid="nav-tenders"
             >
               <Briefcase className="w-5 h-5 flex-shrink-0" />
               Tenders
+            </Link>
+            <Link
+              href="/knowledge"
+              className={navItem(location.startsWith("/knowledge"))}
+              data-testid="nav-knowledge"
+            >
+              <BookOpen className="w-5 h-5 flex-shrink-0" />
+              Knowledge
+            </Link>
+            <Link
+              href="/settings"
+              className={navItem(location.startsWith("/settings"))}
+              data-testid="nav-settings"
+            >
+              <Settings className="w-5 h-5 flex-shrink-0" />
+              Settings
             </Link>
           </nav>
 

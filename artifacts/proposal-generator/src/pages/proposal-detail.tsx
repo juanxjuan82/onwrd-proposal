@@ -10,7 +10,7 @@ import {
   getGetProposalQueryKey,
   getListProposalsQueryKey
 } from "@workspace/api-client-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -18,7 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
-import { ExternalLink, Loader2, ArrowLeft, Trash2, CheckCircle2, Eye, Pencil } from "lucide-react";
+import { ExternalLink, Loader2, ArrowLeft, Trash2, CheckCircle2, Eye, Pencil, Sparkles, AlertCircle, ShieldCheck } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
@@ -33,7 +33,16 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import { useEffect, useRef, useState } from "react";
+
+const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
 const proposalSchema = z.object({
   clientName: z.string().min(1, "Client name is required"),
@@ -43,11 +52,334 @@ const proposalSchema = z.object({
 
 type ProposalFormValues = z.infer<typeof proposalSchema>;
 
+interface ProposalSection {
+  id: number;
+  proposalId: number;
+  sectionKey: string;
+  title: string;
+  content: string;
+  status: string;
+  criticFindings: string | null;
+  orderIndex: number;
+  approvedAt?: string | null;
+}
+
+function sectionStatusBadge(status: string) {
+  const cfg: Record<string, { label: string; className: string }> = {
+    not_started: { label: "Not Started", className: "bg-muted text-muted-foreground border-border" },
+    drafted: { label: "Drafted", className: "bg-blue-900/20 text-blue-300 border-blue-900" },
+    needs_review: { label: "Needs Review", className: "bg-orange-900/20 text-orange-400 border-orange-900" },
+    blocked_missing_input: { label: "Needs Input", className: "bg-red-900/20 text-red-400 border-red-900" },
+    approved: { label: "Approved", className: "bg-green-900/20 text-green-400 border-green-900" },
+  };
+  const c = cfg[status] ?? { label: status, className: "bg-muted text-muted-foreground border-border" };
+  return (
+    <span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium ${c.className}`}>
+      {c.label}
+    </span>
+  );
+}
+
+function SectionsPanel({ proposalId }: { proposalId: number }) {
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const [editingSection, setEditingSection] = useState<ProposalSection | null>(null);
+  const [editContent, setEditContent] = useState("");
+  const [overrideReason, setOverrideReason] = useState("");
+  const [showApproveDialog, setShowApproveDialog] = useState(false);
+
+  const { data: sections, isLoading } = useQuery<ProposalSection[]>({
+    queryKey: ["proposal-sections", proposalId],
+    queryFn: async () => {
+      const r = await fetch(`${BASE}/api/proposals/${proposalId}/sections`);
+      if (!r.ok) throw new Error("Failed to load sections");
+      return r.json();
+    },
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (!data) return 3000;
+      const hasNotStarted = data.some((s) => s.status === "not_started" && !s.content);
+      return hasNotStarted ? 3000 : false;
+    },
+  });
+
+  const updateSection = useMutation({
+    mutationFn: async ({ sectionId, content, status }: { sectionId: number; content?: string; status?: string }) => {
+      const r = await fetch(`${BASE}/api/proposals/${proposalId}/sections/${sectionId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content, status }),
+      });
+      if (!r.ok) throw new Error("Failed to update section");
+      return r.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["proposal-sections", proposalId] });
+      setEditingSection(null);
+      toast({ title: "Section saved" });
+    },
+    onError: (err) => toast({ title: "Save failed", description: (err as Error).message, variant: "destructive" }),
+  });
+
+  const runCritic = useMutation({
+    mutationFn: async () => {
+      const r = await fetch(`${BASE}/api/proposals/${proposalId}/run-critic`, { method: "POST" });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        throw new Error((e as { error?: string }).error ?? "Critic failed");
+      }
+      return r.json();
+    },
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["proposal-sections", proposalId] });
+      qc.invalidateQueries({ queryKey: getGetProposalQueryKey(proposalId) });
+      const majorCount = data.summary?.filter((s: { severity: string }) => s.severity === "major").length ?? 0;
+      toast({
+        title: "Critic pass complete",
+        description: majorCount > 0 ? `${majorCount} section(s) need review.` : "No major issues found.",
+      });
+    },
+    onError: (err) => toast({ title: "Critic failed", description: (err as Error).message, variant: "destructive" }),
+  });
+
+  const approveForExport = useMutation({
+    mutationFn: async (overrideReason?: string) => {
+      const r = await fetch(`${BASE}/api/proposals/${proposalId}/approve-for-export`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(overrideReason ? { overrideReason } : {}),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        const err = data as { error?: string; blockers?: string[]; hint?: string };
+        throw { message: err.error ?? "Approve failed", blockers: err.blockers ?? [] };
+      }
+      return data;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["proposal-sections", proposalId] });
+      qc.invalidateQueries({ queryKey: getGetProposalQueryKey(proposalId) });
+      qc.invalidateQueries({ queryKey: getListProposalsQueryKey() });
+      setShowApproveDialog(false);
+      toast({ title: "Proposal approved for export" });
+    },
+    onError: (err: { message?: string; blockers?: string[] } | unknown) => {
+      const e = err as { message?: string; blockers?: string[] };
+      if (e.blockers && e.blockers.length > 0) {
+        setShowApproveDialog(true);
+      } else {
+        toast({ title: "Approve failed", description: e.message ?? "Unknown error", variant: "destructive" });
+      }
+    },
+  });
+
+  if (isLoading) {
+    return (
+      <div className="space-y-3 mt-4">
+        {[1, 2, 3].map((i) => <Skeleton key={i} className="h-16 w-full rounded-lg" />)}
+      </div>
+    );
+  }
+
+  if (!sections || sections.length === 0) {
+    return (
+      <div className="mt-4 p-6 border border-dashed rounded-lg bg-card/50 text-center text-sm text-muted-foreground">
+        No sections yet. Generate a proposal from an Opportunity to produce section-by-section content.
+      </div>
+    );
+  }
+
+  const blockedCount = sections.filter((s) => s.status === "blocked_missing_input").length;
+  const needsReviewCount = sections.filter((s) => s.status === "needs_review").length;
+  const approvedCount = sections.filter((s) => s.status === "approved").length;
+  const draftedCount = sections.filter((s) => s.status === "drafted").length;
+  const generatingCount = sections.filter((s) => s.status === "not_started" && !s.content).length;
+
+  return (
+    <div className="space-y-4 mt-4">
+      {/* Toolbar */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex gap-3 text-xs text-muted-foreground">
+          {generatingCount > 0 && <span className="text-yellow-400 animate-pulse">{generatingCount} generating…</span>}
+          {draftedCount > 0 && <span>{draftedCount} drafted</span>}
+          {blockedCount > 0 && <span className="text-red-400">{blockedCount} need input</span>}
+          {needsReviewCount > 0 && <span className="text-orange-400">{needsReviewCount} need review</span>}
+          {approvedCount > 0 && <span className="text-green-400">{approvedCount} approved</span>}
+        </div>
+        <div className="ml-auto flex gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => runCritic.mutate()}
+            disabled={runCritic.isPending || generatingCount > 0}
+          >
+            {runCritic.isPending ? (
+              <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Running…</>
+            ) : (
+              <><Sparkles className="w-3.5 h-3.5 mr-1.5" />Run Critic</>
+            )}
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => approveForExport.mutate(undefined)}
+            disabled={approveForExport.isPending || generatingCount > 0}
+          >
+            {approveForExport.isPending ? (
+              <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Checking…</>
+            ) : (
+              <><ShieldCheck className="w-3.5 h-3.5 mr-1.5" />Approve for Export</>
+            )}
+          </Button>
+        </div>
+      </div>
+
+      {/* Section list */}
+      <div className="space-y-3">
+        {sections.map((section) => (
+          <div key={section.id} className="border rounded-lg bg-card overflow-hidden">
+            <div className="flex items-start gap-3 p-4">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2 mb-1 flex-wrap">
+                  <span className="text-xs font-medium text-muted-foreground">{section.orderIndex + 1}.</span>
+                  <span className="text-sm font-medium text-foreground">{section.title}</span>
+                  {sectionStatusBadge(section.status)}
+                </div>
+                {section.criticFindings && (
+                  <div className="mt-2 p-2.5 rounded bg-orange-900/10 border border-orange-900/30 text-xs text-orange-300 space-y-1">
+                    <div className="flex items-center gap-1.5 font-medium mb-1">
+                      <AlertCircle className="w-3 h-3" /> Critic findings
+                    </div>
+                    <div className="whitespace-pre-wrap">{section.criticFindings}</div>
+                  </div>
+                )}
+                {section.content && section.status !== "not_started" && (
+                  <p className="mt-2 text-xs text-muted-foreground line-clamp-2">
+                    {section.content.replace(/^#+\s.+\n?/m, "").replace(/\*\*/g, "").substring(0, 160)}…
+                  </p>
+                )}
+                {section.status === "not_started" && !section.content && (
+                  <p className="mt-1.5 text-xs text-muted-foreground animate-pulse">Generating…</p>
+                )}
+              </div>
+              <div className="flex gap-1.5 ml-2 flex-shrink-0">
+                {section.status !== "approved" && section.content && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-7 px-2 text-xs"
+                    onClick={() => {
+                      updateSection.mutate({ sectionId: section.id, status: "approved" });
+                    }}
+                    disabled={updateSection.isPending}
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
+                  </Button>
+                )}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2 text-xs"
+                  onClick={() => {
+                    setEditingSection(section);
+                    setEditContent(section.content);
+                  }}
+                  disabled={!section.content}
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                </Button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Edit section dialog */}
+      <Dialog open={!!editingSection} onOpenChange={(o) => !o && setEditingSection(null)}>
+        <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Pencil className="w-4 h-4" />
+              {editingSection?.title}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            {editingSection?.criticFindings && (
+              <div className="p-3 rounded bg-orange-900/10 border border-orange-900/30 text-xs text-orange-300">
+                <div className="font-medium mb-1">Critic findings to address:</div>
+                <div className="whitespace-pre-wrap">{editingSection.criticFindings}</div>
+              </div>
+            )}
+            <Textarea
+              value={editContent}
+              onChange={(e) => setEditContent(e.target.value)}
+              className="min-h-[50vh] font-mono text-sm leading-relaxed"
+            />
+            <p className="text-xs text-muted-foreground">
+              Use Markdown. Replace <code className="bg-muted px-1 rounded">[NEEDS ONWRD INPUT: …]</code> with actual content.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setEditingSection(null)}>Cancel</Button>
+            <Button
+              variant="secondary"
+              onClick={() => editingSection && updateSection.mutate({ sectionId: editingSection.id, content: editContent, status: "drafted" })}
+              disabled={updateSection.isPending}
+            >
+              Save as Draft
+            </Button>
+            <Button
+              onClick={() => editingSection && updateSection.mutate({ sectionId: editingSection.id, content: editContent, status: "approved" })}
+              disabled={updateSection.isPending}
+            >
+              {updateSection.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <><CheckCircle2 className="w-4 h-4 mr-1.5" />Save & Approve</>}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Override approval dialog */}
+      <Dialog open={showApproveDialog} onOpenChange={setShowApproveDialog}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Quality Gate Issues</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <p className="text-sm text-muted-foreground">
+              Some sections have unresolved issues. Provide a reason to override and export anyway.
+            </p>
+            <div className="space-y-1">
+              <Label>Override Reason</Label>
+              <Textarea
+                value={overrideReason}
+                onChange={(e) => setOverrideReason(e.target.value)}
+                placeholder="e.g. Deadline is today, placeholders will be filled in the Google Doc manually."
+                rows={3}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setShowApproveDialog(false)}>Cancel</Button>
+            <Button
+              onClick={() => {
+                approveForExport.mutate(overrideReason || "Override by user");
+              }}
+              disabled={approveForExport.isPending}
+            >
+              Override & Approve
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
 export default function ProposalDetail() {
   const [, params] = useRoute("/proposals/:id");
   const id = Number(params?.id);
   const [, setLocation] = useLocation();
   const [previewMode, setPreviewMode] = useState(false);
+  const [activeTab, setActiveTab] = useState<"content" | "sections">("content");
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -55,6 +387,18 @@ export default function ProposalDetail() {
   const updateProposal = useUpdateProposal();
   const deleteProposal = useDeleteProposal();
   const exportToDocs = useExportToGoogleDocs();
+
+  const { data: sections } = useQuery<ProposalSection[]>({
+    queryKey: ["proposal-sections", id],
+    queryFn: async () => {
+      const r = await fetch(`${BASE}/api/proposals/${id}/sections`);
+      if (!r.ok) return [];
+      return r.json();
+    },
+    enabled: !isNaN(id),
+  });
+
+  const hasSections = sections && sections.length > 0;
 
   const form = useForm<ProposalFormValues>({
     resolver: zodResolver(proposalSchema),
@@ -177,6 +521,16 @@ export default function ProposalDetail() {
     );
   }
 
+  const statusLabel: Record<string, string> = {
+    draft: "Draft",
+    exported: "Exported",
+    proposal_drafting: "Drafting",
+    needs_onwrd_input: "Needs Input",
+    ready_for_review: "Ready for Review",
+    approved_for_export: "Approved",
+    exported_to_drive: "Exported",
+  };
+
   return (
     <div className="p-8 max-w-5xl mx-auto">
       <div className="mb-6 flex items-center gap-4">
@@ -184,14 +538,19 @@ export default function ProposalDetail() {
           <ArrowLeft className="w-4 h-4" />
           Back
         </Button>
-        <Badge variant={proposal.status === "exported" ? "success" : "default"}>
-          {proposal.status === "exported" ? "Exported" : "Draft"}
+        <Badge variant={proposal.status === "exported" || proposal.status === "exported_to_drive" ? "success" : "default"}>
+          {statusLabel[proposal.status] ?? proposal.status}
         </Badge>
+        {proposal.status === "approved_for_export" && (
+          <Badge className="bg-green-900/20 text-green-400 border-green-900">
+            <ShieldCheck className="w-3 h-3 mr-1" /> Approved
+          </Badge>
+        )}
       </div>
 
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
         <h1 className="text-4xl font-bold text-white tracking-tight">
-          Edit Proposal
+          {hasSections ? "Proposal Desk" : "Edit Proposal"}
         </h1>
         <div className="flex items-center gap-3">
           {proposal.googleDocUrl && (
@@ -273,96 +632,138 @@ export default function ProposalDetail() {
             </div>
           )}
 
-          <div className="bg-card border rounded-lg overflow-hidden flex flex-col">
-            <div className="bg-muted p-4 border-b flex items-center justify-between">
-              <Label className="font-semibold text-foreground">Document Content</Label>
-              <div className="flex items-center gap-3">
-                <div className="flex rounded-md border overflow-hidden text-sm">
-                  <button
-                    type="button"
-                    onClick={() => setPreviewMode(false)}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 transition-colors ${
-                      !previewMode
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-background text-muted-foreground hover:bg-accent"
-                    }`}
-                  >
-                    <Pencil className="w-3.5 h-3.5" />
-                    Edit
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setPreviewMode(true)}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 transition-colors ${
-                      previewMode
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-background text-muted-foreground hover:bg-accent"
-                    }`}
-                  >
-                    <Eye className="w-3.5 h-3.5" />
-                    Preview
-                  </button>
-                </div>
-                <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-7 object-contain" />
-              </div>
+          {/* Tab bar — show sections tab only when sections exist */}
+          {hasSections && (
+            <div className="flex rounded-md border overflow-hidden text-sm w-fit">
+              <button
+                type="button"
+                onClick={() => setActiveTab("content")}
+                className={`flex items-center gap-1.5 px-4 py-2 transition-colors ${
+                  activeTab === "content"
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-background text-muted-foreground hover:bg-accent"
+                }`}
+              >
+                <Pencil className="w-3.5 h-3.5" />
+                Full Document
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveTab("sections")}
+                className={`flex items-center gap-1.5 px-4 py-2 transition-colors ${
+                  activeTab === "sections"
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-background text-muted-foreground hover:bg-accent"
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                Sections
+                {sections.filter((s) => s.status === "blocked_missing_input" || s.status === "needs_review").length > 0 && (
+                  <span className="ml-1 bg-orange-500 text-white rounded-full w-4 h-4 flex items-center justify-center text-[10px] font-bold">
+                    {sections.filter((s) => s.status === "blocked_missing_input" || s.status === "needs_review").length}
+                  </span>
+                )}
+              </button>
             </div>
-            <FormField
-              control={form.control}
-              name="proposalContent"
-              render={({ field }) => (
-                <FormItem className="flex-1 space-y-0">
-                  <FormControl>
-                    {previewMode ? (
-                      <div
-                        className="min-h-[600px] p-8 font-sans text-base leading-relaxed prose prose-sm max-w-none
-                          [&_table]:w-full [&_table]:border-collapse [&_table]:text-sm
-                          [&_th]:border [&_th]:border-border [&_th]:bg-muted [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:font-semibold
-                          [&_td]:border [&_td]:border-border [&_td]:px-3 [&_td]:py-2 [&_td]:align-top
-                          [&_tr:nth-child(even)_td]:bg-muted/30"
-                      >
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {field.value}
-                        </ReactMarkdown>
-                      </div>
-                    ) : (
-                      <Textarea
-                        {...field}
-                        className="min-h-[600px] border-0 focus-visible:ring-0 rounded-none resize-y p-8 font-sans text-base leading-relaxed"
-                        data-testid="input-proposal-content"
-                      />
-                    )}
-                  </FormControl>
-                  <FormMessage className="px-8 pb-4" />
-                </FormItem>
-              )}
-            />
-          </div>
+          )}
 
-          <div className="flex justify-end gap-4 pt-4">
-            <Button 
-              type="submit"
-              variant="secondary"
-              disabled={updateProposal.isPending || exportToDocs.isPending}
-              data-testid="button-save"
-            >
-              {updateProposal.isPending && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
-              Save Changes
-            </Button>
-            <Button 
-              type="button"
-              disabled={updateProposal.isPending || exportToDocs.isPending}
-              onClick={handleExport}
-              className="bg-[#0000FF] hover:bg-[#0000FF] text-white border border-[#0000FF]"
-              data-testid="button-export"
-            >
-              {exportToDocs.isPending ? (
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              ) : (
-                <CheckCircle2 className="w-4 h-4 mr-2" />
-              )}
-              Export to Google Docs
-            </Button>
-          </div>
+          {/* Sections panel */}
+          {hasSections && activeTab === "sections" ? (
+            <SectionsPanel proposalId={id} />
+          ) : (
+            <div className="bg-card border rounded-lg overflow-hidden flex flex-col">
+              <div className="bg-muted p-4 border-b flex items-center justify-between">
+                <Label className="font-semibold text-foreground">Document Content</Label>
+                <div className="flex items-center gap-3">
+                  <div className="flex rounded-md border overflow-hidden text-sm">
+                    <button
+                      type="button"
+                      onClick={() => setPreviewMode(false)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 transition-colors ${
+                        !previewMode
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-background text-muted-foreground hover:bg-accent"
+                      }`}
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPreviewMode(true)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 transition-colors ${
+                        previewMode
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-background text-muted-foreground hover:bg-accent"
+                      }`}
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      Preview
+                    </button>
+                  </div>
+                  <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-7 object-contain" />
+                </div>
+              </div>
+              <FormField
+                control={form.control}
+                name="proposalContent"
+                render={({ field }) => (
+                  <FormItem className="flex-1 space-y-0">
+                    <FormControl>
+                      {previewMode ? (
+                        <div
+                          className="min-h-[600px] p-8 font-sans text-base leading-relaxed prose prose-sm max-w-none
+                            [&_table]:w-full [&_table]:border-collapse [&_table]:text-sm
+                            [&_th]:border [&_th]:border-border [&_th]:bg-muted [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:font-semibold
+                            [&_td]:border [&_td]:border-border [&_td]:px-3 [&_td]:py-2 [&_td]:align-top
+                            [&_tr:nth-child(even)_td]:bg-muted/30"
+                        >
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {field.value}
+                          </ReactMarkdown>
+                        </div>
+                      ) : (
+                        <Textarea
+                          {...field}
+                          className="min-h-[600px] border-0 focus-visible:ring-0 rounded-none resize-y p-8 font-sans text-base leading-relaxed"
+                          data-testid="input-proposal-content"
+                        />
+                      )}
+                    </FormControl>
+                    <FormMessage className="px-8 pb-4" />
+                  </FormItem>
+                )}
+              />
+            </div>
+          )}
+
+          {activeTab === "content" && (
+            <div className="flex justify-end gap-4 pt-4">
+              <Button 
+                type="submit"
+                variant="secondary"
+                disabled={updateProposal.isPending || exportToDocs.isPending}
+                data-testid="button-save"
+              >
+                {updateProposal.isPending && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+                Save Changes
+              </Button>
+              <Button 
+                type="button"
+                disabled={updateProposal.isPending || exportToDocs.isPending}
+                onClick={handleExport}
+                className="bg-[#0000FF] hover:bg-[#0000FF] text-white border border-[#0000FF]"
+                data-testid="button-export"
+              >
+                {exportToDocs.isPending ? (
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4 mr-2" />
+                )}
+                Export to Google Docs
+              </Button>
+            </div>
+          )}
         </form>
       </Form>
     </div>

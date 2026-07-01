@@ -1,0 +1,111 @@
+Build ONWRD Proposal Desk as a sturdy RFP-to-proposal workflow, not just a proposal generator.
+
+Current stack:
+- Monorepo
+- Frontend: React + Vite + Tailwind/shadcn in artifacts/proposal-generator
+- Backend: Express API in artifacts/api-server
+- Database: PostgreSQL via Drizzle
+- AI: OpenAI for extraction, scoring, retrieval-grounded generation, and critique
+- Integrations: Google Drive/Docs OAuth2, SMTP email, PDF/DOCX/TXT parsing
+
+Primary workflow:
+1. User manually creates or imports an opportunity/RFP.
+2. Backend extracts structured tender metadata and requirements using OpenAI Structured Outputs.
+3. System scores bid/no-bid fit for ONWRD.
+4. User can generate a proposal from the tender.
+5. Proposal is drafted section-by-section using approved ONWRD knowledge/case studies only.
+6. Critic pass flags unsupported claims, vague language, missing compliance items, and missing ONWRD inputs.
+7. User reviews/approves sections.
+8. Export creates a Google Doc inside the configured ONWRD Shared Drive folder.
+9. Team gets immediate access through inherited folder permissions or a configured Google Group permission.
+10. SMTP notification sends the exported doc link and review status.
+
+Add/extend schema:
+- opportunity_sources
+- scan_runs
+- tenders
+- tender_documents
+- tender_requirements
+- bid_scores
+- knowledge_documents
+- knowledge_chunks
+- case_studies
+- approved_snippets
+- proposals
+- proposal_sections
+- proposal_generation_runs
+- proposal_review_events
+- google_exports
+- notifications
+
+Required tender statuses:
+opportunity_found, screened, recommended, no_bid, requirements_extracted, proposal_drafting, needs_onwrd_input, ready_for_review, approved_for_export, exported_to_drive, submitted, won, lost, archived.
+
+Required proposal section statuses:
+not_started, drafted, needs_review, approved, blocked_missing_input.
+
+Add backend routes:
+GET  /api/opportunities
+POST /api/opportunities
+POST /api/opportunities/scan
+GET  /api/opportunities/:id
+POST /api/opportunities/:id/extract-requirements
+POST /api/opportunities/:id/score
+POST /api/opportunities/:id/generate-proposal
+
+GET  /api/proposals
+GET  /api/proposals/:id
+PUT  /api/proposals/:id
+GET  /api/proposals/:id/sections
+PUT  /api/proposals/:id/sections/:sectionId
+POST /api/proposals/:id/run-critic
+POST /api/proposals/:id/approve-for-export
+POST /api/proposals/:id/export-to-google-docs
+
+GET  /api/knowledge
+POST /api/knowledge
+POST /api/knowledge/import-file
+POST /api/knowledge/:id/approve-for-reuse
+
+GET  /api/auth/google
+GET  /api/auth/google/callback
+GET  /api/auth/status
+
+POST /api/extract-text
+
+Google Drive requirements:
+- Store exported docs in a configured ONWRD Shared Drive folder ID.
+- Use supportsAllDrives=true for Drive file operations where needed.
+- Prefer inherited folder permissions.
+- Optionally apply a Google Group writer/commenter permission after export.
+- Store googleDocUrl, googleFileId, driveFolderId, exportedAt, exportedBy.
+
+AI requirements:
+- Use structured JSON schemas for tender extraction, requirements extraction, and bid scoring.
+- Never freeform-parse critical extraction data.
+- Proposal writing must be plain English, specific, and non-jargony.
+- Do not invent ONWRD credentials, metrics, clients, or outcomes.
+- If a claim is not supported by approved ONWRD knowledge, insert [NEEDS ONWRD INPUT].
+- Generate proposal by sections, not as one giant markdown blob.
+- Store generation runs, model used, prompt version, retrieved knowledge IDs, and critique findings.
+
+Quality gates:
+- Export blocked if any mandatory requirement is unanswered.
+- Export blocked if any proposal section is blocked_missing_input.
+- Export blocked if critic finds unsupported ONWRD claims.
+- Allow manual override only with reason stored in proposal_review_events.
+
+Frontend pages:
+- /intake public brief intake
+- / dashboard with recommended opportunities and recent proposals
+- /new manual proposal/opportunity creator
+- /opportunities opportunity database
+- /opportunities/:id opportunity view, score, requirements, generate proposal
+- /proposals/:id section editor, review, critic findings, export
+- /knowledge ONWRD knowledge/case study/snippet library
+- /settings/google Google Drive connection and folder configuration
+
+Build v1 first:
+Manual opportunity upload/paste → requirement extraction → bid score → section proposal draft → critic pass → Google Doc export → email notification.
+
+Do not build scheduled source scanners until the manual workflow works end to end.
