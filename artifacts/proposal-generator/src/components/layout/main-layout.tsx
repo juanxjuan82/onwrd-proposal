@@ -20,7 +20,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
             <img
               src="/onwrd-logo-white.png"
               alt="ONWRD"
-              className="h-7 w-full object-contain object-left"
+              className="h-10 w-full object-contain object-left"
             />
           </div>
 
