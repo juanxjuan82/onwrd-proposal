@@ -20,17 +20,17 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
             <img
               src="/onwrd-logo-white.png"
               alt="ONWRD"
-              className="h-7 object-contain object-left"
+              className="h-7 w-full object-contain object-left"
             />
           </div>
 
           <nav className="space-y-1 -mx-6">
             <Link href="/" className={navItem(location === "/")} data-testid="nav-home">
-              <LayoutDashboard className="w-4 h-4" />
+              <LayoutDashboard className="w-5 h-5 flex-shrink-0" />
               Dashboard
             </Link>
             <Link href="/new" className={navItem(location === "/new")} data-testid="nav-new">
-              <Plus className="w-4 h-4" />
+              <Plus className="w-5 h-5 flex-shrink-0" />
               New Proposal
             </Link>
             <Link
@@ -38,7 +38,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
               className={navItem(location.startsWith("/tenders"))}
               data-testid="nav-tenders"
             >
-              <Briefcase className="w-4 h-4" />
+              <Briefcase className="w-5 h-5 flex-shrink-0" />
               Tenders
             </Link>
           </nav>
