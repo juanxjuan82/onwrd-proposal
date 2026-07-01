@@ -1,0 +1,559 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: API specification
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: proposals
+    description: Proposal generation operations
+  - name: tenders
+    description: Tender database operations
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      description: Returns server health status
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  /proposals:
+    get:
+      operationId: listProposals
+      tags: [proposals]
+      summary: List all proposals
+      responses:
+        "200":
+          description: List of proposals
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Proposal"
+    post:
+      operationId: createProposal
+      tags: [proposals]
+      summary: Create a new proposal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProposalBody"
+      responses:
+        "201":
+          description: Created proposal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Proposal"
+
+  /proposals/{id}:
+    get:
+      operationId: getProposal
+      tags: [proposals]
+      summary: Get a proposal
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Proposal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Proposal"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    put:
+      operationId: updateProposal
+      tags: [proposals]
+      summary: Update a proposal
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProposalBody"
+      responses:
+        "200":
+          description: Updated proposal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Proposal"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: deleteProposal
+      tags: [proposals]
+      summary: Delete a proposal
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /proposals/parse-brief:
+    post:
+      operationId: parseBrief
+      tags: [proposals]
+      summary: Parse a project brief and generate a proposal using AI
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ParseBriefBody"
+      responses:
+        "200":
+          description: Generated proposal content
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ParseBriefResponse"
+
+  /tenders:
+    get:
+      operationId: listTenders
+      tags: [tenders]
+      summary: List all tenders
+      parameters:
+        - name: recommended
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: If true, only return tenders with recommendationScore > 0
+      responses:
+        "200":
+          description: List of tenders
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Tender"
+    post:
+      operationId: createTender
+      tags: [tenders]
+      summary: Create a new tender
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTenderBody"
+      responses:
+        "201":
+          description: Created tender
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tender"
+
+  /tenders/extract-from-text:
+    post:
+      operationId: extractTenderFromText
+      tags: [tenders]
+      summary: Use AI to extract a structured tender from pasted text
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExtractTenderFromTextBody"
+      responses:
+        "201":
+          description: Created tender
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tender"
+        "400":
+          description: Could not extract a tender from the text
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /tenders/import-csv:
+    post:
+      operationId: importTendersCsv
+      tags: [tenders]
+      summary: Import tenders from CSV text
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ImportTendersCsvBody"
+      responses:
+        "200":
+          description: Import result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportTendersCsvResponse"
+
+  /tenders/{id}:
+    get:
+      operationId: getTender
+      tags: [tenders]
+      summary: Get a tender
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Tender
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tender"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      operationId: deleteTender
+      tags: [tenders]
+      summary: Delete a tender
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /tenders/{id}/generate-proposal:
+    post:
+      operationId: generateProposalFromTender
+      tags: [tenders]
+      summary: Generate a proposal draft from a tender using AI
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "201":
+          description: Created proposal
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Proposal"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /proposals/{id}/export-to-google-docs:
+    post:
+      operationId: exportToGoogleDocs
+      tags: [proposals]
+      summary: Export a proposal to Google Docs
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Google Docs export result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GoogleDocsExportResponse"
+        "404":
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+      required:
+        - status
+
+    Proposal:
+      type: object
+      properties:
+        id:
+          type: integer
+        clientName:
+          type: string
+        industry:
+          type: string
+        status:
+          type: string
+          enum: [draft, exported]
+        briefText:
+          type: string
+        proposalContent:
+          type: string
+        googleDocUrl:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - clientName
+        - industry
+        - status
+        - briefText
+        - proposalContent
+        - createdAt
+        - updatedAt
+
+    CreateProposalBody:
+      type: object
+      properties:
+        clientName:
+          type: string
+        industry:
+          type: string
+        briefText:
+          type: string
+        proposalContent:
+          type: string
+      required:
+        - clientName
+        - industry
+        - briefText
+        - proposalContent
+
+    UpdateProposalBody:
+      type: object
+      properties:
+        clientName:
+          type: string
+        industry:
+          type: string
+        proposalContent:
+          type: string
+        status:
+          type: string
+          enum: [draft, exported]
+
+    ParseBriefBody:
+      type: object
+      properties:
+        briefText:
+          type: string
+      required:
+        - briefText
+
+    ParseBriefResponse:
+      type: object
+      properties:
+        clientName:
+          type: string
+        industry:
+          type: string
+        proposalContent:
+          type: string
+      required:
+        - clientName
+        - industry
+        - proposalContent
+
+    GoogleDocsExportResponse:
+      type: object
+      properties:
+        docId:
+          type: string
+        docUrl:
+          type: string
+        title:
+          type: string
+      required:
+        - docId
+        - docUrl
+        - title
+
+    Tender:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        agency:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+        deadline:
+          type: string
+          format: date-time
+          nullable: true
+        valueAmount:
+          type: string
+          nullable: true
+        sourceUrl:
+          type: string
+          nullable: true
+        contactInfo:
+          type: string
+          nullable: true
+        status:
+          type: string
+        recommendationScore:
+          type: integer
+        proposalId:
+          type: integer
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required:
+        - id
+        - title
+        - agency
+        - description
+        - category
+        - status
+        - recommendationScore
+        - createdAt
+        - updatedAt
+
+    CreateTenderBody:
+      type: object
+      properties:
+        title:
+          type: string
+        agency:
+          type: string
+        description:
+          type: string
+        category:
+          type: string
+        deadline:
+          type: string
+          format: date-time
+          nullable: true
+        valueAmount:
+          type: string
+          nullable: true
+        sourceUrl:
+          type: string
+          nullable: true
+        contactInfo:
+          type: string
+          nullable: true
+      required:
+        - title
+        - agency
+        - description
+
+    ExtractTenderFromTextBody:
+      type: object
+      properties:
+        text:
+          type: string
+        sourceUrl:
+          type: string
+          nullable: true
+      required:
+        - text
+
+    ImportTendersCsvBody:
+      type: object
+      properties:
+        csv:
+          type: string
+      required:
+        - csv
+
+    ImportTendersCsvResponse:
+      type: object
+      properties:
+        imported:
+          type: integer
+        skipped:
+          type: integer
+      required:
+        - imported
+        - skipped
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error

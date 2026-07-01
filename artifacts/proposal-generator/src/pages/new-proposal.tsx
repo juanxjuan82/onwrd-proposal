@@ -1,0 +1,798 @@
+import { useState, useEffect, useRef } from "react";
+import { useLocation } from "wouter";
+import { useForm, Controller } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import * as z from "zod";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import {
+  useParseBrief,
+  useCreateProposal,
+  useExportToGoogleDocs,
+  getListProposalsQueryKey,
+} from "@workspace/api-client-react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useToast } from "@/hooks/use-toast";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
+import {
+  ExternalLink,
+  Loader2,
+  CheckCircle2,
+  FileText,
+  Eye,
+  Pencil,
+} from "lucide-react";
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
+
+// ─── Intake form schema ────────────────────────────────────────────────────
+const intakeSchema = z.object({
+  orgName: z.string().min(1, "Organisation name is required"),
+  website: z.string().optional(),
+  industry: z.string().min(1, "Industry / service category is required"),
+  yearsOperating: z.string().min(1, "Please select how long you've been operating"),
+  objectives: z.array(z.string()).min(1, "Please select at least one marketing objective"),
+  objectivesOther: z.string().optional(),
+  services: z.array(z.string()).min(1, "Please select at least one service area"),
+  servicesOther: z.string().optional(),
+  challenges: z.string().min(1, "Please describe your marketing challenges"),
+  successCriteria: z.string().min(1, "Please describe your success criteria"),
+  idealStart: z.string().min(1, "Please select your ideal start time"),
+});
+
+type IntakeValues = z.infer<typeof intakeSchema>;
+
+// ─── Proposal editor schema ────────────────────────────────────────────────
+const proposalSchema = z.object({
+  clientName: z.string().min(1, "Client name is required"),
+  industry: z.string().min(1, "Industry is required"),
+  proposalContent: z.string().min(1, "Proposal content is required"),
+});
+
+type ProposalFormValues = z.infer<typeof proposalSchema>;
+
+// ─── Options ──────────────────────────────────────────────────────────────
+const YEARS_OPTIONS = [
+  "Less than 1 year",
+  "1–3 years",
+  "3–5 years",
+  "5–10 years",
+  "10+ years",
+];
+
+const OBJECTIVE_OPTIONS = [
+  "Brand Awareness",
+  "Lead Generation",
+  "Customer Retention",
+  "Social Media Presence",
+  "Increased Website Traffic",
+  "Sales Conversion",
+  "Thought Leadership",
+  "Other",
+];
+
+const SERVICE_OPTIONS = [
+  "Marketing Communication Strategy",
+  "Content Marketing & Creation",
+  "Public Relations",
+  "Graphic Design",
+  "Website Design & Development",
+  "Other",
+];
+
+const START_OPTIONS = [
+  "Immediately",
+  "Within 1 month",
+  "1–3 months",
+  "3–6 months",
+  "Not yet decided",
+];
+
+// ─── Format intake data → brief text for the AI ───────────────────────────
+function formatBrief(v: IntakeValues): string {
+  const today = new Date().toISOString().split("T")[0];
+
+  const objectives = [
+    ...v.objectives.filter((o) => o !== "Other"),
+    ...(v.objectives.includes("Other") && v.objectivesOther
+      ? [v.objectivesOther]
+      : []),
+  ].join(", ");
+
+  const services = [
+    ...v.services.filter((s) => s !== "Other"),
+    ...(v.services.includes("Other") && v.servicesOther
+      ? [v.servicesOther]
+      : []),
+  ].join(", ");
+
+  return `Project Brief
+
+Date: ${today}
+Potential Client: ${v.orgName}
+Project Name: ${v.orgName}
+
+Company Information
+Company: ${v.orgName}
+Website: ${v.website || "n/a"}
+Service Category: ${v.industry}
+Product/Service Description: ${v.yearsOperating}, ${v.industry}
+
+Project Information
+Marketing Objectives: ${objectives}
+Assistance Needed: ${services}, ${v.challenges}
+Success Criteria: ${v.successCriteria}
+
+Deliverables
+${v.challenges}
+
+Timing and Key Dates
+Ideal time to start: ${v.idealStart}
+Proposal submission (ONWRD → Client): ${today} + 10 days
+`.trim();
+}
+
+// ─── Checkbox group helper ─────────────────────────────────────────────────
+function CheckboxGroup({
+  options,
+  value,
+  onChange,
+}: {
+  options: string[];
+  value: string[];
+  onChange: (val: string[]) => void;
+}) {
+  const toggle = (opt: string) => {
+    onChange(
+      value.includes(opt) ? value.filter((v) => v !== opt) : [...value, opt],
+    );
+  };
+  return (
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+      {options.map((opt) => (
+        <label
+          key={opt}
+          className={`flex items-center gap-2.5 rounded-lg border px-3 py-2.5 text-sm cursor-pointer transition-colors
+            ${value.includes(opt) ? "border-primary bg-primary/5 text-primary font-medium" : "border-border bg-background hover:border-primary/40"}`}
+        >
+          <input
+            type="checkbox"
+            className="accent-primary"
+            checked={value.includes(opt)}
+            onChange={() => toggle(opt)}
+          />
+          {opt}
+        </label>
+      ))}
+    </div>
+  );
+}
+
+// ─── Main component ────────────────────────────────────────────────────────
+export default function NewProposal() {
+  const [step, setStep] = useState<1 | 2>(1);
+  const [briefText, setBriefText] = useState("");
+  const [isExporting, setIsExporting] = useState(false);
+  const [previewMode, setPreviewMode] = useState(false);
+  const [, setLocation] = useLocation();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+
+  const parseBrief = useParseBrief();
+  const createProposal = useCreateProposal();
+  const exportToDocs = useExportToGoogleDocs();
+
+  // Intake form
+  const intake = useForm<IntakeValues>({
+    resolver: zodResolver(intakeSchema),
+    defaultValues: {
+      orgName: "",
+      website: "",
+      industry: "",
+      yearsOperating: "",
+      objectives: [],
+      objectivesOther: "",
+      services: [],
+      servicesOther: "",
+      challenges: "",
+      successCriteria: "",
+      idealStart: "",
+    },
+  });
+
+  // Proposal editor form
+  const form = useForm<ProposalFormValues>({
+    resolver: zodResolver(proposalSchema),
+    defaultValues: { clientName: "", industry: "", proposalContent: "" },
+  });
+
+  // Progress bar
+  const ESTIMATED_SECONDS = 50;
+  const STATUS_MESSAGES = [
+    "Reading your brief...",
+    "Identifying opportunities...",
+    "Building strategic approach...",
+    "Scoping phases of work...",
+    "Structuring investment and timeline...",
+    "Drafting proposal document...",
+    "Finalising proposal...",
+  ];
+  const [genProgress, setGenProgress] = useState(0);
+  const genIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const genStartRef = useRef<number>(0);
+
+  useEffect(() => {
+    if (parseBrief.isPending) {
+      setGenProgress(0);
+      genStartRef.current = Date.now();
+      genIntervalRef.current = setInterval(() => {
+        const elapsed = (Date.now() - genStartRef.current) / 1000;
+        setGenProgress(Math.min((elapsed / ESTIMATED_SECONDS) * 95, 95));
+      }, 200);
+    } else {
+      if (genIntervalRef.current) {
+        clearInterval(genIntervalRef.current);
+        genIntervalRef.current = null;
+      }
+      setGenProgress(0);
+    }
+    return () => {
+      if (genIntervalRef.current) clearInterval(genIntervalRef.current);
+    };
+  }, [parseBrief.isPending]);
+
+  const handleIntakeSubmit = (values: IntakeValues) => {
+    const brief = formatBrief(values);
+    setBriefText(brief);
+
+    parseBrief.mutate(
+      { data: { briefText: brief } },
+      {
+        onSuccess: (data) => {
+          form.setValue("clientName", data.clientName);
+          form.setValue("industry", data.industry);
+          form.setValue("proposalContent", data.proposalContent);
+          setStep(2);
+        },
+        onError: (error) => {
+          toast({
+            title: "Generation failed",
+            description: error.error || "An unexpected error occurred.",
+            variant: "destructive",
+          });
+        },
+      },
+    );
+  };
+
+  const handleSave = (values: ProposalFormValues) => {
+    createProposal.mutate(
+      { data: { briefText, ...values } },
+      {
+        onSuccess: (proposal) => {
+          queryClient.invalidateQueries({ queryKey: getListProposalsQueryKey() });
+          toast({ title: "Saved", description: "Proposal saved successfully." });
+          setLocation(`/proposals/${proposal.id}`);
+        },
+        onError: (error) => {
+          toast({
+            title: "Save failed",
+            description: error.error || "Could not save proposal.",
+            variant: "destructive",
+          });
+        },
+      },
+    );
+  };
+
+  const handleExport = async (values: ProposalFormValues) => {
+    setIsExporting(true);
+    createProposal.mutate(
+      { data: { briefText, ...values } },
+      {
+        onSuccess: (proposal) => {
+          queryClient.invalidateQueries({ queryKey: getListProposalsQueryKey() });
+          exportToDocs.mutate(
+            { id: proposal.id },
+            {
+              onSuccess: (data) => {
+                toast({
+                  title: "Exported successfully",
+                  description: (
+                    <div className="flex flex-col gap-2 mt-2">
+                      <p>Document created in Google Docs.</p>
+                      <Button variant="outline" size="sm" asChild className="w-fit">
+                        <a
+                          href={data.docUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-2"
+                        >
+                          <ExternalLink className="w-4 h-4" />
+                          Open Document
+                        </a>
+                      </Button>
+                    </div>
+                  ),
+                  duration: 10000,
+                });
+                setLocation(`/proposals/${proposal.id}`);
+              },
+              onError: (error) => {
+                toast({
+                  title: "Export failed",
+                  description: error.error || "Could not export to Google Docs.",
+                  variant: "destructive",
+                });
+              },
+              onSettled: () => setIsExporting(false),
+            },
+          );
+        },
+        onError: (error) => {
+          setIsExporting(false);
+          toast({
+            title: "Save failed before export",
+            description: error.error || "Could not save proposal.",
+            variant: "destructive",
+          });
+        },
+      },
+    );
+  };
+
+  const objectivesValue = intake.watch("objectives");
+  const servicesValue = intake.watch("services");
+
+  return (
+    <div className="p-8 max-w-4xl mx-auto">
+      {/* Header */}
+      <div className="mb-8">
+        <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">
+          New Proposal
+        </h1>
+        <div className="flex items-center gap-4 text-sm font-medium">
+          <span className={step === 1 ? "text-primary" : "text-muted-foreground"}>
+            1. Project Brief
+          </span>
+          <span className="text-muted-foreground">→</span>
+          <span className={step === 2 ? "text-primary" : "text-muted-foreground"}>
+            2. Review & Export
+          </span>
+        </div>
+      </div>
+
+      {/* ── Step 1: generating (progress bar) ── */}
+      {step === 1 && parseBrief.isPending && (
+        <div className="bg-card border rounded-lg p-10 flex flex-col items-center justify-center gap-6 min-h-[400px]">
+          <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center">
+            <FileText className="w-6 h-6 text-primary" />
+          </div>
+          <div className="text-center space-y-1">
+            <p className="text-lg font-semibold text-foreground">Generating your proposal</p>
+            <p className="text-sm text-muted-foreground">
+              {STATUS_MESSAGES[Math.min(
+                Math.floor((genProgress / 95) * STATUS_MESSAGES.length),
+                STATUS_MESSAGES.length - 1,
+              )]}
+            </p>
+          </div>
+          <div className="w-full max-w-md space-y-2">
+            <Progress value={genProgress} className="h-2" />
+            <div className="flex justify-between text-xs text-muted-foreground">
+              <span>{Math.round(genProgress)}%</span>
+              <span>
+                {genProgress < 95
+                  ? `~${Math.max(1, Math.round(ESTIMATED_SECONDS - (genProgress / 95) * ESTIMATED_SECONDS))}s remaining`
+                  : "Almost done…"}
+              </span>
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            The AI is writing a full 15-section proposal — this usually takes about 45–60 seconds.
+          </p>
+        </div>
+      )}
+
+      {/* ── Step 1: intake form ── */}
+      {step === 1 && !parseBrief.isPending && (
+        <form
+          onSubmit={intake.handleSubmit(handleIntakeSubmit)}
+          className="space-y-6"
+          noValidate
+        >
+          {/* Section: About Your Organisation */}
+          <div className="bg-card border rounded-lg overflow-hidden">
+            <div className="bg-muted px-6 py-4 border-b">
+              <h2 className="font-semibold text-foreground">About Your Organisation</h2>
+            </div>
+            <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-5">
+              {/* Org name */}
+              <div className="md:col-span-2">
+                <Label htmlFor="orgName" className="mb-1.5 block">
+                  Organisation Name <span className="text-destructive">*</span>
+                </Label>
+                <Input
+                  id="orgName"
+                  placeholder="e.g. Acme Corporation"
+                  {...intake.register("orgName")}
+                />
+                {intake.formState.errors.orgName && (
+                  <p className="text-xs text-destructive mt-1">
+                    {intake.formState.errors.orgName.message}
+                  </p>
+                )}
+              </div>
+
+              {/* Website */}
+              <div>
+                <Label htmlFor="website" className="mb-1.5 block">
+                  Website <span className="text-muted-foreground text-xs">(optional)</span>
+                </Label>
+                <Input
+                  id="website"
+                  placeholder="https://yourwebsite.com"
+                  {...intake.register("website")}
+                />
+              </div>
+
+              {/* Industry */}
+              <div>
+                <Label htmlFor="industry" className="mb-1.5 block">
+                  Industry / Service Category <span className="text-destructive">*</span>
+                </Label>
+                <Input
+                  id="industry"
+                  placeholder="e.g. Technology, Healthcare, Retail"
+                  {...intake.register("industry")}
+                />
+                {intake.formState.errors.industry && (
+                  <p className="text-xs text-destructive mt-1">
+                    {intake.formState.errors.industry.message}
+                  </p>
+                )}
+              </div>
+
+              {/* Years operating */}
+              <div className="md:col-span-2">
+                <Label className="mb-1.5 block">
+                  How long has your organisation been operating? <span className="text-destructive">*</span>
+                </Label>
+                <div className="flex flex-wrap gap-2">
+                  {YEARS_OPTIONS.map((opt) => (
+                    <label
+                      key={opt}
+                      className={`flex items-center gap-2 rounded-full border px-4 py-1.5 text-sm cursor-pointer transition-colors
+                        ${intake.watch("yearsOperating") === opt
+                          ? "border-primary bg-primary/10 text-primary font-medium"
+                          : "border-border hover:border-primary/40"}`}
+                    >
+                      <input
+                        type="radio"
+                        className="sr-only"
+                        value={opt}
+                        {...intake.register("yearsOperating")}
+                      />
+                      {opt}
+                    </label>
+                  ))}
+                </div>
+                {intake.formState.errors.yearsOperating && (
+                  <p className="text-xs text-destructive mt-1">
+                    {intake.formState.errors.yearsOperating.message}
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Section: Marketing Objectives */}
+          <div className="bg-card border rounded-lg overflow-hidden">
+            <div className="bg-muted px-6 py-4 border-b">
+              <h2 className="font-semibold text-foreground">Marketing Objectives</h2>
+              <p className="text-sm text-muted-foreground mt-0.5">
+                What are your primary marketing objectives? Select all that apply.
+              </p>
+            </div>
+            <div className="p-6 space-y-4">
+              <Controller
+                control={intake.control}
+                name="objectives"
+                render={({ field }) => (
+                  <CheckboxGroup
+                    options={OBJECTIVE_OPTIONS}
+                    value={field.value}
+                    onChange={field.onChange}
+                  />
+                )}
+              />
+              {intake.formState.errors.objectives && (
+                <p className="text-xs text-destructive">
+                  {intake.formState.errors.objectives.message}
+                </p>
+              )}
+              {objectivesValue.includes("Other") && (
+                <div>
+                  <Label className="mb-1.5 block text-sm">Please specify</Label>
+                  <Input
+                    placeholder="Describe your objective..."
+                    {...intake.register("objectivesOther")}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Section: Services & Support */}
+          <div className="bg-card border rounded-lg overflow-hidden">
+            <div className="bg-muted px-6 py-4 border-b">
+              <h2 className="font-semibold text-foreground">Services & Support</h2>
+              <p className="text-sm text-muted-foreground mt-0.5">
+                What marketing services are you interested in? Select all that apply.
+              </p>
+            </div>
+            <div className="p-6 space-y-4">
+              <Controller
+                control={intake.control}
+                name="services"
+                render={({ field }) => (
+                  <CheckboxGroup
+                    options={SERVICE_OPTIONS}
+                    value={field.value}
+                    onChange={field.onChange}
+                  />
+                )}
+              />
+              {intake.formState.errors.services && (
+                <p className="text-xs text-destructive">
+                  {intake.formState.errors.services.message}
+                </p>
+              )}
+              {servicesValue.includes("Other") && (
+                <div>
+                  <Label className="mb-1.5 block text-sm">Please specify</Label>
+                  <Input
+                    placeholder="Describe the service..."
+                    {...intake.register("servicesOther")}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Section: Challenges & Goals */}
+          <div className="bg-card border rounded-lg overflow-hidden">
+            <div className="bg-muted px-6 py-4 border-b">
+              <h2 className="font-semibold text-foreground">Challenges & Goals</h2>
+            </div>
+            <div className="p-6 grid grid-cols-1 gap-5">
+              <div>
+                <Label htmlFor="challenges" className="mb-1.5 block">
+                  What marketing challenges are you facing? <span className="text-destructive">*</span>
+                </Label>
+                <Textarea
+                  id="challenges"
+                  rows={4}
+                  placeholder="Describe the main challenges you'd like help solving..."
+                  {...intake.register("challenges")}
+                />
+                {intake.formState.errors.challenges && (
+                  <p className="text-xs text-destructive mt-1">
+                    {intake.formState.errors.challenges.message}
+                  </p>
+                )}
+              </div>
+              <div>
+                <Label htmlFor="successCriteria" className="mb-1.5 block">
+                  What would a successful outcome look like? <span className="text-destructive">*</span>
+                </Label>
+                <Textarea
+                  id="successCriteria"
+                  rows={4}
+                  placeholder="Describe what success looks like for this engagement..."
+                  {...intake.register("successCriteria")}
+                />
+                {intake.formState.errors.successCriteria && (
+                  <p className="text-xs text-destructive mt-1">
+                    {intake.formState.errors.successCriteria.message}
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Section: Timing */}
+          <div className="bg-card border rounded-lg overflow-hidden">
+            <div className="bg-muted px-6 py-4 border-b">
+              <h2 className="font-semibold text-foreground">Timing</h2>
+            </div>
+            <div className="p-6">
+              <Label className="mb-1.5 block">
+                When would you ideally like to start? <span className="text-destructive">*</span>
+              </Label>
+              <div className="flex flex-wrap gap-2">
+                {START_OPTIONS.map((opt) => (
+                  <label
+                    key={opt}
+                    className={`flex items-center gap-2 rounded-full border px-4 py-1.5 text-sm cursor-pointer transition-colors
+                      ${intake.watch("idealStart") === opt
+                        ? "border-primary bg-primary/10 text-primary font-medium"
+                        : "border-border hover:border-primary/40"}`}
+                  >
+                    <input
+                      type="radio"
+                      className="sr-only"
+                      value={opt}
+                      {...intake.register("idealStart")}
+                    />
+                    {opt}
+                  </label>
+                ))}
+              </div>
+              {intake.formState.errors.idealStart && (
+                <p className="text-xs text-destructive mt-1">
+                  {intake.formState.errors.idealStart.message}
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* Submit */}
+          <div className="flex justify-end pt-2">
+            <Button type="submit" size="lg" className="gap-2">
+              <FileText className="w-4 h-4" />
+              Generate Proposal
+            </Button>
+          </div>
+        </form>
+      )}
+
+      {/* ── Step 2: proposal editor ── */}
+      {step === 2 && (
+        <Form {...form}>
+          <form className="space-y-6" onSubmit={(e) => e.preventDefault()}>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-card p-6 border rounded-lg">
+              <FormField
+                control={form.control}
+                name="clientName"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Client Name</FormLabel>
+                    <FormControl>
+                      <Input {...field} data-testid="input-client-name" />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="industry"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Industry</FormLabel>
+                    <FormControl>
+                      <Input {...field} data-testid="input-industry" />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
+
+            <div className="bg-card border rounded-lg overflow-hidden flex flex-col">
+              <div className="bg-muted p-4 border-b flex items-center justify-between">
+                <Label className="font-semibold text-foreground">Document Content</Label>
+                <div className="flex items-center gap-3">
+                  <div className="flex rounded-md border overflow-hidden text-sm">
+                    <button
+                      type="button"
+                      onClick={() => setPreviewMode(false)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 transition-colors ${
+                        !previewMode
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-background text-muted-foreground hover:bg-accent"
+                      }`}
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                      Edit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPreviewMode(true)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 transition-colors ${
+                        previewMode
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-background text-muted-foreground hover:bg-accent"
+                      }`}
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      Preview
+                    </button>
+                  </div>
+                  <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-7 object-contain" />
+                </div>
+              </div>
+              <FormField
+                control={form.control}
+                name="proposalContent"
+                render={({ field }) => (
+                  <FormItem className="flex-1 space-y-0">
+                    <FormControl>
+                      {previewMode ? (
+                        <div
+                          className="min-h-[600px] p-8 font-sans text-base leading-relaxed prose prose-sm max-w-none
+                            [&_table]:w-full [&_table]:border-collapse [&_table]:text-sm
+                            [&_th]:border [&_th]:border-border [&_th]:bg-muted [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:font-semibold
+                            [&_td]:border [&_td]:border-border [&_td]:px-3 [&_td]:py-2 [&_td]:align-top
+                            [&_tr:nth-child(even)_td]:bg-muted/30"
+                        >
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {field.value}
+                          </ReactMarkdown>
+                        </div>
+                      ) : (
+                        <Textarea
+                          {...field}
+                          className="min-h-[600px] border-0 focus-visible:ring-0 rounded-none resize-y p-8 font-sans text-base leading-relaxed"
+                          data-testid="input-proposal-content"
+                        />
+                      )}
+                    </FormControl>
+                    <FormMessage className="px-8 pb-4" />
+                  </FormItem>
+                )}
+              />
+            </div>
+
+            <div className="flex justify-end gap-4 pt-4">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setStep(1)}
+              >
+                Back
+              </Button>
+              <Button
+                type="button"
+                variant="secondary"
+                disabled={createProposal.isPending || isExporting}
+                onClick={() => form.handleSubmit(handleSave)()}
+                data-testid="button-save-draft"
+              >
+                {createProposal.isPending && !isExporting ? (
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                ) : null}
+                Save Draft
+              </Button>
+              <Button
+                type="button"
+                disabled={createProposal.isPending || isExporting}
+                onClick={() => form.handleSubmit(handleExport)()}
+                className="bg-[#0000FF] hover:bg-[#0000FF] text-white border border-[#0000FF]"
+                data-testid="button-export"
+              >
+                {isExporting ? (
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4 mr-2" />
+                )}
+                Export to Google Docs
+              </Button>
+            </div>
+          </form>
+        </Form>
+      )}
+    </div>
+  );
+}
