@@ -2,16 +2,31 @@ import cron from "node-cron";
 import { runCrawler, seedDefaultSources, seedDefaultSearchProfiles } from "./index.js";
 import nodemailer from "nodemailer";
 import { db } from "@workspace/db";
-import { discoveredTendersTable } from "@workspace/db";
+import { discoveredTendersTable, tenderDigestSettingsTable } from "@workspace/db";
 import { eq, gte, and } from "drizzle-orm";
+
+async function getDigestRecipients(): Promise<{ emails: string[]; enabled: boolean }> {
+  try {
+    const [settings] = await db.select().from(tenderDigestSettingsTable).limit(1);
+    if (settings) {
+      return { emails: JSON.parse(settings.emails), enabled: settings.enabled };
+    }
+  } catch {
+    // fallback to env var
+  }
+  const envEmail = process.env.DIGEST_EMAIL;
+  return { emails: envEmail ? [envEmail] : [], enabled: true };
+}
 
 async function sendDigestEmail(newCount: number): Promise<void> {
   const smtpHost = process.env.SMTP_HOST;
   const smtpUser = process.env.SMTP_USER;
   const smtpPass = process.env.SMTP_PASS;
-  const digestEmail = process.env.DIGEST_EMAIL;
 
-  if (!smtpHost || !smtpUser || !smtpPass || !digestEmail) return;
+  if (!smtpHost || !smtpUser || !smtpPass) return;
+
+  const { emails, enabled } = await getDigestRecipients();
+  if (!enabled || emails.length === 0) return;
 
   try {
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -87,10 +102,12 @@ async function sendDigestEmail(newCount: number): Promise<void> {
 
     await transporter.sendMail({
       from: `"ONWRD Tender Desk" <${smtpUser}>`,
-      to: digestEmail,
+      to: emails.join(", "),
       subject: `[ONWRD] ${pursue.length} new opportunities to pursue — ${new Date().toLocaleDateString()}`,
       html,
     });
+
+    console.log(`[digest email] Sent to ${emails.length} recipient(s): ${emails.join(", ")}`);
   } catch (err) {
     console.error("[digest email] failed:", err);
   }

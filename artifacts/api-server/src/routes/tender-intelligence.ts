@@ -5,6 +5,7 @@ import {
   discoveredTendersTable,
   crawlerRunsTable,
   tenderSearchProfilesTable,
+  tenderDigestSettingsTable,
 } from "@workspace/db";
 import { eq, desc, and, gte } from "drizzle-orm";
 import { runCrawler } from "../crawlers/index.js";
@@ -153,6 +154,36 @@ router.patch("/tender-search-profiles/:id", async (req, res) => {
 router.delete("/tender-search-profiles/:id", async (req, res) => {
   await db.delete(tenderSearchProfilesTable).where(eq(tenderSearchProfilesTable.id, Number(req.params.id)));
   res.status(204).end();
+});
+
+// ── Digest Settings ────────────────────────────────────────────────────────
+async function getOrCreateDigestSettings() {
+  const [existing] = await db.select().from(tenderDigestSettingsTable).limit(1);
+  if (existing) return existing;
+  const [created] = await db.insert(tenderDigestSettingsTable).values({
+    emails: JSON.stringify(["j.aymes@onwrdadvisors.com"]),
+    enabled: true,
+  }).returning();
+  return created;
+}
+
+router.get("/tender-digest-settings", async (_req, res) => {
+  const settings = await getOrCreateDigestSettings();
+  res.json({ ...settings, emails: JSON.parse(settings.emails) });
+});
+
+router.put("/tender-digest-settings", async (req, res) => {
+  const { emails, enabled } = req.body as { emails?: string[]; enabled?: boolean };
+  const settings = await getOrCreateDigestSettings();
+  const updates: Record<string, unknown> = { updatedAt: new Date() };
+  if (Array.isArray(emails)) updates.emails = JSON.stringify(emails.map((e: string) => e.trim()).filter(Boolean));
+  if (enabled !== undefined) updates.enabled = enabled;
+  const [updated] = await db
+    .update(tenderDigestSettingsTable)
+    .set(updates)
+    .where(eq(tenderDigestSettingsTable.id, settings.id))
+    .returning();
+  res.json({ ...updated, emails: JSON.parse(updated.emails) });
 });
 
 export default router;

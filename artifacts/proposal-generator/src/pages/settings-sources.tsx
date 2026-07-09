@@ -5,7 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { RefreshCw, Trash2, Play, CheckCircle2, XCircle, Clock } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { RefreshCw, Trash2, Play, CheckCircle2, XCircle, Clock, Plus, Mail } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -53,10 +54,17 @@ function SourceTypeLabel({ type }: { type: string }) {
   return <span>{map[type] ?? type}</span>;
 }
 
+interface DigestSettings {
+  id: number;
+  emails: string[];
+  enabled: boolean;
+}
+
 export default function SettingsSources() {
   const { toast } = useToast();
   const qc = useQueryClient();
-  const [tab, setTab] = useState<"sources" | "profiles" | "runs">("sources");
+  const [tab, setTab] = useState<"sources" | "profiles" | "runs" | "digest">("sources");
+  const [newEmail, setNewEmail] = useState("");
 
   const { data: sources = [], isLoading: sourcesLoading } = useQuery<TenderSource[]>({
     queryKey: ["tender-sources"],
@@ -139,9 +147,49 @@ export default function SettingsSources() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["tender-search-profiles"] }),
   });
 
+  const { data: digest } = useQuery<DigestSettings>({
+    queryKey: ["tender-digest-settings"],
+    queryFn: async () => {
+      const r = await fetch(`${BASE}/api/tender-digest-settings`);
+      if (!r.ok) throw new Error("Failed");
+      return r.json();
+    },
+    enabled: tab === "digest",
+  });
+
+  const updateDigest = useMutation({
+    mutationFn: async (updates: Partial<DigestSettings>) => {
+      const r = await fetch(`${BASE}/api/tender-digest-settings`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updates),
+      });
+      if (!r.ok) throw new Error("Failed");
+      return r.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["tender-digest-settings"] });
+      toast({ title: "Saved" });
+    },
+    onError: () => toast({ title: "Save failed", variant: "destructive" }),
+  });
+
+  function addEmail() {
+    const email = newEmail.trim().toLowerCase();
+    if (!email || !email.includes("@")) return;
+    if (digest?.emails.includes(email)) return;
+    updateDigest.mutate({ emails: [...(digest?.emails ?? []), email] });
+    setNewEmail("");
+  }
+
+  function removeEmail(email: string) {
+    updateDigest.mutate({ emails: (digest?.emails ?? []).filter((e) => e !== email) });
+  }
+
   const TABS = [
     { value: "sources", label: "Sources" },
     { value: "profiles", label: "Search Profiles" },
+    { value: "digest", label: "Email Digest" },
     { value: "runs", label: "Run History" },
   ] as const;
 
@@ -252,6 +300,74 @@ export default function SettingsSources() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {tab === "digest" && (
+        <div className="space-y-6 max-w-xl">
+          <div className="p-4 rounded-lg border border-border bg-card">
+            <div className="flex items-center justify-between mb-4">
+              <div>
+                <h3 className="font-medium text-white text-sm">Daily Digest Email</h3>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Sent each morning after the 6am crawl with new Pursue and Consider opportunities.
+                </p>
+              </div>
+              <Switch
+                checked={digest?.enabled ?? true}
+                onCheckedChange={(enabled) => updateDigest.mutate({ enabled })}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Recipients</p>
+              {(digest?.emails ?? []).length === 0 && (
+                <p className="text-xs text-muted-foreground italic">No recipients added yet.</p>
+              )}
+              {(digest?.emails ?? []).map((email) => (
+                <div key={email} className="flex items-center justify-between gap-3 py-1.5 px-3 rounded bg-muted/20 border border-border">
+                  <div className="flex items-center gap-2">
+                    <Mail className="w-3.5 h-3.5 text-muted-foreground" />
+                    <span className="text-sm text-white">{email}</span>
+                  </div>
+                  <button
+                    onClick={() => removeEmail(email)}
+                    className="text-muted-foreground hover:text-red-400 transition-colors"
+                    title="Remove"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              ))}
+
+              <div className="flex gap-2 mt-3">
+                <Input
+                  placeholder="name@example.com"
+                  value={newEmail}
+                  onChange={(e) => setNewEmail(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && addEmail()}
+                  className="flex-1 h-9 text-sm"
+                />
+                <Button size="sm" onClick={addEmail} disabled={!newEmail.trim() || updateDigest.isPending}>
+                  <Plus className="w-4 h-4 mr-1" /> Add
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          <div className="p-4 rounded-lg border border-border bg-card">
+            <h3 className="font-medium text-white text-sm mb-1">SMTP Configuration</h3>
+            <p className="text-xs text-muted-foreground mb-3">
+              Set these in your environment secrets to enable sending. The digest will be silently skipped if they're missing.
+            </p>
+            <div className="space-y-1.5 font-mono text-xs">
+              {["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASS", "SMTP_SECURE"].map((key) => (
+                <div key={key} className="flex items-center gap-2 py-1 px-2 rounded bg-muted/10 border border-border/50">
+                  <span className="text-muted-foreground">{key}</span>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       )}
 

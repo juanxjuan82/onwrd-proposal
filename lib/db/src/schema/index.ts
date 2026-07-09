@@ -13,3 +13,4 @@ export * from "./tender-sources";
 export * from "./discovered-tenders";
 export * from "./crawler-runs";
 export * from "./tender-search-profiles";
+export * from "./tender-digest-settings";
