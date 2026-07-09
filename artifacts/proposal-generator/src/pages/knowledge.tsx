@@ -154,6 +154,21 @@ export default function Knowledge() {
     onError: (err) => toast({ title: "Delete failed", description: (err as Error).message, variant: "destructive" }),
   });
 
+  const crawlBios = useMutation({
+    mutationFn: async () => {
+      const r = await fetch(`${BASE}/api/knowledge/crawl-bios`, { method: "POST" });
+      const data = await r.json();
+      if (!r.ok) throw new Error((data as { error?: string }).error ?? "Crawl failed");
+      return data as { created: number; updated: number };
+    },
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["knowledge"] });
+      const msg = data.created ? `${data.created} imported` : "Already up to date";
+      toast({ title: "Team bios synced", description: msg });
+    },
+    onError: (err) => toast({ title: "Sync failed", description: (err as Error).message, variant: "destructive" }),
+  });
+
   const crawlCaseStudies = useMutation({
     mutationFn: async () => {
       const r = await fetch(`${BASE}/api/knowledge/crawl-case-studies`, { method: "POST" });
@@ -181,6 +196,10 @@ export default function Knowledge() {
           <p className="text-muted-foreground">Case studies, capabilities, and snippets used to ground AI proposal generation.</p>
         </div>
         <div className="flex gap-2 flex-wrap">
+          <Button variant="outline" onClick={() => crawlBios.mutate()} disabled={crawlBios.isPending}>
+            <RefreshCw className={`w-4 h-4 mr-2 ${crawlBios.isPending ? "animate-spin" : ""}`} />
+            {crawlBios.isPending ? "Syncing…" : "Sync Team Bios"}
+          </Button>
           <Button variant="outline" onClick={() => crawlCaseStudies.mutate()} disabled={crawlCaseStudies.isPending}>
             <RefreshCw className={`w-4 h-4 mr-2 ${crawlCaseStudies.isPending ? "animate-spin" : ""}`} />
             {crawlCaseStudies.isPending ? "Syncing…" : "Sync Case Studies"}

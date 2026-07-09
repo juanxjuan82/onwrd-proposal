@@ -10,6 +10,38 @@ const router = Router();
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
+// ── Shared crawl helpers ───────────────────────────────────────────────────
+async function crawlFetch(url: string): Promise<string> {
+  const r = await fetch(url, {
+    headers: { "User-Agent": "ONWRD-Proposal-Desk/1.0 (internal crawler)" },
+    signal: AbortSignal.timeout(15000),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status} fetching ${url}`);
+  return r.text();
+}
+
+function crawlExtractTitle(html: string, fallback: string): string {
+  const ogTitle = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1];
+  if (ogTitle) return ogTitle.trim();
+  const tag = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1];
+  return tag ? tag.replace(/\s*[|–—-].*$/, "").trim() : fallback;
+}
+
+function crawlHtmlToText(html: string, maxChars = 12000): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<nav[\s\S]*?<\/nav>/gi, " ")
+    .replace(/<header[\s\S]*?<\/header>/gi, " ")
+    .replace(/<footer[\s\S]*?<\/footer>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ").replace(/&#\d+;/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .slice(0, maxChars);
+}
+
 // ── List knowledge documents ───────────────────────────────────────────────
 router.get("/knowledge", async (req, res) => {
   try {
@@ -205,37 +237,6 @@ router.post("/knowledge/crawl-case-studies", async (req, res) => {
   const BASE_DOMAIN = "https://onwrdadvisors.com";
   const CASE_STUDY_PATH = "/case-study/";
 
-  async function fetchText(url: string): Promise<string> {
-    const r = await fetch(url, {
-      headers: { "User-Agent": "ONWRD-Proposal-Desk/1.0 (internal crawler)" },
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.text();
-  }
-
-  function extractTitle(html: string, fallback: string): string {
-    const ogTitle = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1];
-    if (ogTitle) return ogTitle.trim();
-    const tag = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1];
-    return tag ? tag.replace(/\s*[|–—-].*$/, "").trim() : fallback;
-  }
-
-  function htmlToText(html: string): string {
-    return html
-      .replace(/<script[\s\S]*?<\/script>/gi, " ")
-      .replace(/<style[\s\S]*?<\/style>/gi, " ")
-      .replace(/<nav[\s\S]*?<\/nav>/gi, " ")
-      .replace(/<header[\s\S]*?<\/header>/gi, " ")
-      .replace(/<footer[\s\S]*?<\/footer>/gi, " ")
-      .replace(/<[^>]+>/g, " ")
-      .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-      .replace(/&nbsp;/g, " ").replace(/&#\d+;/g, " ")
-      .replace(/\s{2,}/g, " ")
-      .trim()
-      .slice(0, 12000);
-  }
-
   async function discoverCaseStudyUrls(): Promise<string[]> {
     const urls = new Set<string>();
     const sitemapsToTry = [
@@ -247,7 +248,7 @@ router.post("/knowledge/crawl-case-studies", async (req, res) => {
 
     for (const sitemapUrl of sitemapsToTry) {
       try {
-        const xml = await fetchText(sitemapUrl);
+        const xml = await crawlFetch(sitemapUrl);
         // Find all <loc> entries pointing to case studies
         const locMatches = xml.matchAll(/<loc>([^<]+)<\/loc>/gi);
         for (const m of locMatches) {
@@ -258,7 +259,7 @@ router.post("/knowledge/crawl-case-studies", async (req, res) => {
           // Follow sub-sitemaps (sitemap index)
           if (url.endsWith(".xml") && url !== sitemapUrl) {
             try {
-              const subXml = await fetchText(url);
+              const subXml = await crawlFetch(url);
               const subMatches = subXml.matchAll(/<loc>([^<]+)<\/loc>/gi);
               for (const sm of subMatches) {
                 const subUrl = sm[1].trim();
@@ -297,10 +298,10 @@ router.post("/knowledge/crawl-case-studies", async (req, res) => {
 
     for (const url of discovered) {
       try {
-        const html = await fetchText(url);
+        const html = await crawlFetch(url);
         const slug = url.replace(/\/$/, "").split("/").pop() ?? url;
-        const title = extractTitle(html, slug.replace(/-/g, " "));
-        const content = htmlToText(html);
+        const title = crawlExtractTitle(html, slug.replace(/-/g, " "));
+        const content = crawlHtmlToText(html);
 
         if (!content || content.length < 100) {
           results.failed++;
@@ -334,6 +335,48 @@ router.post("/knowledge/crawl-case-studies", async (req, res) => {
   } catch (err) {
     req.log.error({ err }, "Error crawling case studies");
     res.status(500).json({ error: "Failed to crawl case studies" });
+  }
+});
+
+// ── Crawl ONWRD team bios ─────────────────────────────────────────────────
+router.post("/knowledge/crawl-bios", async (req, res) => {
+  const BIO_URL = "https://onwrdadvisors.com/who-we-are";
+
+  try {
+    const html = await crawlFetch(BIO_URL);
+    const title = "ONWRD Team Bios";
+    const content = crawlHtmlToText(html, 16000);
+
+    if (!content || content.length < 100) {
+      res.status(422).json({ error: "Could not extract meaningful content from the page." });
+      return;
+    }
+
+    const existing = await db
+      .select({ id: knowledgeDocumentsTable.id })
+      .from(knowledgeDocumentsTable)
+      .where(eq(knowledgeDocumentsTable.sourceUrl, BIO_URL));
+
+    if (existing.length > 0) {
+      await db
+        .update(knowledgeDocumentsTable)
+        .set({ title, content, updatedAt: new Date() })
+        .where(eq(knowledgeDocumentsTable.sourceUrl, BIO_URL));
+      res.json({ created: 0, updated: 1 });
+    } else {
+      await db.insert(knowledgeDocumentsTable).values({
+        title,
+        content,
+        docType: "bio",
+        isApproved: false,
+        sourceUrl: BIO_URL,
+        tags: JSON.stringify(["team", "bios", "website"]),
+      });
+      res.json({ created: 1, updated: 0 });
+    }
+  } catch (err) {
+    req.log.error({ err }, "Error crawling team bios");
+    res.status(500).json({ error: "Failed to crawl team bios" });
   }
 });
 
