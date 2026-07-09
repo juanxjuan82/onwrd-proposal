@@ -1,6 +1,5 @@
 import { Link, useLocation } from "wouter";
 import { Plus, LayoutDashboard, Briefcase, Target, BookOpen, Settings } from "lucide-react";
-import { GoogleConnect } from "@/components/google-connect";
 
 export function MainLayout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
@@ -67,9 +66,6 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
             </Link>
           </nav>
 
-          <div className="mt-auto pt-8 border-t border-[#222222]">
-            <GoogleConnect />
-          </div>
         </div>
       </aside>
       <main className="flex-1 overflow-auto bg-black">{children}</main>
