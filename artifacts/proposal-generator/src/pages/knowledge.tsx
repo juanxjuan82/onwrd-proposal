@@ -340,7 +340,7 @@ export default function Knowledge() {
 
       {/* Import type-picker dialog */}
       <Dialog open={!!pendingImport} onOpenChange={(o) => { if (!o) setPendingImport(null); }}>
-        <DialogContent className="max-w-sm">
+        <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Import File</DialogTitle>
           </DialogHeader>
