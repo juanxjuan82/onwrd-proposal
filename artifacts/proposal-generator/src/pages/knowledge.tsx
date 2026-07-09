@@ -87,6 +87,8 @@ export default function Knowledge() {
     docType: "capability",
   });
 
+  const [pendingImport, setPendingImport] = useState<{ file: File; docType: string } | null>(null);
+
   const createDoc = useMutation({
     mutationFn: async (body: { title: string; content: string; docType: string }) => {
       const r = await fetch(`${BASE}/api/knowledge`, {
@@ -110,10 +112,10 @@ export default function Knowledge() {
   });
 
   const importFile = useMutation({
-    mutationFn: async (file: File) => {
+    mutationFn: async ({ file, docType }: { file: File; docType: string }) => {
       const fd = new FormData();
       fd.append("file", file);
-      fd.append("docType", "capability");
+      fd.append("docType", docType);
       const r = await fetch(`${BASE}/api/knowledge/import-file`, { method: "POST", body: fd });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));
@@ -123,6 +125,7 @@ export default function Knowledge() {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["knowledge"] });
+      setPendingImport(null);
       toast({ title: "File imported", description: "Review and approve the document for reuse." });
     },
     onError: (err) => toast({ title: "Import failed", description: (err as Error).message, variant: "destructive" }),
@@ -220,7 +223,7 @@ export default function Knowledge() {
           className="hidden"
           onChange={(e) => {
             const file = e.target.files?.[0];
-            if (file) importFile.mutate(file);
+            if (file) setPendingImport({ file, docType: "capability" });
             e.target.value = "";
           }}
         />
@@ -330,6 +333,47 @@ export default function Knowledge() {
             <Button variant="ghost" onClick={() => setShowCreate(false)}>Cancel</Button>
             <Button onClick={() => createDoc.mutate(form)} disabled={createDoc.isPending}>
               {createDoc.isPending ? "Creating…" : "Create Document"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Import type-picker dialog */}
+      <Dialog open={!!pendingImport} onOpenChange={(o) => { if (!o) setPendingImport(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Import File</DialogTitle>
+          </DialogHeader>
+          {pendingImport && (
+            <div className="space-y-4 py-2">
+              <p className="text-sm text-muted-foreground truncate">
+                <span className="font-medium text-foreground">{pendingImport.file.name}</span>
+              </p>
+              <div className="space-y-1.5">
+                <Label>Document type</Label>
+                <Select
+                  value={pendingImport.docType}
+                  onValueChange={(v) => setPendingImport({ ...pendingImport, docType: v })}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {DOC_TYPES.map((t) => (
+                      <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPendingImport(null)}>Cancel</Button>
+            <Button
+              disabled={importFile.isPending}
+              onClick={() => pendingImport && importFile.mutate(pendingImport)}
+            >
+              {importFile.isPending ? "Importing…" : "Import"}
             </Button>
           </DialogFooter>
         </DialogContent>
