@@ -187,7 +187,7 @@ router.post("/tender-digest-settings/test", async (req, res) => {
   try {
     const { Resend } = await import("resend");
     const resend = new Resend(apiKey);
-    const fromAddress = process.env.RESEND_FROM ?? "ONWRD Tender Desk <digest@onwrdadvisors.com>";
+    const fromAddress = process.env.RESEND_FROM ?? "ONWRD Tender Desk <onboarding@resend.dev>";
     const html = `
 <div style="font-family:sans-serif;max-width:700px;margin:0 auto;color:#fff;background:#0a0a0a;padding:32px">
   <img src="https://onwrdadvisors.com/wp-content/uploads/2024/01/onwrd-logo-white.png" style="height:40px;margin-bottom:24px" alt="ONWRD"/>

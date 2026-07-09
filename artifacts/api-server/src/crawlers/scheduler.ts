@@ -88,7 +88,7 @@ async function sendDigestEmail(newCount: number): Promise<void> {
   <p style="margin-top:32px;color:#555;font-size:12px">ONWRD Proposal Desk — automated tender intelligence</p>
 </div>`;
 
-    const fromAddress = process.env.RESEND_FROM ?? "ONWRD Tender Desk <digest@onwrdadvisors.com>";
+    const fromAddress = process.env.RESEND_FROM ?? "ONWRD Tender Desk <onboarding@resend.dev>";
     const resend = new Resend(apiKey);
 
     const { error } = await resend.emails.send({
