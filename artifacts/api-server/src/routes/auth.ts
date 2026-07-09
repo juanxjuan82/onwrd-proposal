@@ -9,10 +9,13 @@ const SCOPES = [
 ].join(" ");
 
 function getCallbackUrl(): string {
-  const domain =
+  const domains = process.env.REPLIT_DOMAINS?.split(",").map((d) => d.trim()) ?? [];
+  // Prefer the stable .replit.app domain over ephemeral riker/dev domains
+  const preferred =
+    domains.find((d) => d.endsWith(".replit.app")) ??
     process.env.REPLIT_DEV_DOMAIN ??
-    process.env.REPLIT_DOMAINS?.split(",")[0];
-  if (domain) return `https://${domain}/api/auth/google/callback`;
+    domains[0];
+  if (preferred) return `https://${preferred}/api/auth/google/callback`;
   return "http://localhost:3000/api/auth/google/callback";
 }
 
