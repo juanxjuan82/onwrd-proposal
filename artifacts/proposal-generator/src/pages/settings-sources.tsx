@@ -377,24 +377,6 @@ export default function SettingsSources() {
             </div>
           </div>
 
-          <div className="p-4 rounded-lg border border-border bg-card">
-            <h3 className="font-medium text-white text-sm mb-1">Sending via Resend</h3>
-            <p className="text-xs text-muted-foreground mb-3">
-              Add your Resend API key as an environment secret to activate sending. Get one free at{" "}
-              <a href="https://resend.com" target="_blank" rel="noopener noreferrer" className="text-primary underline">resend.com</a>.
-            </p>
-            <div className="space-y-1.5 font-mono text-xs">
-              {[
-                { key: "RESEND_API_KEY", note: "required" },
-                { key: "RESEND_FROM", note: 'optional — defaults to digest@onwrdadvisors.com' },
-              ].map(({ key, note }) => (
-                <div key={key} className="flex items-center justify-between py-1.5 px-3 rounded bg-muted/10 border border-border/50">
-                  <span className="text-white">{key}</span>
-                  <span className="text-muted-foreground ml-4 font-sans">{note}</span>
-                </div>
-              ))}
-            </div>
-          </div>
         </div>
       )}
 
