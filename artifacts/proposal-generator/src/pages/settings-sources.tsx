@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
-import { RefreshCw, Trash2, Play, CheckCircle2, XCircle, Clock, Plus, Mail } from "lucide-react";
+import { RefreshCw, Trash2, Play, CheckCircle2, XCircle, Clock, Plus, Mail, Send } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -186,6 +186,17 @@ export default function SettingsSources() {
     updateDigest.mutate({ emails: (digest?.emails ?? []).filter((e) => e !== email) });
   }
 
+  const sendTestEmail = useMutation({
+    mutationFn: async () => {
+      const r = await fetch(`${BASE}/api/tender-digest-settings/test`, { method: "POST" });
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.error ?? "Failed");
+      return body as { message: string };
+    },
+    onSuccess: (data) => toast({ title: "Test sent!", description: data.message }),
+    onError: (err: Error) => toast({ title: "Send failed", description: err.message, variant: "destructive" }),
+  });
+
   const TABS = [
     { value: "sources", label: "Sources" },
     { value: "profiles", label: "Search Profiles" },
@@ -313,10 +324,21 @@ export default function SettingsSources() {
                   Sent each morning after the 6am crawl with new Pursue and Consider opportunities.
                 </p>
               </div>
-              <Switch
-                checked={digest?.enabled ?? true}
-                onCheckedChange={(enabled) => updateDigest.mutate({ enabled })}
-              />
+              <div className="flex items-center gap-3">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => sendTestEmail.mutate()}
+                  disabled={sendTestEmail.isPending}
+                >
+                  <Send className={`w-3.5 h-3.5 mr-1.5 ${sendTestEmail.isPending ? "animate-pulse" : ""}`} />
+                  {sendTestEmail.isPending ? "Sending…" : "Send Test"}
+                </Button>
+                <Switch
+                  checked={digest?.enabled ?? true}
+                  onCheckedChange={(enabled) => updateDigest.mutate({ enabled })}
+                />
+              </div>
             </div>
 
             <div className="space-y-2">

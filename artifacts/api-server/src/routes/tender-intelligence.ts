@@ -172,6 +172,48 @@ router.get("/tender-digest-settings", async (_req, res) => {
   res.json({ ...settings, emails: JSON.parse(settings.emails) });
 });
 
+router.post("/tender-digest-settings/test", async (req, res) => {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    res.status(400).json({ error: "RESEND_API_KEY secret is not set. Add it in the Replit Secrets panel." });
+    return;
+  }
+  const settings = await getOrCreateDigestSettings();
+  const emails: string[] = JSON.parse(settings.emails);
+  if (emails.length === 0) {
+    res.status(400).json({ error: "No recipients configured. Add at least one email address first." });
+    return;
+  }
+  try {
+    const { Resend } = await import("resend");
+    const resend = new Resend(apiKey);
+    const fromAddress = process.env.RESEND_FROM ?? "ONWRD Tender Desk <digest@onwrdadvisors.com>";
+    const html = `
+<div style="font-family:sans-serif;max-width:700px;margin:0 auto;color:#fff;background:#0a0a0a;padding:32px">
+  <img src="https://onwrdadvisors.com/wp-content/uploads/2024/01/onwrd-logo-white.png" style="height:40px;margin-bottom:24px" alt="ONWRD"/>
+  <h2 style="color:#fff;margin-bottom:4px">Tender Intelligence Digest — Test Email</h2>
+  <p style="color:#888;margin-top:0">${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}</p>
+  <p>This is a test email confirming your digest is configured correctly. 🎉</p>
+  <p>When live tenders are discovered each morning, you'll see a summary here with <strong style="color:#4ade80">🔥 Pursue</strong> and <strong style="color:#facc15">⚡ Consider</strong> opportunities.</p>
+  <p style="margin-top:32px;color:#555;font-size:12px">ONWRD Proposal Desk — automated tender intelligence</p>
+</div>`;
+    const { error } = await resend.emails.send({
+      from: fromAddress,
+      to: emails,
+      subject: `[ONWRD] Digest test — ${new Date().toLocaleDateString()}`,
+      html,
+    });
+    if (error) {
+      res.status(500).json({ error: error.message ?? "Resend returned an error" });
+      return;
+    }
+    res.json({ message: `Test email sent to ${emails.join(", ")}` });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: msg });
+  }
+});
+
 router.put("/tender-digest-settings", async (req, res) => {
   const { emails, enabled } = req.body as { emails?: string[]; enabled?: boolean };
   const settings = await getOrCreateDigestSettings();
