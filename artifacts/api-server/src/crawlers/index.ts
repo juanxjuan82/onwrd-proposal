@@ -92,7 +92,9 @@ function keywordScore(opp: TenderOpportunity): {
 
   score = Math.max(0, Math.min(100, score));
 
-  const recommendation = score >= 70 ? "PURSUE" : score >= 40 ? "CONSIDER" : "SKIP";
+  // Keyword engine produces lower raw scores than AI (max ~84 vs AI's 0-100).
+  // Thresholds are calibrated to keyword score range so PURSUE/CONSIDER are reachable.
+  const recommendation = score >= 28 ? "PURSUE" : score >= 14 ? "CONSIDER" : "SKIP";
   const topMatches = [...new Set(matchedTerms)].slice(0, 3);
   const reasoning = topMatches.length > 0
     ? `Keyword match on: ${topMatches.join(", ")}. (Scored by keyword engine — AI scoring unavailable.)`
@@ -143,11 +145,8 @@ Low scores (<40): construction, IT infrastructure, supply procurement, unrelated
 
 // ── Rescore existing items that failed AI scoring ───────────────────────────
 export async function rescoreWithKeywords(): Promise<number> {
-  const { sql } = await import("drizzle-orm");
-  const items = await db
-    .select()
-    .from(discoveredTendersTable)
-    .where(sql`${discoveredTendersTable.scoringReasoning} = 'Scoring failed' OR ${discoveredTendersTable.fitScore} = 0`);
+  // Rescore all items — needed when thresholds change or AI was previously unavailable
+  const items = await db.select().from(discoveredTendersTable);
 
   let count = 0;
   for (const item of items) {
