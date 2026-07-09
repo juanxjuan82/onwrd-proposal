@@ -2,16 +2,10 @@ import { TenderSourceAdapter, TenderOpportunity, safeFetch } from "./base-adapte
 
 interface WBNotice {
   id?: string;
-  project_name?: string;
-  borrower?: string;
-  notice_type?: string;
-  submission_date?: string;
-  contact_email?: string;
-  url?: string;
   project_id?: string;
-  description?: string;
-  country_name?: string;
-  sector?: string;
+  project_name?: string;
+  submission_date?: string;
+  sector?: Array<{ sector_code?: string; sector_description?: string }> | string;
   [key: string]: unknown;
 }
 
@@ -19,36 +13,62 @@ export class WorldBankAdapter implements TenderSourceAdapter {
   adapterType = "world_bank";
 
   async fetchOpportunities(): Promise<TenderOpportunity[]> {
-    const queries = ["communications marketing", "media campaign", "tourism promotion"];
+    const queries = [
+      "communications marketing media campaign",
+      "tourism promotion branding",
+      "community engagement stakeholder awareness",
+    ];
     const seen = new Set<string>();
     const results: TenderOpportunity[] = [];
 
     for (const q of queries) {
       try {
-        const url = `https://search.worldbank.org/api/v2/procurement?format=json&fl=id,project_name,borrower,notice_type,submission_date,url,project_id,country_name,sector&rows=15&q=${encodeURIComponent(q)}`;
-        const r = await safeFetch(url);
+        const url =
+          `https://search.worldbank.org/api/v2/procnotices` +
+          `?format=json&rows=20` +
+          `&fl=id,project_id,project_name,submission_date,sector,country_code,country_name` +
+          `&srt=submission_date&order=desc` +
+          `&q=${encodeURIComponent(q)}`;
+
+        const r = await safeFetch(url, {
+          headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
+        });
         if (!r.ok) continue;
-        const data = await r.json() as { procnotices?: { ProcNotice?: WBNotice[] } };
-        const notices = data?.procnotices?.ProcNotice ?? [];
+
+        const data = (await r.json()) as { procnotices?: WBNotice[] };
+        const notices = data?.procnotices ?? [];
 
         for (const n of notices) {
           const id = String(n.id ?? n.project_id ?? "");
           if (!id || seen.has(id)) continue;
           seen.add(id);
 
+          const sectors = Array.isArray(n.sector)
+            ? n.sector.map((s) => s.sector_description ?? "").filter(Boolean).join(", ")
+            : String(n.sector ?? "");
+
+          const projectId = String(n.project_id ?? "");
+          const noticeId = String(n.id ?? "");
+
           results.push({
-            externalId: `wb-${id}`,
-            title: String(n.project_name ?? "World Bank Procurement"),
-            organization: String(n.borrower ?? "World Bank"),
-            url: n.url ? String(n.url) : `https://projects.worldbank.org/en/projects-operations/procurement`,
+            externalId: `wb-${noticeId || projectId}`,
+            title: String(n.project_name ?? "World Bank Procurement Notice"),
+            organization: "World Bank",
+            url: noticeId
+              ? `https://projects.worldbank.org/en/projects-operations/procurement/noticedetails?id=${noticeId}`
+              : projectId
+              ? `https://projects.worldbank.org/en/projects-operations/project-detail/${projectId}`
+              : "https://projects.worldbank.org/en/projects-operations/procurement",
             deadline: n.submission_date ? new Date(String(n.submission_date)) : undefined,
-            description: `${n.notice_type ?? "Procurement notice"} — ${n.country_name ?? ""}. Project: ${n.project_name ?? ""}`,
-            country: String(n.country_name ?? ""),
-            sector: String(n.sector ?? ""),
+            description: `World Bank procurement — ${String(n.project_name ?? "")}. Sector: ${sectors || "General"}`,
+            country: String((n as Record<string, unknown>).country_name ?? ""),
+            sector: sectors,
             rawData: n as Record<string, unknown>,
           });
         }
-      } catch { /* skip this query */ }
+      } catch {
+        /* skip failed query */
+      }
     }
 
     return results;

@@ -58,7 +58,8 @@ Low scores (<40): construction, IT infrastructure, supply procurement, unrelated
       recommendation: String(raw.recommendation ?? "SKIP"),
       reasoning: String(raw.reasoning ?? ""),
     };
-  } catch {
+  } catch (err) {
+    console.error("[scoring] OpenAI error:", err instanceof Error ? err.message : String(err));
     return { fitScore: 0, recommendation: "SKIP", reasoning: "Scoring failed" };
   }
 }

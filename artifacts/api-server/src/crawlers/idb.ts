@@ -5,41 +5,53 @@ export class IDBAdapter implements TenderSourceAdapter {
 
   async fetchOpportunities(): Promise<TenderOpportunity[]> {
     const results: TenderOpportunity[] = [];
-    try {
-      const r = await safeFetch(
-        "https://www.iadb.org/en/project-procurement?query=communications+marketing+caribbean",
-        { headers: { Accept: "text/html" } }
-      );
-      if (!r.ok) return results;
 
-      const html = await r.text();
-      const itemPattern = /<article[^>]*>([\s\S]*?)<\/article>/gi;
-      let match;
-      let count = 0;
+    const urls = [
+      "https://www.iadb.org/en/projects/all?query=communications+marketing&country=BS,JM,TT,BB,GY,LC,VC",
+      "https://www.iadb.org/en/projects/all?query=media+tourism+campaign&country=BS,JM,TT,BB",
+    ];
 
-      while ((match = itemPattern.exec(html)) !== null && count < 20) {
-        const block = match[1];
-        const titleMatch = block.match(/<h[2-4][^>]*>([\s\S]*?)<\/h[2-4]>/i);
-        const linkMatch = block.match(/href="([^"]*procur[^"]*|[^"]*tender[^"]*|[^"]*contract[^"]*)"/i);
-        const descMatch = block.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-
-        const title = titleMatch ? stripHtml(titleMatch[1], 200) : "";
-        if (!title || title.length < 10) continue;
-
-        count++;
-        results.push({
-          externalId: `idb-${Buffer.from(title).toString("base64").slice(0, 16)}`,
-          title,
-          organization: "Inter-American Development Bank",
-          url: linkMatch
-            ? (linkMatch[1].startsWith("http") ? linkMatch[1] : `https://www.iadb.org${linkMatch[1]}`)
-            : "https://www.iadb.org/en/project-procurement",
-          description: descMatch ? stripHtml(descMatch[1], 400) : `IDB procurement opportunity: ${title}`,
-          country: "Caribbean / Latin America",
-          sector: "Development",
+    for (const url of urls) {
+      try {
+        const r = await safeFetch(url, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)",
+            Accept: "text/html",
+          },
         });
-      }
-    } catch { /* return empty on failure */ }
+        if (!r.ok) continue;
+        const html = await r.text();
+        if (html.length < 500) continue;
+
+        const articlePattern = /<article[^>]*>([\s\S]*?)<\/article>/gi;
+        let match;
+        let count = 0;
+
+        while ((match = articlePattern.exec(html)) !== null && count < 15) {
+          const block = match[1];
+          const titleMatch = block.match(/<h[2-4][^>]*>([\s\S]*?)<\/h[2-4]>/i);
+          const linkMatch = block.match(/href="([^"]*\/en\/project[^"]+)"/i);
+          const title = titleMatch ? stripHtml(titleMatch[1], 200) : "";
+          if (!title || title.length < 10) continue;
+
+          const href = linkMatch ? linkMatch[1] : "";
+          count++;
+          results.push({
+            externalId: `idb-${Buffer.from(title.slice(0, 40)).toString("base64").slice(0, 16)}`,
+            title,
+            organization: "Inter-American Development Bank",
+            url: href
+              ? href.startsWith("http") ? href : `https://www.iadb.org${href}`
+              : "https://www.iadb.org/en/projects/all",
+            description: `IDB project: ${title}`,
+            country: "Caribbean / Latin America",
+            sector: "Development",
+          });
+        }
+
+        if (results.length > 0) break;
+      } catch { /* try next */ }
+    }
 
     return results;
   }

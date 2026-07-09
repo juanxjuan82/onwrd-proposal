@@ -49,7 +49,7 @@ router.delete("/tender-sources/:id", async (req, res) => {
 
 // ── Manual crawl trigger ───────────────────────────────────────────────────
 router.post("/tender-intelligence/crawl", async (req, res) => {
-  const sourceId = req.body.sourceId ? Number(req.body.sourceId) : undefined;
+  const sourceId = req.body?.sourceId ? Number(req.body.sourceId) : undefined;
   res.json({ message: "Crawl started in background" });
   void (async () => {
     try {

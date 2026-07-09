@@ -1,48 +1,54 @@
 import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
 
+// Replaces the non-functional UNGM scraper with UNDP Procurement Notices,
+// which has server-rendered HTML and notice listings accessible without JS.
 export class UNGMAdapter implements TenderSourceAdapter {
   adapterType = "ungm";
 
   async fetchOpportunities(): Promise<TenderOpportunity[]> {
     const results: TenderOpportunity[] = [];
+
     try {
-      const r = await safeFetch("https://www.ungm.org/Public/Notice", {
-        headers: { Accept: "text/html" },
+      const r = await safeFetch("https://procurement-notices.undp.org/", {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)",
+          Accept: "text/html",
+        },
       });
       if (!r.ok) return results;
 
       const html = await r.text();
-      const rowPattern = /<tr[^>]*class="[^"]*noticeRow[^"]*"[^>]*>([\s\S]*?)<\/tr>/gi;
+
+      // Extract notice links: href="view_notice.cfm?notice_id=XXXXX"
+      const linkPattern =
+        /<a[^>]+href="(view_notice\.cfm\?notice_id=(\d+))"[^>]*>([\s\S]*?)<\/a>/gi;
       let match;
+      const seen = new Set<string>();
 
-      while ((match = rowPattern.exec(html)) !== null) {
-        const row = match[1];
-        const titleMatch = row.match(/class="[^"]*title[^"]*"[^>]*>([\s\S]*?)<\/td>/i);
-        const orgMatch = row.match(/class="[^"]*organization[^"]*"[^>]*>([\s\S]*?)<\/td>/i);
-        const deadlineMatch = row.match(/class="[^"]*deadline[^"]*"[^>]*>([\s\S]*?)<\/td>/i);
-        const linkMatch = row.match(/href="(\/Public\/Notice\/\d+[^"]*)"/i);
+      while ((match = linkPattern.exec(html)) !== null) {
+        const path = match[1];
+        const noticeId = match[2];
+        const rawTitle = stripHtml(match[3], 250);
 
-        const title = titleMatch ? stripHtml(titleMatch[1], 200) : "";
-        if (!title || title.length < 5) continue;
-
-        const org = orgMatch ? stripHtml(orgMatch[1], 100) : "UN Agency";
-        const deadlineStr = deadlineMatch ? stripHtml(deadlineMatch[1], 50) : "";
-        const deadline = deadlineStr ? new Date(deadlineStr) : undefined;
-        const path = linkMatch ? linkMatch[1] : "";
-        const noticeId = path.match(/\/(\d+)/)?.[1] ?? "";
+        if (!noticeId || !rawTitle || rawTitle.length < 8) continue;
+        if (seen.has(noticeId)) continue;
+        seen.add(noticeId);
 
         results.push({
-          externalId: `ungm-${noticeId}`,
-          title,
-          organization: org,
-          url: path ? `https://www.ungm.org${path}` : "https://www.ungm.org/Public/Notice",
-          deadline: deadline && !isNaN(deadline.getTime()) ? deadline : undefined,
-          description: `UN procurement notice from ${org}`,
+          externalId: `undp-${noticeId}`,
+          title: rawTitle,
+          organization: "UNDP",
+          url: `https://procurement-notices.undp.org/${path}`,
+          description: `UNDP procurement notice: ${rawTitle}`,
           country: "International",
-          sector: "UN Agency",
+          sector: "United Nations",
         });
+
+        if (results.length >= 30) break;
       }
-    } catch { /* return empty on failure */ }
+    } catch {
+      /* return empty on failure */
+    }
 
     return results;
   }
