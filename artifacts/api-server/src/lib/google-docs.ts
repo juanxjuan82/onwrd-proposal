@@ -70,6 +70,35 @@ async function getDocument(
   return response.json() as Promise<Record<string, unknown>>;
 }
 
+/**
+ * Make an existing Google Doc viewable by anyone with the link.
+ * Requires the drive.file scope already granted during OAuth.
+ */
+export async function shareWithAnyone(
+  fileId: string,
+  accessToken?: string,
+): Promise<void> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+
+  try {
+    const res = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${fileId}/permissions`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ role: "reader", type: "anyone" }),
+      },
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`shareWithAnyone failed (${res.status}): ${text}`);
+    }
+  } catch (err) {
+    console.error("shareWithAnyone error:", err);
+  }
+}
+
 export async function createGoogleDoc(
   title: string,
   accessToken?: string,

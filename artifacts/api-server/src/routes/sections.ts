@@ -284,6 +284,7 @@ router.post("/proposals/:id/export-to-google-docs", async (req, res) => {
     const docTitle = `ONWRD Proposal — ${proposal.clientName}`;
     const doc = await createGoogleDoc(docTitle, accessToken);
     await appendContentWithLogo(doc.documentId, contentToExport, accessToken);
+    await shareWithAnyone(doc.documentId, accessToken);
 
     const docUrl = `https://docs.google.com/document/d/${doc.documentId}/edit`;
 

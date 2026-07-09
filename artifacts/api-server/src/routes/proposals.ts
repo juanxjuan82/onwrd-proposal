@@ -730,7 +730,7 @@ router.post("/proposals/:id/export-to-google-docs", async (req, res) => {
       return;
     }
 
-    const { createGoogleDoc, appendContentWithLogo } = await import("../lib/google-docs.js");
+    const { createGoogleDoc, appendContentWithLogo, shareWithAnyone } = await import("../lib/google-docs.js");
 
     const userAccessToken = req.session.googleAccessToken ?? undefined;
 
@@ -741,6 +741,7 @@ router.post("/proposals/:id/export-to-google-docs", async (req, res) => {
     const docUrl = `https://docs.google.com/document/d/${docId}/edit`;
 
     await appendContentWithLogo(docId, proposal.proposalContent, userAccessToken);
+    await shareWithAnyone(docId, userAccessToken);
 
     await db
       .update(proposalsTable)
