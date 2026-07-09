@@ -1,0 +1,976 @@
+Below is a detailed implementation brief you can give directly to Replit (or an AI coding agent). It is written as a product/engineering redesign specification rather than just a feature list.
+
+```markdown
+# ONWRD Proposal Desk 2.0 — AI Bid Intelligence & Proposal Automation Platform
+
+## Product Goal
+
+Transform ONWRD Proposal Desk from an AI proposal generator into an automated bid intelligence platform optimized for:
+
+- Bahamas government opportunities
+- Statutory agencies
+- NGOs
+- UN agencies
+- IDB and multilateral development opportunities
+- Caribbean development-sector bids
+
+Primary objective:
+
+> Reduce the time from RFP discovery to submission-ready proposal while improving bid selection accuracy and proposal quality.
+
+The system should automatically:
+1. Discover opportunities
+2. Extract requirements
+3. Score fit and win probability
+4. Build a proposal strategy
+5. Generate a grounded proposal draft
+6. Critique and improve the draft
+7. Track pipeline performance and outcomes
+
+Human users should focus only on:
+- pursue/no-bid decisions
+- providing missing information
+- final approval
+
+---
+
+# Core Workflow Redesign
+
+## New Automated Pipeline
+
+```
+
+Opportunity Detected
+↓
+AI Opportunity Analysis
+↓
+Eligibility Check
+↓
+Bid Score + Recommendation
+↓
+Proposal Strategy Brief
+↓
+Knowledge Retrieval
+↓
+Proposal Generation
+↓
+AI Critic + Improvement Loop
+↓
+Human Approval
+↓
+Google Docs Export
+↓
+Submission Tracking
+↓
+Win/Loss Learning
+
+```
+
+---
+
+# 1. Opportunity Intelligence Engine
+
+## Replace manual opportunity creation with automated intake.
+
+Supported inputs:
+
+- Manual upload
+- PDF
+- DOCX
+- TXT
+- Email forwarding
+- Procurement source imports (future)
+- Public URL import (future)
+
+When a document arrives:
+
+Automatically create:
+
+`tenders` record
+
+Extract:
+
+- title
+- organization
+- opportunity type
+- deadline
+- location
+- estimated budget
+- sector
+- submission requirements
+- contact information
+- source
+
+---
+
+## Opportunity Types
+
+Add enum:
+
+```
+
+bahamas_government
+statutory_agency
+ngo
+un_agency
+idb
+multilateral
+private_sector
+other
+
+```
+
+Opportunity type influences:
+
+- scoring
+- proposal template
+- retrieval rules
+- compliance requirements
+
+---
+
+# 2. Automated Bid Qualification
+
+Remove manual scoring.
+
+Every new opportunity receives AI analysis.
+
+Create:
+
+`opportunity_scores`
+
+Fields:
+
+```
+
+id
+tender_id
+fit_score
+win_probability
+recommendation
+confidence
+reasoning
+risks
+created_at
+
+```
+
+---
+
+## Scoring Model
+
+Default:
+
+```
+
+Capability Fit             30%
+Strategic Alignment        20%
+Revenue Potential          15%
+Competitive Advantage      15%
+Delivery Complexity        10%
+Win Probability            10%
+
+```
+
+Allow configurable weights.
+
+---
+
+Output example:
+
+```
+
+Score: 86/100
+
+Recommendation:
+PURSUE
+
+Confidence:
+HIGH
+
+Strengths:
+
+* Strong Bahamas market alignment
+* Relevant communications experience
+* Existing case study match
+
+Risks:
+
+* International competition
+* Budget unclear
+
+```
+
+---
+
+# 3. Eligibility Intelligence
+
+Before proposal generation:
+
+Run eligibility check.
+
+Create:
+
+`tender_eligibility_checks`
+
+Track:
+
+```
+
+requirement
+status
+evidence_needed
+severity
+
+```
+
+Examples:
+
+```
+
+✓ Registered organization
+✓ Required years experience
+✓ Geographic eligibility
+⚠ Financial documentation required
+⚠ Partner information required
+
+```
+
+---
+
+# 4. Requirements Intelligence
+
+Automatically extract:
+
+## Mandatory requirements
+
+Example:
+
+```
+
+Must provide:
+
+✓ Technical proposal
+✓ Financial proposal
+✓ Three references
+✓ Team CVs
+
+```
+
+---
+
+## Evaluation criteria
+
+Example:
+
+```
+
+Evaluation:
+
+Technical approach:
+40%
+
+Experience:
+25%
+
+Team:
+20%
+
+Price:
+15%
+
+```
+
+---
+
+## Client priorities
+
+AI interpretation:
+
+```
+
+Client appears to value:
+
+* measurable impact
+* community engagement
+* stakeholder management
+
+Proposal should emphasize:
+
+* outcomes
+* evidence
+* implementation methodology
+
+```
+
+---
+
+# 5. Knowledge Base + Retrieval System
+
+## Objective
+
+Ensure proposals only use approved ONWRD information.
+
+Create structured knowledge system.
+
+---
+
+## Knowledge Documents
+
+Upgrade:
+
+`knowledge_documents`
+
+Add:
+
+```
+
+id
+title
+type
+content
+tags
+approval_status
+embedding
+created_at
+
+```
+
+Types:
+
+```
+
+case_study
+capability
+team_profile
+testimonial
+methodology
+past_proposal
+certification
+policy
+partner
+
+```
+
+---
+
+## Retrieval Controls (Frontend Configurable)
+
+Create admin interface.
+
+Do not hardcode retrieval rules.
+
+---
+
+## Retrieval Settings
+
+### Evidence weighting
+
+Example:
+
+```
+
+Case Studies       40%
+Past Proposals     25%
+Capabilities       20%
+Team Profiles      10%
+Testimonials        5%
+
+```
+
+---
+
+### Evidence strictness
+
+Options:
+
+```
+
+Conservative
+Balanced
+Broad
+
+```
+
+---
+
+### Approved evidence mode
+
+Settings:
+
+```
+
+[x] Only use approved documents
+[x] Never invent credentials
+[x] Require evidence for metrics
+[x] Flag missing information
+
+```
+
+---
+
+# 6. Proposal Strategy Layer
+
+Before writing, generate:
+
+`proposal_strategies`
+
+Fields:
+
+```
+
+tender_id
+positioning
+win_themes
+recommended_case_studies
+risks
+messaging_guidance
+
+```
+
+Example:
+
+```
+
+Positioning:
+
+ONWRD combines local Caribbean expertise with international development communication standards.
+
+Win themes:
+
+1. Local knowledge
+2. Stakeholder engagement
+3. Measurable outcomes
+
+Use:
+
+* Climate campaign case study
+* Government engagement example
+
+```
+
+---
+
+# 7. Proposal Generation Redesign
+
+## Replace single generation call.
+
+Current:
+
+```
+
+One AI call → 15 sections
+
+```
+
+New:
+
+```
+
+Strategy
+↓
+Outline
+↓
+Section generation
+↓
+Consistency review
+↓
+Revision
+
+```
+
+---
+
+## Proposal Sections
+
+Maintain:
+
+```
+
+Executive Summary
+About ONWRD
+Strategic Approach
+Scope of Work
+Methodology
+Team
+Case Studies
+Timeline
+Investment
+KPIs
+Risk Management
+Governance
+Innovation
+Compliance
+Next Steps
+
+```
+
+---
+
+## Each section generation receives:
+
+```
+
+RFP requirements
+Evaluation criteria
+Proposal strategy
+Retrieved evidence
+ONWRD capabilities
+Previous approved sections
+
+```
+
+---
+
+# 8. AI Critic + Revision Loop
+
+Current:
+
+Generate → Critic → Human
+
+New:
+
+Generate → Critic → AI Improve → Human
+
+---
+
+Critic categories:
+
+## Compliance
+
+- missing requirements
+- unanswered questions
+- formatting issues
+
+## Evidence
+
+- unsupported claims
+- weak examples
+- missing proof
+
+## Quality
+
+- generic wording
+- repetition
+- unclear messaging
+
+## Persuasion
+
+- weak differentiation
+- unclear value
+- poor opening
+
+---
+
+Create:
+
+`proposal_quality_scores`
+
+Fields:
+
+```
+
+proposal_id
+compliance_score
+evidence_score
+quality_score
+persuasion_score
+overall_score
+
+```
+
+---
+
+# 9. Proposal Performance Tracker
+
+Add full pipeline analytics.
+
+Goal:
+
+Track:
+
+```
+
+Opportunities found
+↓
+Qualified
+↓
+Proposals generated
+↓
+Submitted
+↓
+Won
+
+```
+
+---
+
+Create:
+
+`proposal_goals`
+
+Fields:
+
+```
+
+period
+proposal_generation_target
+submission_target
+win_target
+revenue_target
+
+```
+
+---
+
+Dashboard:
+
+```
+
+Monthly Goals
+
+Generate:
+12 / 15
+
+Submit:
+8 / 10
+
+Wins:
+3 / 4
+
+Pipeline Value:
+$450,000
+
+```
+
+---
+
+# 10. Proposal Lifecycle Tracking
+
+Expand statuses:
+
+```
+
+new
+
+qualified
+
+pursuing
+
+proposal_drafting
+
+proposal_generated
+
+internal_review
+
+approved
+
+submitted
+
+shortlisted
+
+won
+
+lost
+
+abandoned
+
+```
+
+---
+
+Track every transition.
+
+Create:
+
+`proposal_pipeline_events`
+
+Fields:
+
+```
+
+proposal_id
+event_type
+user_id
+timestamp
+metadata
+
+```
+
+---
+
+# 11. Win/Loss Intelligence
+
+After completion:
+
+Capture:
+
+```
+
+Outcome:
+
+Won
+Lost
+No decision
+
+```
+
+If lost:
+
+```
+
+Reason:
+
+Price
+Existing relationship
+Capability mismatch
+Timeline
+Unknown
+
+```
+
+Store:
+
+`proposal_outcomes`
+
+Use this data to improve scoring.
+
+---
+
+# 12. Dashboard Redesign
+
+## Executive Dashboard
+
+Show:
+
+```
+
+Pipeline Value
+
+Active Opportunities
+
+Proposals Generated
+
+Submission Rate
+
+Win Rate
+
+Average Time to Proposal
+
+AI Draft Quality Score
+
+```
+
+---
+
+## Operations Dashboard
+
+Show bottlenecks:
+
+```
+
+Waiting for pricing:
+5 proposals
+
+Waiting for review:
+3 proposals
+
+Missing documents:
+7 opportunities
+
+```
+
+---
+
+## AI Improvement Dashboard
+
+Show:
+
+```
+
+Most edited sections:
+
+Methodology
+Executive Summary
+KPIs
+
+Lowest scoring areas:
+
+Evidence quality
+Differentiation
+Compliance
+
+```
+
+---
+
+# 13. Client Profiles
+
+Add:
+
+`clients`
+
+Fields:
+
+```
+
+name
+type
+sector
+preferences
+past_feedback
+previous_proposals
+
+```
+
+AI uses this for future bids.
+
+---
+
+# 14. Partner / Consortium Management
+
+Add:
+
+`partners`
+
+Fields:
+
+```
+
+organization
+expertise
+country
+certifications
+approved_status
+previous_collaborations
+
+```
+
+Important for UN/IDB opportunities.
+
+---
+
+# 15. Frontend Settings
+
+Create:
+
+## Proposal Intelligence Settings
+
+Controls:
+
+- retrieval weights
+- evidence strictness
+- writing style
+- compliance strictness
+- risk mode
+
+---
+
+## Writing Style
+
+Options:
+
+```
+
+Strategic consultant
+
+Creative agency
+
+Technical implementation
+
+Development sector
+
+Government procurement
+
+```
+
+---
+
+# Automation Rules
+
+Default behavior:
+
+Automatically:
+
+✓ ingest opportunities  
+✓ extract requirements  
+✓ score opportunities  
+✓ create bid strategy  
+✓ retrieve evidence  
+✓ generate draft  
+✓ run critic  
+✓ improve sections  
+✓ create checklist  
+✓ notify team  
+
+Require human:
+
+✓ pursue decision  
+✓ missing information  
+✓ final approval  
+✓ submission  
+
+---
+
+# Technical Notes
+
+Maintain current stack:
+
+Frontend:
+React + Vite + Tailwind + shadcn/ui
+
+Backend:
+Express Node.js
+
+Database:
+PostgreSQL + Drizzle ORM
+
+AI:
+OpenAI API
+
+Google:
+Docs API + Drive API
+
+---
+
+# Success Metrics
+
+The redesigned system should optimize:
+
+## Speed
+
+Target:
+
+RFP → first draft:
+< 2 hours
+
+## Quality
+
+Target:
+
+AI draft requiring:
+<20% human rewriting
+
+## Efficiency
+
+Target:
+
+Increase proposals produced per month:
+2-3x
+
+## Intelligence
+
+Every win/loss improves:
+- scoring
+- retrieval
+- proposal strategy
+```
+
+I would give this to Replit as the **master redesign spec**, then have it break the work into phases rather than attempting the entire rebuild in one pass. The highest-value implementation order would be:
+
+1. Automated intake + scoring
+2. Knowledge base + retrieval controls
+3. Strategy brief + improved generation
+4. Critic/revision loop
+5. Pipeline tracker + analytics
+6. Client/partner intelligence layer
