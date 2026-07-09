@@ -35,13 +35,25 @@ export class UNGMAdapter implements TenderSourceAdapter {
         if (seen.has(noticeId)) continue;
         seen.add(noticeId);
 
+        // Detect Caribbean/Bahamas mentions in the title for geographic scoring boost
+        const titleLower = rawTitle.toLowerCase();
+        const country =
+          titleLower.includes("bahamas")   ? "Bahamas" :
+          titleLower.includes("caribbean") ? "Caribbean" :
+          titleLower.includes("jamaica")   ? "Jamaica" :
+          titleLower.includes("barbados")  ? "Barbados" :
+          titleLower.includes("trinidad")  ? "Trinidad and Tobago" :
+          titleLower.includes("guyana")    ? "Guyana" :
+          titleLower.includes("belize")    ? "Belize" :
+          "International";
+
         results.push({
           externalId: `undp-${noticeId}`,
           title: rawTitle,
           organization: "UNDP",
           url: `https://procurement-notices.undp.org/${path}`,
           description: `UNDP procurement notice: ${rawTitle}`,
-          country: "International",
+          country,
           sector: "United Nations",
         });
 

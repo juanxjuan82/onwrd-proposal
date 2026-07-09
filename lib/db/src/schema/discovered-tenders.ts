@@ -17,6 +17,10 @@ export const discoveredTendersTable = pgTable("discovered_tenders", {
   fitScore: integer("fit_score"),
   recommendation: text("recommendation"),
   scoringReasoning: text("scoring_reasoning"),
+  geographyScore: integer("geography_score"),
+  geoRegion: text("geo_region"),
+  bahamasAdvantageScore: integer("bahamas_advantage_score"),
+  confidence: text("confidence"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });

@@ -1,0 +1,803 @@
+```markdown id="58492"
+# ONWRD Automated Tender Intelligence Engine — Bahamas-First Scoring & Discovery Refinement
+
+## Objective
+
+Refine the existing Automated Tender Intelligence Engine so it operates as a Bahamas-first business development intelligence system for ONWRD.
+
+ONWRD is a Bahamas-based full-service marketing and communications agency specializing in:
+
+- Marketing campaigns
+- Branding
+- Communications strategy
+- Digital marketing
+- Social media
+- Tourism promotion
+- Community engagement
+- Public awareness campaigns
+- Stakeholder engagement
+- Creative production
+- Development-sector communications
+
+The goal is NOT to maximize the number of tenders discovered.
+
+The goal is:
+
+> Identify the highest-probability opportunities ONWRD can realistically win based on geography, sector alignment, buyer type, relationships, and capability fit.
+
+Keep the existing architecture:
+- source adapters
+- crawler system
+- AI scoring pipeline
+- keyword fallback scoring
+- PURSUE / CONSIDER / SKIP workflow
+
+Do not rebuild the system.
+
+---
+
+# 1. Add Bahamas-First Market Intelligence
+
+The current scoring identifies communications-related opportunities but needs stronger ONWRD market context.
+
+Every opportunity must be evaluated against:
+
+- Bahamas relevance
+- Caribbean relevance
+- international development relevance
+- realistic competitive position
+
+Add:
+
+```
+
+geography_score
+
+```
+
+Range:
+
+0-100
+
+---
+
+## Geographic scoring rules
+
+### Bahamas opportunities
+
+Examples:
+
+- Bahamas Government
+- Bahamas statutory agencies
+- Bahamas NGOs
+- Bahamas private sector
+- UN Bahamas projects
+
+Score:
+
+100
+
+
+### Caribbean opportunities
+
+Examples:
+
+- Jamaica
+- Barbados
+- Trinidad
+- OECS
+- Caribbean Development Bank projects
+
+Score:
+
+75
+
+
+### Small Island Developing States (SIDS)
+
+Score:
+
+60
+
+
+### Latin America
+
+Score:
+
+35
+
+
+### Global opportunities
+
+Score:
+
+20
+
+---
+
+Boost geographic signals:
+
+```
+
+Bahamas
+Caribbean
+CARICOM
+OECS
+SIDS
+Small Island Developing States
+Atlantic Caribbean
+
+```
+
+
+---
+
+# 2. Upgrade Fit Scoring Model
+
+Replace simple keyword weighting with a weighted opportunity score.
+
+New formula:
+
+```
+
+Overall Fit Score =
+
+```
+```
+
+Geography Fit          25%
+Sector Fit             25%
+Capability Match       20%
+Buyer Fit              15%
+Revenue Potential      10%
+Competition Risk        5%
+
+```
+
+Output:
+
+```
+
+Overall Score: 0-100
+
+Recommendation:
+PURSUE
+CONSIDER
+SKIP
+
+Confidence:
+HIGH
+MEDIUM
+LOW
+
+```
+
+---
+
+# 3. Sector Fit Intelligence
+
+Create sector-specific scoring.
+
+## High Priority Sectors
+
+### Tourism & Destination Marketing
+
+Weight: VERY HIGH
+
+Signals:
+
+```
+
+tourism
+destination marketing
+visitor experience
+hospitality
+travel promotion
+brand strategy
+destination branding
+
+```
+
+
+---
+
+### Government & Public Communications
+
+Weight: HIGH
+
+Signals:
+
+```
+
+public awareness
+citizen engagement
+stakeholder engagement
+communications campaign
+community outreach
+social mobilization
+
+```
+
+
+---
+
+### Branding & Marketing
+
+Weight: HIGH
+
+Signals:
+
+```
+
+marketing
+campaign
+branding
+creative services
+digital marketing
+content strategy
+media relations
+public relations
+
+```
+
+
+---
+
+### Development Communications
+
+Weight: HIGH
+
+Signals:
+
+```
+
+behavior change
+communications strategy
+community engagement
+advocacy
+awareness campaign
+knowledge dissemination
+
+```
+
+
+---
+
+## Reduce false positives
+
+The following terms should not strongly increase fit unless paired with communications requirements:
+
+```
+
+monitoring
+reporting
+evaluation
+assessment
+research
+documentation
+training
+capacity building
+
+```
+
+
+Reason:
+
+These terms currently pull in unrelated M&E and consulting work.
+
+---
+
+# 4. Buyer Type Intelligence
+
+Add:
+
+```
+
+buyer_type_score
+
+```
+
+Prioritize:
+
+Highest:
+
+```
+
+Bahamas Government
+Tourism organizations
+Hotels/resorts
+Banks
+Telecommunications companies
+Utilities
+UN agencies
+IDB
+Caribbean Development Bank
+Regional NGOs
+Development organizations
+
+```
+
+
+Lower priority:
+
+```
+
+engineering procurement
+construction projects
+infrastructure supply
+equipment procurement
+technical engineering services
+
+```
+
+
+---
+
+# 5. Improve Negative Scoring
+
+Keep current negative keyword system.
+
+Expand exclusions.
+
+Strong negative signals:
+
+```
+
+construction
+civil works
+roads
+bridges
+dams
+water supply
+sanitation
+electricity
+power plant
+medical equipment
+pharmaceutical
+drugs
+vehicles
+food supply
+cleaning services
+security services
+hardware
+servers
+network equipment
+software licensing
+laboratory equipment
+
+```
+
+
+Additional development-sector false positives:
+
+Reduce scoring for:
+
+```
+
+financial audit
+engineering consultancy
+technical feasibility study
+laboratory services
+scientific research
+
+```
+
+
+unless communications is explicitly part of the requirement.
+
+---
+
+# 6. Improve Existing Source Intelligence
+
+Current sources:
+
+- World Bank Procurement
+- UNDP Procurement Notices
+- IDB
+- Caribbean Development Bank
+- Bahamas Government
+
+Maintain all existing crawlers.
+
+---
+
+# World Bank Improvements
+
+Current issue:
+
+Too broad.
+
+Add regional filtering.
+
+Prioritize:
+
+```
+
+Bahamas
+Caribbean
+Latin America and Caribbean
+SIDS
+
+```
+
+
+Search terms:
+
+Keep:
+
+```
+
+communications
+marketing
+tourism
+branding
+community engagement
+public awareness
+campaign
+stakeholder engagement
+
+```
+
+
+Reduce:
+
+```
+
+reporting
+documentation
+evaluation
+monitoring
+
+```
+
+
+unless combined with communications terms.
+
+---
+
+# UNDP Improvements
+
+Current issue:
+
+International scope.
+
+Add geographic priority:
+
+Highest:
+
+```
+
+Bahamas
+Caribbean
+SIDS
+Latin America Caribbean
+
+```
+
+
+Boost relevant UN agencies:
+
+```
+
+UNDP
+UNICEF
+UN Women
+UN Tourism
+UNEP
+
+```
+
+
+when location and requirements match ONWRD capabilities.
+
+---
+
+# IDB Improvements
+
+Prioritize:
+
+```
+
+Bahamas
+Caribbean
+tourism
+communications
+digital transformation
+citizen engagement
+social development
+public awareness
+
+```
+
+
+---
+
+# Caribbean Development Bank Improvements
+
+Prioritize:
+
+```
+
+Bahamas
+Caribbean
+communications
+public awareness
+community engagement
+tourism
+social development
+
+```
+
+
+---
+
+# 7. Add New Priority Sources
+
+Add these sources next:
+
+## Caribbean Tourism Organization
+
+Priority:
+HIGH
+
+Reason:
+Strong ONWRD fit.
+
+Monitor:
+
+```
+
+destination marketing
+tourism promotion
+branding
+communications
+campaigns
+
+```
+
+
+---
+
+## CARICOM Procurement
+
+Priority:
+HIGH
+
+Monitor:
+
+```
+
+communications
+regional campaigns
+public awareness
+stakeholder engagement
+
+```
+
+
+---
+
+## EU Caribbean Development Funding
+
+Priority:
+MEDIUM
+
+Monitor:
+
+```
+
+communications
+visibility
+awareness
+outreach
+community engagement
+
+```
+
+
+---
+
+# 8. Add ONWRD Local Advantage Score
+
+Create:
+
+```
+
+bahamas_advantage_score
+
+```
+
+Range:
+
+0-100
+
+
+Example:
+
+```
+
+Opportunity:
+Bahamas tourism campaign
+
+Local Advantage:
+95
+
+Reasons:
+✓ Bahamas-based agency
+✓ Local market knowledge
+✓ Tourism experience
+✓ Stakeholder familiarity
+
+```
+
+
+Example:
+
+```
+
+Opportunity:
+Global infrastructure communications contract
+
+Local Advantage:
+25
+
+Reason:
+Limited geographic advantage
+
+```
+
+
+---
+
+# 9. Improve AI Explainability
+
+Every score must provide:
+
+## Why pursue
+
+Example:
+
+```
+
+Recommended because:
+
+✓ Bahamas relevance
+✓ Strong communications requirement
+✓ Tourism sector alignment
+✓ Relevant ONWRD capabilities
+✓ Suitable case studies available
+
+```
+
+
+## Why skip
+
+Example:
+
+```
+
+Not recommended because:
+
+✗ Infrastructure-focused
+✗ No communications component
+✗ Low geographic relevance
+
+```
+
+
+---
+
+# 10. Dashboard Changes
+
+Default opportunity ranking:
+
+1. Bahamas opportunities
+2. Caribbean opportunities
+3. International development opportunities
+4. Global opportunities
+
+
+Dashboard example:
+
+```
+
+Recommended Opportunities
+
+🇧🇸 Bahamas
+
+UNDP Bahamas Climate Awareness Campaign
+
+Score:
+91
+
+Recommendation:
+PURSUE
+
+🌴 Caribbean
+
+CDB Tourism Communications Project
+
+Score:
+84
+
+Recommendation:
+PURSUE
+
+🌎 Global
+
+World Bank Communications Consultant
+
+Score:
+55
+
+Recommendation:
+CONSIDER
+
+```
+
+
+---
+
+# 11. Add Outcome Learning Loop
+
+Track:
+
+```
+
+Won
+Lost
+Ignored
+Submitted
+
+```
+
+
+Use outcomes to improve:
+
+- source weighting
+- sector weighting
+- scoring accuracy
+- win probability
+
+
+Example:
+
+```
+
+CDB opportunities:
+
+Found:
+20
+
+Pursued:
+8
+
+Won:
+3
+
+Increase future weighting.
+
+```
+
+
+---
+
+# Success Criteria
+
+The system is successful when:
+
+1. ONWRD receives a small number of highly relevant opportunities daily.
+
+2. Bahamas opportunities naturally rank highest.
+
+3. Caribbean opportunities are prioritized over generic global opportunities.
+
+4. The AI avoids irrelevant procurement categories.
+
+5. Every opportunity explains:
+   - why it fits
+   - why ONWRD has an advantage
+   - why it may not be worth pursuing.
+
+6. The system behaves like a Bahamas-based business development director, not a generic tender scraper.
+```

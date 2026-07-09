@@ -6,7 +6,6 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { RefreshCw, ExternalLink, CheckCircle2, X, Flame, Zap, Minus } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
-import { useLocation } from "wouter";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
@@ -24,30 +23,47 @@ interface DiscoveredTender {
   fitScore?: number | null;
   recommendation?: string | null;
   scoringReasoning?: string | null;
+  geographyScore?: number | null;
+  geoRegion?: string | null;
+  bahamasAdvantageScore?: number | null;
+  confidence?: string | null;
   status: string;
   createdAt: string;
 }
 
-const FILTERS = [
+const STATUS_FILTERS = [
   { value: "all", label: "All" },
   { value: "new", label: "New" },
   { value: "saved", label: "Saved" },
   { value: "dismissed", label: "Dismissed" },
 ];
 
-const SCORE_FILTERS = [
-  { value: "all", label: "All Scores" },
-  { value: "70", label: "70+ (Strong)" },
-  { value: "50", label: "50+ (Relevant)" },
+const GEO_FILTERS = [
+  { value: "all", label: "All Regions" },
+  { value: "bahamas", label: "🇧🇸 Bahamas" },
+  { value: "caribbean", label: "🌴 Caribbean" },
+  { value: "sids", label: "🏝️ SIDS" },
+  { value: "global", label: "🌐 Global" },
 ];
+
+const GEO_LABELS: Record<string, string> = {
+  bahamas: "🇧🇸 Bahamas",
+  caribbean: "🌴 Caribbean",
+  sids: "🏝️ SIDS",
+  latam: "🌎 Lat Am",
+  global: "🌐 Global",
+};
 
 function ScoreBadge({ score, rec }: { score?: number | null; rec?: string | null }) {
   if (score == null) return <span className="text-muted-foreground text-xs">–</span>;
   const color =
-    rec === "PURSUE" ? "text-emerald-400 border-emerald-800 bg-emerald-900/20" :
-    rec === "CONSIDER" ? "text-yellow-400 border-yellow-800 bg-yellow-900/20" :
-    "text-gray-400 border-gray-700 bg-gray-900/20";
-  const icon = rec === "PURSUE" ? <Flame className="w-3 h-3" /> : rec === "CONSIDER" ? <Zap className="w-3 h-3" /> : <Minus className="w-3 h-3" />;
+    rec === "PURSUE"  ? "text-emerald-400 border-emerald-800 bg-emerald-900/20" :
+    rec === "CONSIDER"? "text-yellow-400 border-yellow-800 bg-yellow-900/20" :
+                        "text-gray-400 border-gray-700 bg-gray-900/20";
+  const icon =
+    rec === "PURSUE"   ? <Flame className="w-3 h-3" /> :
+    rec === "CONSIDER" ? <Zap className="w-3 h-3" /> :
+                         <Minus className="w-3 h-3" />;
   return (
     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-xs font-semibold ${color}`}>
       {icon}{score}
@@ -55,25 +71,52 @@ function ScoreBadge({ score, rec }: { score?: number | null; rec?: string | null
   );
 }
 
+function ConfidenceBadge({ confidence }: { confidence?: string | null }) {
+  if (!confidence || confidence === "LOW") return null;
+  const color = confidence === "HIGH"
+    ? "text-blue-400 border-blue-800 bg-blue-900/20"
+    : "text-slate-400 border-slate-700 bg-slate-900/20";
+  return (
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded border text-[10px] font-medium ${color}`}>
+      {confidence}
+    </span>
+  );
+}
+
+function GeoBadge({ region }: { region?: string | null }) {
+  if (!region) return null;
+  const label = GEO_LABELS[region];
+  if (!label) return null;
+  const isHighPrio = region === "bahamas" || region === "caribbean";
+  return (
+    <span className={`text-xs ${isHighPrio ? "text-amber-400 font-medium" : "text-muted-foreground"}`}>
+      {label}
+    </span>
+  );
+}
+
 export default function OpportunityInbox() {
   const { toast } = useToast();
   const qc = useQueryClient();
-  const [, navigate] = useLocation();
-  const [filter, setFilter] = useState("new");
-  const [minScore, setMinScore] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("new");
+  const [geoFilter, setGeoFilter] = useState("all");
   const [expanded, setExpanded] = useState<number | null>(null);
 
-  const { data: items = [], isLoading, isFetching } = useQuery<DiscoveredTender[]>({
-    queryKey: ["discovered-tenders", filter, minScore],
+  const { data: rawItems = [], isLoading, isFetching } = useQuery<DiscoveredTender[]>({
+    queryKey: ["discovered-tenders", statusFilter],
     queryFn: async () => {
       const params = new URLSearchParams();
-      if (filter !== "all") params.set("status", filter);
-      if (minScore !== "all") params.set("minScore", minScore);
+      if (statusFilter !== "all") params.set("status", statusFilter);
       const r = await fetch(`${BASE}/api/discovered-tenders?${params}`);
       if (!r.ok) throw new Error("Failed to load");
       return r.json();
     },
   });
+
+  // Client-side geo filter
+  const items = geoFilter === "all"
+    ? rawItems
+    : rawItems.filter((i) => i.geoRegion === geoFilter);
 
   const updateStatus = useMutation({
     mutationFn: async ({ id, status }: { id: number; status: string }) => {
@@ -91,7 +134,11 @@ export default function OpportunityInbox() {
 
   const triggerCrawl = useMutation({
     mutationFn: async () => {
-      const r = await fetch(`${BASE}/api/tender-intelligence/crawl`, { method: "POST" });
+      const r = await fetch(`${BASE}/api/tender-intelligence/crawl`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
       if (!r.ok) throw new Error("Failed to start");
       return r.json();
     },
@@ -102,15 +149,18 @@ export default function OpportunityInbox() {
     onError: () => toast({ title: "Failed to start crawl", variant: "destructive" }),
   });
 
-  const pursue = items.filter((i) => i.recommendation === "PURSUE").length;
-  const consider = items.filter((i) => i.recommendation === "CONSIDER").length;
+  const pursue  = rawItems.filter((i) => i.recommendation === "PURSUE").length;
+  const consider = rawItems.filter((i) => i.recommendation === "CONSIDER").length;
+  const bahamas  = rawItems.filter((i) => i.geoRegion === "bahamas").length;
+  const caribbean = rawItems.filter((i) => i.geoRegion === "caribbean").length;
 
   return (
     <div className="p-8 max-w-5xl mx-auto">
+      {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 gap-4">
         <div>
           <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">Opportunity Inbox</h1>
-          <p className="text-muted-foreground">AI-discovered procurement opportunities, scored for ONWRD fit.</p>
+          <p className="text-muted-foreground">Bahamas-first tender intelligence, scored for ONWRD fit.</p>
         </div>
         <Button
           variant="outline"
@@ -122,30 +172,36 @@ export default function OpportunityInbox() {
         </Button>
       </div>
 
-      {items.length > 0 && (
-        <div className="grid grid-cols-3 gap-4 mb-8">
+      {/* Summary cards */}
+      {rawItems.length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
           <div className="p-4 rounded-lg border border-emerald-900 bg-emerald-900/10 text-center">
             <div className="text-2xl font-bold text-emerald-400">{pursue}</div>
-            <div className="text-xs text-muted-foreground mt-1">Pursue</div>
+            <div className="text-xs text-muted-foreground mt-1">🔥 Pursue</div>
           </div>
           <div className="p-4 rounded-lg border border-yellow-900 bg-yellow-900/10 text-center">
             <div className="text-2xl font-bold text-yellow-400">{consider}</div>
-            <div className="text-xs text-muted-foreground mt-1">Consider</div>
+            <div className="text-xs text-muted-foreground mt-1">⚡ Consider</div>
           </div>
-          <div className="p-4 rounded-lg border border-border bg-card text-center">
-            <div className="text-2xl font-bold text-white">{items.length}</div>
-            <div className="text-xs text-muted-foreground mt-1">Total shown</div>
+          <div className="p-4 rounded-lg border border-amber-800/50 bg-amber-900/10 text-center">
+            <div className="text-2xl font-bold text-amber-400">{bahamas}</div>
+            <div className="text-xs text-muted-foreground mt-1">🇧🇸 Bahamas</div>
+          </div>
+          <div className="p-4 rounded-lg border border-teal-900/50 bg-teal-900/10 text-center">
+            <div className="text-2xl font-bold text-teal-400">{caribbean}</div>
+            <div className="text-xs text-muted-foreground mt-1">🌴 Caribbean</div>
           </div>
         </div>
       )}
 
+      {/* Filters */}
       <div className="flex flex-wrap gap-2 mb-4">
-        {FILTERS.map((f) => (
+        {STATUS_FILTERS.map((f) => (
           <button
             key={f.value}
-            onClick={() => setFilter(f.value)}
+            onClick={() => setStatusFilter(f.value)}
             className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
-              filter === f.value
+              statusFilter === f.value
                 ? "bg-primary text-white border-primary"
                 : "bg-card text-muted-foreground border-border hover:text-white"
             }`}
@@ -154,12 +210,12 @@ export default function OpportunityInbox() {
           </button>
         ))}
         <span className="mx-2 border-l border-border" />
-        {SCORE_FILTERS.map((f) => (
+        {GEO_FILTERS.map((f) => (
           <button
             key={f.value}
-            onClick={() => setMinScore(f.value)}
+            onClick={() => setGeoFilter(f.value)}
             className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
-              minScore === f.value
+              geoFilter === f.value
                 ? "bg-primary text-white border-primary"
                 : "bg-card text-muted-foreground border-border hover:text-white"
             }`}
@@ -169,6 +225,7 @@ export default function OpportunityInbox() {
         ))}
       </div>
 
+      {/* List */}
       {isLoading ? (
         <div className="space-y-3">
           {[1, 2, 3].map((i) => <Skeleton key={i} className="h-24 w-full rounded-lg" />)}
@@ -191,8 +248,10 @@ export default function OpportunityInbox() {
             <div
               key={item.id}
               className={`border rounded-lg bg-card transition-all ${
-                item.recommendation === "PURSUE" ? "border-emerald-900/60" :
-                item.recommendation === "CONSIDER" ? "border-yellow-900/60" :
+                item.recommendation === "PURSUE"  ? "border-emerald-900/60" :
+                item.recommendation === "CONSIDER"? "border-yellow-900/60" :
+                item.geoRegion === "bahamas"       ? "border-amber-900/40" :
+                item.geoRegion === "caribbean"     ? "border-teal-900/40" :
                 "border-border"
               }`}
             >
@@ -204,11 +263,12 @@ export default function OpportunityInbox() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap mb-1">
                       <ScoreBadge score={item.fitScore} rec={item.recommendation} />
-                      {item.country && (
-                        <span className="text-xs text-muted-foreground">{item.country}</span>
-                      )}
+                      <GeoBadge region={item.geoRegion} />
+                      <ConfidenceBadge confidence={item.confidence} />
                       {item.sector && (
-                        <Badge variant="outline" className="text-xs py-0">{item.sector}</Badge>
+                        <Badge variant="outline" className="text-xs py-0 max-w-[200px] truncate">
+                          {item.sector}
+                        </Badge>
                       )}
                     </div>
                     <h3 className="font-medium text-white text-sm leading-snug">{item.title}</h3>
@@ -245,17 +305,36 @@ export default function OpportunityInbox() {
               {expanded === item.id && (
                 <div className="px-4 pb-4 border-t border-border/50 pt-3 space-y-3">
                   <p className="text-sm text-muted-foreground leading-relaxed">{item.description}</p>
+
+                  {/* Score breakdown */}
+                  {(item.geographyScore != null || item.bahamasAdvantageScore != null) && (
+                    <div className="flex gap-4 text-xs">
+                      {item.geographyScore != null && (
+                        <span className="text-muted-foreground">
+                          Geography score: <span className="text-white font-medium">{item.geographyScore}/100</span>
+                        </span>
+                      )}
+                      {item.bahamasAdvantageScore != null && (
+                        <span className="text-muted-foreground">
+                          Bahamas advantage: <span className="text-amber-400 font-medium">{item.bahamasAdvantageScore}/100</span>
+                        </span>
+                      )}
+                    </div>
+                  )}
+
                   {item.scoringReasoning && (
                     <div className="p-3 rounded bg-muted/20 border border-border text-xs text-muted-foreground">
-                      <span className="font-medium text-foreground">AI Reasoning: </span>
+                      <span className="font-medium text-foreground">Scoring: </span>
                       {item.scoringReasoning}
                     </div>
                   )}
+
                   <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
                     {item.deadline && <span>Deadline: {format(new Date(item.deadline), "MMM d, yyyy")}</span>}
                     {item.valueAmount && <span>· Value: {item.valueAmount}</span>}
                     <span>· Discovered {format(new Date(item.createdAt), "MMM d")}</span>
                   </div>
+
                   <div className="flex gap-2 flex-wrap">
                     {item.url && (
                       <a
