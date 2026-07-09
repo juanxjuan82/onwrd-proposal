@@ -200,6 +200,143 @@ router.post("/knowledge/:id/approve-for-reuse", async (req, res) => {
   }
 });
 
+// ── Crawl ONWRD website for case studies ──────────────────────────────────
+router.post("/knowledge/crawl-case-studies", async (req, res) => {
+  const BASE_DOMAIN = "https://onwrdadvisors.com";
+  const CASE_STUDY_PATH = "/case-study/";
+
+  async function fetchText(url: string): Promise<string> {
+    const r = await fetch(url, {
+      headers: { "User-Agent": "ONWRD-Proposal-Desk/1.0 (internal crawler)" },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.text();
+  }
+
+  function extractTitle(html: string, fallback: string): string {
+    const ogTitle = html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i)?.[1];
+    if (ogTitle) return ogTitle.trim();
+    const tag = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1];
+    return tag ? tag.replace(/\s*[|–—-].*$/, "").trim() : fallback;
+  }
+
+  function htmlToText(html: string): string {
+    return html
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<nav[\s\S]*?<\/nav>/gi, " ")
+      .replace(/<header[\s\S]*?<\/header>/gi, " ")
+      .replace(/<footer[\s\S]*?<\/footer>/gi, " ")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+      .replace(/&nbsp;/g, " ").replace(/&#\d+;/g, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim()
+      .slice(0, 12000);
+  }
+
+  async function discoverCaseStudyUrls(): Promise<string[]> {
+    const urls = new Set<string>();
+    const sitemapsToTry = [
+      `${BASE_DOMAIN}/sitemap.xml`,
+      `${BASE_DOMAIN}/sitemap_index.xml`,
+      `${BASE_DOMAIN}/page-sitemap.xml`,
+      `${BASE_DOMAIN}/post-sitemap.xml`,
+    ];
+
+    for (const sitemapUrl of sitemapsToTry) {
+      try {
+        const xml = await fetchText(sitemapUrl);
+        // Find all <loc> entries pointing to case studies
+        const locMatches = xml.matchAll(/<loc>([^<]+)<\/loc>/gi);
+        for (const m of locMatches) {
+          const url = m[1].trim();
+          if (url.includes(CASE_STUDY_PATH) && url !== `${BASE_DOMAIN}${CASE_STUDY_PATH}`) {
+            urls.add(url);
+          }
+          // Follow sub-sitemaps (sitemap index)
+          if (url.endsWith(".xml") && url !== sitemapUrl) {
+            try {
+              const subXml = await fetchText(url);
+              const subMatches = subXml.matchAll(/<loc>([^<]+)<\/loc>/gi);
+              for (const sm of subMatches) {
+                const subUrl = sm[1].trim();
+                if (subUrl.includes(CASE_STUDY_PATH) && subUrl !== `${BASE_DOMAIN}${CASE_STUDY_PATH}`) {
+                  urls.add(subUrl);
+                }
+              }
+            } catch { /* skip broken sub-sitemaps */ }
+          }
+        }
+        if (urls.size > 0) break; // stop trying sitemaps once we have results
+      } catch { /* try next sitemap */ }
+    }
+
+    return Array.from(urls);
+  }
+
+  try {
+    const discovered = await discoverCaseStudyUrls();
+
+    if (discovered.length === 0) {
+      res.status(404).json({
+        error: "No case study URLs found in the sitemap. The sitemap may be structured differently.",
+        hint: "Try adding case studies manually or check onwrdadvisors.com/sitemap.xml",
+      });
+      return;
+    }
+
+    // Get existing sourceUrls to detect duplicates
+    const existing = await db
+      .select({ id: knowledgeDocumentsTable.id, sourceUrl: knowledgeDocumentsTable.sourceUrl })
+      .from(knowledgeDocumentsTable);
+    const existingByUrl = new Map(existing.filter((d) => d.sourceUrl).map((d) => [d.sourceUrl!, d.id]));
+
+    const results = { created: 0, updated: 0, failed: 0, total: discovered.length };
+
+    for (const url of discovered) {
+      try {
+        const html = await fetchText(url);
+        const slug = url.replace(/\/$/, "").split("/").pop() ?? url;
+        const title = extractTitle(html, slug.replace(/-/g, " "));
+        const content = htmlToText(html);
+
+        if (!content || content.length < 100) {
+          results.failed++;
+          continue;
+        }
+
+        const existingId = existingByUrl.get(url);
+        if (existingId) {
+          await db
+            .update(knowledgeDocumentsTable)
+            .set({ title, content, updatedAt: new Date() })
+            .where(eq(knowledgeDocumentsTable.id, existingId));
+          results.updated++;
+        } else {
+          await db.insert(knowledgeDocumentsTable).values({
+            title,
+            content,
+            docType: "case_study",
+            isApproved: false,
+            sourceUrl: url,
+            tags: JSON.stringify(["case_study", "website"]),
+          });
+          results.created++;
+        }
+      } catch {
+        results.failed++;
+      }
+    }
+
+    res.json(results);
+  } catch (err) {
+    req.log.error({ err }, "Error crawling case studies");
+    res.status(500).json({ error: "Failed to crawl case studies" });
+  }
+});
+
 // ── Delete a knowledge document ────────────────────────────────────────────
 router.delete("/knowledge/:id", async (req, res) => {
   const id = Number(req.params.id);

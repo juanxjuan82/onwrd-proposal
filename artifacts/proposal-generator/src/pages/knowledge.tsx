@@ -21,7 +21,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { BookOpen, CheckCircle2, Plus, Upload, Trash2, Clock } from "lucide-react";
+import { BookOpen, CheckCircle2, Plus, Upload, Trash2, Clock, RefreshCw } from "lucide-react";
 import { format } from "date-fns";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -154,6 +154,23 @@ export default function Knowledge() {
     onError: (err) => toast({ title: "Delete failed", description: (err as Error).message, variant: "destructive" }),
   });
 
+  const crawlCaseStudies = useMutation({
+    mutationFn: async () => {
+      const r = await fetch(`${BASE}/api/knowledge/crawl-case-studies`, { method: "POST" });
+      const data = await r.json();
+      if (!r.ok) throw new Error((data as { error?: string }).error ?? "Crawl failed");
+      return data as { created: number; updated: number; failed: number; total: number };
+    },
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["knowledge"] });
+      toast({
+        title: `Synced ${data.total} case studies`,
+        description: `${data.created} new · ${data.updated} updated · ${data.failed} failed`,
+      });
+    },
+    onError: (err) => toast({ title: "Sync failed", description: (err as Error).message, variant: "destructive" }),
+  });
+
   const filtered = (docs ?? []).filter((d) => filter === "all" || d.docType === filter);
 
   return (
@@ -163,7 +180,11 @@ export default function Knowledge() {
           <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">Knowledge Library</h1>
           <p className="text-muted-foreground">Case studies, capabilities, and snippets used to ground AI proposal generation.</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
+          <Button variant="outline" onClick={() => crawlCaseStudies.mutate()} disabled={crawlCaseStudies.isPending}>
+            <RefreshCw className={`w-4 h-4 mr-2 ${crawlCaseStudies.isPending ? "animate-spin" : ""}`} />
+            {crawlCaseStudies.isPending ? "Syncing…" : "Sync Case Studies"}
+          </Button>
           <Button variant="outline" onClick={() => fileInputRef.current?.click()} disabled={importFile.isPending}>
             <Upload className="w-4 h-4 mr-2" />
             {importFile.isPending ? "Importing…" : "Import File"}
