@@ -8,3 +8,4 @@ export * from "./proposal-review-events";
 export * from "./knowledge-documents";
 export * from "./google-exports";
 export * from "./notifications";
+export * from "./proposal-strategies";

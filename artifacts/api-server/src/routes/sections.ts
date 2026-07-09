@@ -8,7 +8,7 @@ import {
 } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { openai } from "@workspace/integrations-openai-ai-server";
-import { createGoogleDoc, appendContentWithLogo } from "../lib/google-docs.js";
+import { createGoogleDoc, appendContentWithLogo, shareWithAnyone } from "../lib/google-docs.js";
 
 const router = Router();
 
@@ -310,6 +310,103 @@ router.post("/proposals/:id/export-to-google-docs", async (req, res) => {
     req.log.error({ err }, "Error exporting to Google Docs");
     res.status(500).json({ error: "Failed to export to Google Docs" });
   }
+});
+
+// ── AI improve sections with critic findings ───────────────────────────────
+router.post("/proposals/:id/ai-improve-sections", async (req, res) => {
+  const proposalId = Number(req.params.id);
+  if (isNaN(proposalId)) {
+    res.status(400).json({ error: "Invalid proposal id" });
+    return;
+  }
+
+  const [proposal] = await db
+    .select()
+    .from(proposalsTable)
+    .where(eq(proposalsTable.id, proposalId));
+
+  if (!proposal) {
+    res.status(404).json({ error: "Proposal not found" });
+    return;
+  }
+
+  const sections = await db
+    .select()
+    .from(proposalSectionsTable)
+    .where(eq(proposalSectionsTable.proposalId, proposalId))
+    .orderBy(proposalSectionsTable.orderIndex);
+
+  const sectionsToImprove = sections.filter(
+    (s) => s.criticFindings && (s.status === "needs_review" || s.status === "drafted")
+  );
+
+  if (sectionsToImprove.length === 0) {
+    res.status(400).json({ error: "No sections with critic findings to improve. Run the critic pass first." });
+    return;
+  }
+
+  res.json({ message: "Improvement started", count: sectionsToImprove.length });
+
+  (async () => {
+    try {
+      const sectionPayload = sectionsToImprove
+        .map((s) => `=== ${s.title} (${s.sectionKey}) ===\nCRITIC FINDINGS:\n${s.criticFindings}\n\nCURRENT CONTENT:\n${s.content}`)
+        .join("\n\n---\n\n");
+
+      const completion = await openai.chat.completions.create({
+        model: "gpt-5.2",
+        max_completion_tokens: 12000,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: `You are a senior proposal editor at ONWRD. You receive proposal sections that have been flagged by a critic with specific issues. Your job is to rewrite each section to address the issues.
+
+Rules:
+- Address every critic finding directly
+- Keep the same general structure and intent — improve quality, don't replace it
+- Do not invent credentials, metrics, or case studies not grounded in the original content
+- If a critic finding says to add specific ONWRD information you don't have, insert [NEEDS ONWRD INPUT: description] rather than fabricating it
+- Write in plain, direct English — no jargon or filler
+
+Return JSON with an "improvements" array. Each element:
+- sectionKey: the section key
+- content: the fully rewritten section content (markdown)
+- changesSummary: 1-2 sentences describing what you changed and why`,
+          },
+          {
+            role: "user",
+            content: `Improve these proposal sections for client: ${proposal.clientName}\n\n${sectionPayload}`,
+          },
+        ],
+      });
+
+      const raw = completion.choices[0]?.message?.content ?? "{}";
+      const data = JSON.parse(raw);
+      const improvements: { sectionKey: string; content: string; changesSummary: string }[] = data.improvements ?? [];
+
+      for (const improvement of improvements) {
+        const section = sectionsToImprove.find((s) => s.sectionKey === improvement.sectionKey);
+        if (!section || !improvement.content) continue;
+
+        const hasBlocker = improvement.content.includes("[NEEDS ONWRD INPUT");
+        await db
+          .update(proposalSectionsTable)
+          .set({
+            content: improvement.content,
+            status: hasBlocker ? "blocked_missing_input" : "drafted",
+            criticFindings: null,
+            updatedAt: new Date(),
+          })
+          .where(and(
+            eq(proposalSectionsTable.id, section.id),
+            eq(proposalSectionsTable.proposalId, proposalId)
+          ));
+      }
+    } catch (err) {
+      console.error("[ai-improve-sections] failed:", err);
+    }
+  })();
 });
 
 export default router;

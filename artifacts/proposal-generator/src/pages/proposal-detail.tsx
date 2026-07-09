@@ -136,10 +136,30 @@ function SectionsPanel({ proposalId }: { proposalId: number }) {
       const majorCount = data.summary?.filter((s: { severity: string }) => s.severity === "major").length ?? 0;
       toast({
         title: "Critic pass complete",
-        description: majorCount > 0 ? `${majorCount} section(s) need review.` : "No major issues found.",
+        description: majorCount > 0 ? `${majorCount} section(s) need review. Use Auto-Improve to fix them.` : "No major issues found.",
       });
     },
     onError: (err) => toast({ title: "Critic failed", description: (err as Error).message, variant: "destructive" }),
+  });
+
+  const autoImprove = useMutation({
+    mutationFn: async () => {
+      const r = await fetch(`${BASE}/api/proposals/${proposalId}/ai-improve-sections`, { method: "POST" });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        throw new Error((e as { error?: string }).error ?? "Auto-improve failed");
+      }
+      return r.json();
+    },
+    onSuccess: (data) => {
+      setTimeout(() => qc.invalidateQueries({ queryKey: ["proposal-sections", proposalId] }), 5000);
+      toast({
+        title: `Auto-improving ${data.count} section(s)…`,
+        description: "AI is rewriting flagged sections. Refresh in ~30 seconds to see the results.",
+        duration: 8000,
+      });
+    },
+    onError: (err) => toast({ title: "Auto-improve failed", description: (err as Error).message, variant: "destructive" }),
   });
 
   const approveForExport = useMutation({
@@ -219,6 +239,21 @@ function SectionsPanel({ proposalId }: { proposalId: number }) {
               <><Sparkles className="w-3.5 h-3.5 mr-1.5" />Run Critic</>
             )}
           </Button>
+          {needsReviewCount > 0 && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => autoImprove.mutate()}
+              disabled={autoImprove.isPending || generatingCount > 0}
+              className="border-orange-700 text-orange-400 hover:bg-orange-900/20"
+            >
+              {autoImprove.isPending ? (
+                <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Improving…</>
+              ) : (
+                <><Sparkles className="w-3.5 h-3.5 mr-1.5" />Auto-Improve ({needsReviewCount})</>
+              )}
+            </Button>
+          )}
           <Button
             size="sm"
             onClick={() => approveForExport.mutate(undefined)}
