@@ -24,6 +24,83 @@ function getAdapter(adapterType: string): TenderSourceAdapter | null {
   }
 }
 
+// ── Keyword-based fallback scorer ──────────────────────────────────────────
+// Used when OpenAI is unavailable. Scores based on term frequency in
+// title + description + sector against ONWRD's core practice areas.
+function keywordScore(opp: TenderOpportunity): {
+  fitScore: number;
+  recommendation: string;
+  reasoning: string;
+} {
+  const text = [opp.title, opp.description, opp.sector ?? "", opp.organization]
+    .join(" ").toLowerCase();
+
+  const highSignals: string[] = [
+    "marketing", "campaign", "communications", "communication strategy",
+    "branding", "brand strategy", "brand identity", "advertising",
+    "media relations", "public relations", " pr ", "pr campaign",
+    "creative services", "content strategy", "copywriting", "editorial",
+    "storytelling", "messaging", "narrative",
+    "tourism", "destination marketing", "hospitality", "visitor", "travel promotion",
+    "social media", "digital marketing", "digital communications",
+    "online presence", "website content", "web content",
+    "video production", "multimedia", "photography", "graphic design",
+    "public awareness", "awareness campaign", "community engagement",
+    "stakeholder engagement", "behavior change", "outreach", "sensitization",
+    "advocacy", "knowledge management",
+  ];
+
+  const mediumSignals: string[] = [
+    "consulting", "advisory", "strategy", "strategic", "capacity building",
+    "training", "assessment", "evaluation", "survey", "research",
+    "market research", "feasibility study", "communications plan",
+    "engagement plan", "social mobilization", "visibility",
+    "monitoring", "reporting", "documentation",
+  ];
+
+  const negativeSignals: string[] = [
+    "construction", "civil works", "road works", "bridge", "dam",
+    "water supply", "sanitation", "electricity", "power plant",
+    "energy infrastructure", "drilling", "excavation",
+    "medical equipment", "pharmaceutical", "drugs", "health supplies",
+    "office supplies", "office furniture", "vehicles", "fleet",
+    "food supply", "catering", "cleaning services", "security services",
+    "it equipment", "hardware", "network equipment", "servers",
+    "software license", "spare parts", "laboratory equipment",
+  ];
+
+  let score = 0;
+  const matchedTerms: string[] = [];
+
+  for (const kw of highSignals) {
+    if (text.includes(kw)) {
+      score += 14;
+      matchedTerms.push(kw.trim());
+    }
+  }
+  for (const kw of mediumSignals) {
+    if (text.includes(kw)) {
+      score += 7;
+      matchedTerms.push(kw.trim());
+    }
+  }
+  for (const kw of negativeSignals) {
+    if (text.includes(kw)) {
+      score -= 12;
+    }
+  }
+
+  score = Math.max(0, Math.min(100, score));
+
+  const recommendation = score >= 70 ? "PURSUE" : score >= 40 ? "CONSIDER" : "SKIP";
+  const topMatches = [...new Set(matchedTerms)].slice(0, 3);
+  const reasoning = topMatches.length > 0
+    ? `Keyword match on: ${topMatches.join(", ")}. (Scored by keyword engine — AI scoring unavailable.)`
+    : "No relevant keywords found. (Scored by keyword engine — AI scoring unavailable.)";
+
+  return { fitScore: score, recommendation, reasoning };
+}
+
 async function scoreOpportunity(opp: TenderOpportunity): Promise<{
   fitScore: number;
   recommendation: string;
@@ -32,7 +109,7 @@ async function scoreOpportunity(opp: TenderOpportunity): Promise<{
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
-      max_completion_tokens: 500,
+      max_tokens: 500,
       messages: [
         {
           role: "system",
@@ -59,9 +136,40 @@ Low scores (<40): construction, IT infrastructure, supply procurement, unrelated
       reasoning: String(raw.reasoning ?? ""),
     };
   } catch (err) {
-    console.error("[scoring] OpenAI error:", err instanceof Error ? err.message : String(err));
-    return { fitScore: 0, recommendation: "SKIP", reasoning: "Scoring failed" };
+    console.warn("[scoring] OpenAI unavailable, using keyword fallback:", err instanceof Error ? err.message : String(err));
+    return keywordScore(opp);
   }
+}
+
+// ── Rescore existing items that failed AI scoring ───────────────────────────
+export async function rescoreWithKeywords(): Promise<number> {
+  const { sql } = await import("drizzle-orm");
+  const items = await db
+    .select()
+    .from(discoveredTendersTable)
+    .where(sql`${discoveredTendersTable.scoringReasoning} = 'Scoring failed' OR ${discoveredTendersTable.fitScore} = 0`);
+
+  let count = 0;
+  for (const item of items) {
+    const opp: TenderOpportunity = {
+      externalId: item.externalId ?? undefined,
+      title: item.title,
+      organization: item.organization,
+      url: item.url ?? undefined,
+      description: item.description,
+      country: item.country ?? undefined,
+      sector: item.sector ?? undefined,
+    };
+    const { fitScore, recommendation, reasoning } = keywordScore(opp);
+    await db.update(discoveredTendersTable).set({
+      fitScore,
+      recommendation,
+      scoringReasoning: reasoning,
+      updatedAt: new Date(),
+    }).where(eq(discoveredTendersTable.id, item.id));
+    count++;
+  }
+  return count;
 }
 
 export async function runCrawler(sourceId?: number): Promise<{

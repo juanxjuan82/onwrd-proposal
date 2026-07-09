@@ -28,7 +28,8 @@ export class UNGMAdapter implements TenderSourceAdapter {
       while ((match = linkPattern.exec(html)) !== null) {
         const path = match[1];
         const noticeId = match[2];
-        const rawTitle = stripHtml(match[3], 250);
+        // Strip leading "Title" label that appears in UNDP table cells
+        const rawTitle = stripHtml(match[3], 250).replace(/^Title\s+/i, "").trim();
 
         if (!noticeId || !rawTitle || rawTitle.length < 8) continue;
         if (seen.has(noticeId)) continue;

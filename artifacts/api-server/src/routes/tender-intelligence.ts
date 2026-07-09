@@ -8,7 +8,7 @@ import {
   tenderDigestSettingsTable,
 } from "@workspace/db";
 import { eq, desc, and, gte } from "drizzle-orm";
-import { runCrawler } from "../crawlers/index.js";
+import { runCrawler, rescoreWithKeywords } from "../crawlers/index.js";
 
 const router = Router();
 
@@ -45,6 +45,16 @@ router.patch("/tender-sources/:id", async (req, res) => {
 router.delete("/tender-sources/:id", async (req, res) => {
   await db.delete(tenderSourcesTable).where(eq(tenderSourcesTable.id, Number(req.params.id)));
   res.status(204).end();
+});
+
+// ── Re-score existing items with keyword fallback ──────────────────────────
+router.post("/tender-intelligence/rescore", async (req, res) => {
+  try {
+    const count = await rescoreWithKeywords();
+    res.json({ message: `Re-scored ${count} items using keyword engine`, count });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 // ── Manual crawl trigger ───────────────────────────────────────────────────

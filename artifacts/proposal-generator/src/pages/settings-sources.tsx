@@ -134,6 +134,25 @@ export default function SettingsSources() {
     },
   });
 
+  const rescore = useMutation({
+    mutationFn: async () => {
+      const r = await fetch(`${BASE}/api/tender-intelligence/rescore`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!r.ok) throw new Error("Failed");
+      return r.json() as Promise<{ count: number }>;
+    },
+    onSuccess: (data) => {
+      toast({
+        title: "Re-score complete",
+        description: `${data.count} items scored using keyword engine. Check the Inbox.`,
+      });
+      qc.invalidateQueries({ queryKey: ["discovered-tenders"] });
+    },
+    onError: () => toast({ title: "Re-score failed", variant: "destructive" }),
+  });
+
   const toggleProfile = useMutation({
     mutationFn: async ({ id, active }: { id: number; active: boolean }) => {
       const r = await fetch(`${BASE}/api/tender-search-profiles/${id}`, {
@@ -382,6 +401,16 @@ export default function SettingsSources() {
 
       {tab === "runs" && (
         <div className="space-y-2">
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-sm text-muted-foreground">Last {runs.length} crawl runs</p>
+            <button
+              onClick={() => rescore.mutate()}
+              disabled={rescore.isPending}
+              className="text-xs px-3 py-1.5 rounded-md border border-border bg-card hover:bg-accent text-muted-foreground hover:text-white transition-colors disabled:opacity-50"
+            >
+              {rescore.isPending ? "Re-scoring…" : "⚡ Re-score with keywords"}
+            </button>
+          </div>
           {runs.length === 0 ? (
             <p className="text-muted-foreground text-sm py-8 text-center">No crawl runs yet. Trigger one from the Inbox or a source.</p>
           ) : (
