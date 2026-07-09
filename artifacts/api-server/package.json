@@ -12,6 +12,7 @@
   "dependencies": {
     "@replit/connectors-sdk": "^0.4.0",
     "@types/express-session": "^1.18.2",
+    "@types/node-cron": "^3.0.11",
     "@types/nodemailer": "^8.0.0",
     "@workspace/api-zod": "workspace:*",
     "@workspace/db": "workspace:*",
@@ -24,6 +25,7 @@
     "googleapis": "^171.4.0",
     "mammoth": "^1.9.0",
     "multer": "^2.0.0",
+    "node-cron": "^4.6.0",
     "nodemailer": "^8.0.5",
     "pdf-parse": "^1.1.4",
     "pino": "^9",

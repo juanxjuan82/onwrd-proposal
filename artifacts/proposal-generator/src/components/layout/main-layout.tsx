@@ -1,5 +1,5 @@
 import { Link, useLocation } from "wouter";
-import { Plus, LayoutDashboard, Briefcase, Target, BookOpen, Settings } from "lucide-react";
+import { Plus, LayoutDashboard, Briefcase, Target, BookOpen, Settings, Inbox } from "lucide-react";
 
 export function MainLayout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
@@ -49,6 +49,14 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
               Tenders
             </Link>
             <Link
+              href="/inbox"
+              className={navItem(location.startsWith("/inbox"))}
+              data-testid="nav-inbox"
+            >
+              <Inbox className="w-5 h-5 flex-shrink-0" />
+              Inbox
+            </Link>
+            <Link
               href="/knowledge"
               className={navItem(location.startsWith("/knowledge"))}
               data-testid="nav-knowledge"
@@ -57,8 +65,16 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
               Knowledge
             </Link>
             <Link
+              href="/settings/sources"
+              className={navItem(location.startsWith("/settings/sources"))}
+              data-testid="nav-sources"
+            >
+              <Target className="w-5 h-5 flex-shrink-0" />
+              Sources
+            </Link>
+            <Link
               href="/settings"
-              className={navItem(location.startsWith("/settings"))}
+              className={navItem(location === "/settings")}
               data-testid="nav-settings"
             >
               <Settings className="w-5 h-5 flex-shrink-0" />

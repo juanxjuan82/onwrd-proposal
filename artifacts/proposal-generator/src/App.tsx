@@ -15,6 +15,8 @@ import Opportunities from "./pages/opportunities";
 import OpportunityDetail from "./pages/opportunity-detail";
 import Knowledge from "./pages/knowledge";
 import SettingsGoogle from "./pages/settings-google";
+import OpportunityInbox from "./pages/opportunity-inbox";
+import SettingsSources from "./pages/settings-sources";
 
 const queryClient = new QueryClient();
 
@@ -36,7 +38,9 @@ function Router() {
             <Route path="/opportunities" component={Opportunities} />
             <Route path="/opportunities/:id" component={OpportunityDetail} />
             <Route path="/knowledge" component={Knowledge} />
+            <Route path="/inbox" component={OpportunityInbox} />
             <Route path="/settings" component={SettingsGoogle} />
+            <Route path="/settings/sources" component={SettingsSources} />
             <Route component={NotFound} />
           </Switch>
         </MainLayout>

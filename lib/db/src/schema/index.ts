@@ -9,3 +9,7 @@ export * from "./knowledge-documents";
 export * from "./google-exports";
 export * from "./notifications";
 export * from "./proposal-strategies";
+export * from "./tender-sources";
+export * from "./discovered-tenders";
+export * from "./crawler-runs";
+export * from "./tender-search-profiles";

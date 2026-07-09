@@ -7,6 +7,7 @@ import authRouter from "./auth";
 import opportunitiesRouter from "./opportunities";
 import sectionsRouter from "./sections";
 import knowledgeRouter from "./knowledge";
+import tenderIntelligenceRouter from "./tender-intelligence";
 
 const router: IRouter = Router();
 
@@ -18,5 +19,6 @@ router.use(authRouter);
 router.use(opportunitiesRouter);
 router.use(sectionsRouter);
 router.use(knowledgeRouter);
+router.use(tenderIntelligenceRouter);
 
 export default router;

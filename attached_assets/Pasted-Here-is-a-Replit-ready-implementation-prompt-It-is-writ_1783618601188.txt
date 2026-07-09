@@ -1,0 +1,759 @@
+Here is a Replit-ready implementation prompt. It is written as a build specification so Replit can understand the architecture, database changes, automation, and UI requirements.
+
+```markdown id="48391"
+# ONWRD Proposal Desk — Automated Tender Intelligence Engine
+
+## Feature: Daily Tender Source Crawling + AI Opportunity Discovery
+
+## Objective
+
+Build an automated tender discovery system that runs daily, discovers relevant procurement opportunities for ONWRD, filters irrelevant tenders, scores opportunities, and automatically feeds qualified opportunities into the existing AI proposal pipeline.
+
+The system should support:
+
+- Bahamas government tenders
+- Caribbean development opportunities
+- UN procurement
+- IDB and multilateral development opportunities
+- NGO opportunities
+- Development-sector consulting opportunities
+
+The goal:
+
+> Automatically find, analyze, and prioritize the opportunities ONWRD should pursue without manually searching tender portals.
+
+---
+
+# New Workflow
+
+Current:
+
+```
+
+User finds RFP
+↓
+User uploads RFP
+↓
+AI analysis
+
+```
+
+New:
+
+```
+
+Daily Cron Job
+↓
+Tender Source Crawlers
+↓
+New Opportunity Detection
+↓
+Document Collection
+↓
+AI Classification
+↓
+AI Relevance Filtering
+↓
+Bid Scoring
+↓
+Opportunity Dashboard
+↓
+Human Pursue Decision
+↓
+Proposal Pipeline
+
+```
+
+---
+
+# Tender Sources
+
+Create a configurable source system.
+
+Do not hardcode individual crawlers into the application.
+
+Create:
+
+`tender_sources`
+
+Database table:
+
+```
+
+id
+name
+source_type
+url
+adapter_type
+active
+last_checked_at
+last_success_at
+items_found_count
+created_at
+updated_at
+
+```
+
+Example records:
+
+```
+
+Bahamas Government Procurement
+type:
+government
+
+adapter:
+bahamas_gov
+
+```
+```
+
+UN Global Marketplace
+type:
+un
+
+adapter:
+ungm
+
+```
+```
+
+IDB Procurement
+type:
+development_bank
+
+adapter:
+idb
+
+```
+
+---
+
+# Initial Sources
+
+Implement support for:
+
+## Tier 1
+
+### Bahamas Government Procurement
+
+Purpose:
+Local government opportunities
+
+Priority:
+HIGH
+
+---
+
+### UN Global Marketplace (UNGM)
+
+Purpose:
+UN agency procurement
+
+Priority:
+HIGH
+
+---
+
+### Inter-American Development Bank (IDB)
+
+Purpose:
+Caribbean development projects
+
+Priority:
+HIGH
+
+---
+
+### Caribbean Development Bank (CDB)
+
+Purpose:
+Regional development opportunities
+
+Priority:
+HIGH
+
+---
+
+### World Bank Procurement
+
+Purpose:
+International development opportunities
+
+Priority:
+HIGH
+
+---
+
+## Tier 2
+
+Add adapters where possible:
+
+- DG Market / Development Business
+- CARICOM procurement
+- OECS procurement
+- EU Funding & Tenders Portal
+- USAID opportunities
+
+---
+
+# Crawler Architecture
+
+Create adapter pattern.
+
+Example:
+
+```
+
+src/
+└── tender-sources/
+├── index.ts
+├── base-adapter.ts
+├── bahamas-gov.ts
+├── ungm.ts
+├── idb.ts
+├── cdb.ts
+└── world-bank.ts
+
+````
+
+---
+
+Each adapter must implement:
+
+```typescript
+interface TenderSourceAdapter {
+
+fetchOpportunities(): Promise<TenderOpportunity[]>
+
+}
+````
+
+---
+
+Standard output format:
+
+```json
+{
+"title":"",
+"organization":"",
+"source":"",
+"url":"",
+"deadline":"",
+"country":"",
+"sector":"",
+"description":"",
+"documents":[]
+}
+```
+
+---
+
+# Cron Automation
+
+Create daily scheduled job.
+
+Run:
+
+```
+Every day at 6:00 AM
+```
+
+Process:
+
+```
+1. Run all active source adapters
+
+2. Collect opportunities
+
+3. Normalize data
+
+4. Check duplicates
+
+5. Save new tenders
+
+6. Download documents if available
+
+7. Run AI classification
+
+8. Score ONWRD fit
+
+9. Notify team
+```
+
+---
+
+# Duplicate Detection
+
+Prevent duplicate opportunities.
+
+Match using:
+
+* source URL
+* tender ID
+* organization
+* title similarity
+
+Example:
+
+Existing:
+
+```
+UNDP Climate Communication RFP
+```
+
+New crawl:
+
+```
+UNDP Climate Communications Consultancy
+```
+
+AI should recognize as same opportunity.
+
+---
+
+# AI Opportunity Classification
+
+Every discovered tender should automatically receive:
+
+```
+opportunity_type
+sector
+country
+buyer_type
+relevance_score
+```
+
+Example:
+
+```json
+{
+"type":"UN Agency",
+"sector":"Climate Communications",
+"country":"Bahamas",
+"relevance_score":92
+}
+```
+
+---
+
+# ONWRD Opportunity Profiles
+
+Create editable profiles.
+
+Database:
+
+`tender_search_profiles`
+
+Fields:
+
+```
+id
+name
+description
+keywords
+excluded_keywords
+active
+weighting_rules
+```
+
+---
+
+Default profiles:
+
+## Communications
+
+Keywords:
+
+```
+communications
+marketing
+campaign
+branding
+media
+public awareness
+digital engagement
+stakeholder engagement
+```
+
+---
+
+## Development Sector
+
+Keywords:
+
+```
+community engagement
+behavior change
+knowledge management
+capacity building
+social impact
+MEL
+```
+
+---
+
+## Tourism
+
+Keywords:
+
+```
+destination marketing
+tourism
+visitor experience
+brand strategy
+promotion
+```
+
+---
+
+Users should manage these from frontend.
+
+---
+
+# AI Relevance Filtering
+
+After crawling:
+
+Do not show every opportunity.
+
+AI evaluates:
+
+```
+ONWRD capability fit
+Market alignment
+Location relevance
+Revenue potential
+Probability of winning
+```
+
+Output:
+
+```json
+{
+"score":88,
+"recommendation":"PURSUUE",
+"confidence":"high",
+"reasoning":[
+"Bahamas-based requirement",
+"Strong communications fit",
+"Relevant case studies available"
+]
+}
+```
+
+---
+
+# Opportunity Inbox UI
+
+Create:
+
+## New Page
+
+```
+/opportunities/discovered
+```
+
+---
+
+Display:
+
+```
+New Opportunities Today
+
+🔥 UNDP Bahamas Climate Campaign
+
+Fit Score:
+91
+
+Source:
+UNGM
+
+Deadline:
+18 days
+
+Recommendation:
+PURSUE
+
+
+View Analysis
+Create Opportunity
+Ignore
+```
+
+---
+
+Filters:
+
+```
+Source
+Country
+Opportunity Type
+Score
+Deadline
+Sector
+```
+
+---
+
+# Auto-Creation Rules
+
+Allow configuration.
+
+Example:
+
+```
+Automatically create opportunities when:
+
+Fit Score >= 80
+
+AND
+
+Source is:
+UN
+IDB
+Bahamas Government
+```
+
+Otherwise:
+
+```
+Save as discovered opportunity
+```
+
+---
+
+# Notifications
+
+When high-value opportunities appear:
+
+Create notification.
+
+Example:
+
+```
+New recommended tender:
+
+IDB Caribbean Digital Transformation Project
+
+Score:
+87
+
+Deadline:
+24 days
+
+View Opportunity
+```
+
+---
+
+# Integration With Existing AI Pipeline
+
+Once accepted:
+
+Existing flow starts automatically:
+
+```
+Tender Created
+↓
+Requirement Extraction
+↓
+Bid Score
+↓
+Strategy Brief
+↓
+Proposal Generation
+```
+
+No duplicate logic.
+
+---
+
+# New Database Tables
+
+## tender_sources
+
+```
+id
+name
+type
+url
+adapter_type
+active
+last_checked_at
+```
+
+---
+
+## discovered_tenders
+
+```
+id
+source_id
+external_id
+title
+organization
+url
+deadline
+description
+raw_data
+status
+created_at
+```
+
+---
+
+## tender_search_profiles
+
+```
+id
+name
+keywords
+excluded_keywords
+active
+```
+
+---
+
+## crawler_runs
+
+```
+id
+source_id
+started_at
+completed_at
+status
+items_found
+errors
+```
+
+---
+
+## opportunity_scores
+
+```
+id
+tender_id
+score
+recommendation
+reasoning
+confidence
+created_at
+```
+
+---
+
+# Admin Settings
+
+Create:
+
+```
+Settings
+ |
+ └── Tender Sources
+       |
+       ├── Active Sources
+       ├── Search Profiles
+       ├── Crawl Schedule
+       └── Auto-create Rules
+```
+
+---
+
+# Error Handling
+
+If crawler fails:
+
+Do not break application.
+
+Store:
+
+```
+crawler_runs.status = failed
+crawler_runs.error_message
+```
+
+Notify admin.
+
+---
+
+# Security
+
+Do not expose crawler credentials.
+
+Use environment variables:
+
+```
+UNGM_API_KEY
+IDB_API_KEY
+WORLD_BANK_API_KEY
+```
+
+---
+
+# Testing Requirements
+
+Before deployment verify:
+
+## Source Tests
+
+* [ ] Each active source completes crawl
+* [ ] New opportunities are saved
+* [ ] Duplicate detection works
+
+## AI Tests
+
+* [ ] Relevant tenders score high
+* [ ] Irrelevant tenders score low
+* [ ] Recommendations include reasoning
+
+## Workflow Tests
+
+* [ ] High score opportunities appear in inbox
+* [ ] Creating opportunity starts AI pipeline
+* [ ] Strategy brief generates
+* [ ] Proposal generation receives strategy context
+
+## Performance
+
+Target:
+
+Daily crawl:
+<10 minutes
+
+AI filtering:
+<2 minutes per batch
+
+No duplicate opportunities created.
+
+---
+
+# Success Criteria
+
+The feature is successful when:
+
+1. ONWRD no longer manually searches multiple tender portals
+2. Relevant opportunities arrive daily in a prioritized inbox
+3. Team spends time only reviewing high-value bids
+4. Every accepted opportunity flows automatically into proposal generation
+5. Source performance data improves future opportunity selection
+
+```
+
+A note for implementation: I would ask Replit to build this in **two phases**.
+
+**Phase 1 (fastest ROI):**
+- `tender_sources` table
+- daily cron
+- UNGM + IDB + Bahamas sources
+- AI filtering
+- discovered opportunities inbox
+
+**Phase 2:**
+- more crawlers
+- source performance analytics
+- automatic learning from wins/losses
+- procurement portal integrations
+
+The crawler layer should be built as the foundation because it becomes the top of your entire ONWRD bid engine.
+```
