@@ -408,18 +408,34 @@ export default function SettingsSources() {
 
             <div className="space-y-4">
               <div>
-                <p className="text-xs font-medium text-emerald-400 uppercase tracking-wide mb-2">High signals <span className="text-muted-foreground normal-case font-normal">(+14 pts each)</span></p>
+                <p className="text-xs font-medium text-white uppercase tracking-wide mb-2">Elite signals <span className="text-muted-foreground normal-case font-normal">(+20 pts each — ONWRD's core services)</span></p>
                 <div className="flex flex-wrap gap-1.5">
                   {[
-                    "marketing","campaign","communications","branding","brand strategy","brand identity","rebranding",
-                    "advertising","media relations","public relations","pr campaign","creative services","creative agency",
+                    "marketing","communications","branding","campaign",
+                    "public relations","media relations",
+                    "media campaign","media strategy",
+                    "communications campaign","communications strategy",
+                    "marketing campaign","marketing strategy",
+                    "brand strategy","brand identity",
+                  ].map((kw) => (
+                    <span key={kw} className="px-2 py-0.5 rounded-full bg-white/10 text-white text-xs border border-white/25 font-medium">{kw}</span>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <p className="text-xs font-medium text-emerald-400 uppercase tracking-wide mb-2">High signals <span className="text-muted-foreground normal-case font-normal">(+12 pts each)</span></p>
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    "communication strategy","rebranding",
+                    "advertising","pr campaign","creative services","creative agency",
                     "content strategy","copywriting","editorial","storytelling","messaging","narrative",
                     "tourism","destination marketing","destination branding","hospitality","visitor experience","travel promotion",
                     "social media","digital marketing","digital communications","digital campaign","online presence",
                     "video production","multimedia","photography","graphic design",
                     "public awareness","awareness campaign","community engagement","stakeholder engagement",
                     "behavior change","outreach","sensitization","social mobilization","advocacy",
-                    "knowledge dissemination","visibility campaign","communications campaign",
+                    "knowledge dissemination","visibility campaign",
                   ].map((kw) => (
                     <span key={kw} className="px-2 py-0.5 rounded-full bg-emerald-900/20 text-emerald-400 text-xs border border-emerald-900/40">{kw}</span>
                   ))}

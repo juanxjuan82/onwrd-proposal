@@ -102,11 +102,20 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
     opp.title, opp.description, opp.sector ?? "", opp.organization, opp.country ?? "",
   ].join(" ").toLowerCase();
 
-  // Sector / capability signals
+  // ── Elite signals — ONWRD's exact core services (+20 pts each) ──────────
+  const eliteSignals: string[] = [
+    "marketing", "communications", "branding", "campaign",
+    "public relations", "media relations",
+    "media campaign", "media strategy",
+    "communications campaign", "communications strategy",
+    "marketing campaign", "marketing strategy",
+    "brand strategy", "brand identity",
+  ];
+
+  // ── High signals — strong indicators of relevant work (+12 pts each) ────
   const highSignals: string[] = [
-    "marketing", "campaign", "communications", "communication strategy",
-    "branding", "brand strategy", "brand identity", "rebranding",
-    "advertising", "media relations", "public relations", "pr campaign",
+    "communication strategy", "rebranding",
+    "advertising", "pr campaign",
     "creative services", "creative agency", "content strategy", "copywriting",
     "editorial", "storytelling", "messaging", "narrative",
     "tourism", "destination marketing", "destination branding",
@@ -117,7 +126,7 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
     "public awareness", "awareness campaign", "community engagement",
     "stakeholder engagement", "behavior change", "outreach", "sensitization",
     "social mobilization", "advocacy", "knowledge dissemination",
-    "visibility campaign", "communications campaign",
+    "visibility campaign",
   ];
 
   // Medium signals — useful but watch for false positives
@@ -154,9 +163,16 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
   const matchedTerms: string[] = [];
   let hasHighSignal = false;
 
+  for (const kw of eliteSignals) {
+    if (text.includes(kw)) {
+      rawSector += 20;
+      matchedTerms.push(kw.trim());
+      hasHighSignal = true;
+    }
+  }
   for (const kw of highSignals) {
     if (text.includes(kw)) {
-      rawSector += 14;
+      rawSector += 12;
       matchedTerms.push(kw.trim());
       hasHighSignal = true;
     }
