@@ -102,6 +102,30 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
     opp.title, opp.description, opp.sector ?? "", opp.organization, opp.country ?? "",
   ].join(" ").toLowerCase();
 
+  // ── Marketing gate — must match at least one core term or instant SKIP ──
+  const marketingGate: string[] = [
+    "marketing", "communications", "branding", "brand",
+    "campaign", "public relations", "advertising", "media relations",
+    "digital marketing", "social media", "creative services",
+    "content strategy", "communications strategy", "communications plan",
+    "pr ", "rebranding", "destination marketing", "tourism marketing",
+    "awareness campaign", "visibility campaign", "community engagement",
+    "stakeholder communications", "digital communications",
+  ];
+  const passesGate = marketingGate.some((kw) => text.includes(kw));
+  if (!passesGate) {
+    const { geographyScore, geoRegion } = computeGeoScore(opp.country, [opp.title, opp.description, opp.sector ?? ""].join(" "));
+    return {
+      fitScore: 0,
+      recommendation: "SKIP",
+      reasoning: "No marketing or communications terms found — not a fit for ONWRD.",
+      geographyScore,
+      geoRegion,
+      bahamasAdvantageScore: 0,
+      confidence: "LOW",
+    };
+  }
+
   // ── Elite signals — ONWRD's exact core services (+20 pts each) ──────────
   const eliteSignals: string[] = [
     "marketing", "communications", "branding", "campaign",
@@ -236,9 +260,24 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
 
 // ── AI scoring with keyword fallback ───────────────────────────────────────
 async function scoreOpportunity(opp: TenderOpportunity): Promise<ScoringResult> {
+  // Apply marketing gate before spending an AI call
+  const gateText = [opp.title, opp.description, opp.sector ?? "", opp.organization].join(" ").toLowerCase();
+  const gateTerms = [
+    "marketing", "communications", "branding", "brand",
+    "campaign", "public relations", "advertising", "media relations",
+    "digital marketing", "social media", "creative services",
+    "content strategy", "communications strategy", "communications plan",
+    "pr ", "rebranding", "destination marketing", "tourism marketing",
+    "awareness campaign", "visibility campaign", "community engagement",
+    "stakeholder communications", "digital communications",
+  ];
+  if (!gateTerms.some((kw) => gateText.includes(kw))) {
+    return keywordScore(opp); // will return score 0 immediately
+  }
+
   try {
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gemini-2.0-flash",
       max_tokens: 600,
       messages: [
         {
