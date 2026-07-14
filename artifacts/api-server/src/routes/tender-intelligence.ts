@@ -238,4 +238,41 @@ router.put("/tender-digest-settings", async (req, res) => {
   res.json({ ...updated, emails: JSON.parse(updated.emails) });
 });
 
+router.post("/tender-intelligence/notify-billing", async (req, res) => {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    res.status(400).json({ error: "RESEND_API_KEY not set." });
+    return;
+  }
+  try {
+    const { Resend } = await import("resend");
+    const resend = new Resend(apiKey);
+    const fromAddress = process.env.RESEND_FROM ?? "ONWRD Tender Desk <onboarding@resend.dev>";
+    const to = req.body?.to ?? "j.aymes@onwrdadvisors.com";
+    const html = `
+<div style="font-family:sans-serif;max-width:600px;margin:0 auto;color:#fff;background:#0a0a0a;padding:32px;border-radius:8px">
+  <img src="https://onwrdadvisors.com/wp-content/uploads/2024/01/onwrd-logo-white.png" style="height:36px;margin-bottom:24px" alt="ONWRD"/>
+  <h2 style="color:#fff;margin-bottom:4px">Action Required: OpenAI Billing</h2>
+  <p style="color:#888;margin-top:0;font-size:13px">${new Date().toLocaleString("en-US", { dateStyle: "full", timeStyle: "short" })}</p>
+  <div style="background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:16px;margin:20px 0">
+    <p style="color:#f87171;font-weight:600;margin:0 0 8px">⚠️ AI features are currently offline</p>
+    <p style="color:#aaa;margin:0;font-size:14px">The OpenAI API key on the ONWRD Proposal Desk has exceeded its quota. Proposal generation and AI scoring are unavailable until the account is topped up.</p>
+  </div>
+  <p style="color:#ccc;font-size:14px"><strong style="color:#fff">To fix:</strong> Log in to <a href="https://platform.openai.com/account/billing" style="color:#60a5fa">platform.openai.com/account/billing</a> and add credit to the account.</p>
+  <p style="color:#ccc;font-size:14px">Tender crawling and keyword scoring are still running normally. Only AI-powered features (proposal generation, AI scoring) are affected.</p>
+  <p style="margin-top:32px;color:#555;font-size:12px">Sent from ONWRD Proposal Desk — automated billing alert</p>
+</div>`;
+    const { error } = await resend.emails.send({
+      from: fromAddress,
+      to: Array.isArray(to) ? to : [to],
+      subject: `[ONWRD] Action required: OpenAI billing quota exceeded`,
+      html,
+    });
+    if (error) { res.status(500).json({ error: error.message }); return; }
+    res.json({ message: `Billing alert sent to ${Array.isArray(to) ? to.join(", ") : to}` });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 export default router;

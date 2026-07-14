@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
-import { RefreshCw, Trash2, Play, CheckCircle2, XCircle, Clock, Plus, Mail, Send } from "lucide-react";
+import { RefreshCw, Trash2, Play, CheckCircle2, XCircle, Clock, Plus, Mail, Send, AlertTriangle } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -216,6 +216,21 @@ export default function SettingsSources() {
     onError: (err: Error) => toast({ title: "Send failed", description: err.message, variant: "destructive" }),
   });
 
+  const notifyBilling = useMutation({
+    mutationFn: async () => {
+      const r = await fetch(`${BASE}/api/tender-intelligence/notify-billing`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const body = await r.json();
+      if (!r.ok) throw new Error(body.error ?? "Failed");
+      return body as { message: string };
+    },
+    onSuccess: (data) => toast({ title: "Alert sent", description: data.message }),
+    onError: (err: Error) => toast({ title: "Failed to send", description: err.message, variant: "destructive" }),
+  });
+
   const TABS = [
     { value: "sources", label: "Sources" },
     { value: "scoring", label: "Scoring" },
@@ -228,6 +243,26 @@ export default function SettingsSources() {
       <div className="mb-8">
         <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">Tender Intelligence</h1>
         <p className="text-muted-foreground">Manage sources, search profiles, and crawl history.</p>
+      </div>
+
+      <div className="flex items-center justify-between gap-4 px-4 py-3 rounded-lg border border-red-900/60 bg-red-900/10 mb-6">
+        <div className="flex items-center gap-3 min-w-0">
+          <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
+          <p className="text-sm text-red-300">
+            <span className="font-medium">AI features offline</span>
+            <span className="text-red-400/70 ml-1">— OpenAI quota exceeded. Proposal generation and AI scoring are unavailable.</span>
+          </p>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          className="flex-shrink-0 border-red-800 text-red-300 hover:bg-red-900/30 hover:text-red-200"
+          onClick={() => notifyBilling.mutate()}
+          disabled={notifyBilling.isPending || notifyBilling.isSuccess}
+        >
+          <Send className={`w-3.5 h-3.5 mr-1.5 ${notifyBilling.isPending ? "animate-pulse" : ""}`} />
+          {notifyBilling.isSuccess ? "Alert sent ✓" : notifyBilling.isPending ? "Sending…" : "Notify Admin"}
+        </Button>
       </div>
 
       <div className="flex gap-1 mb-6 border-b border-border">
