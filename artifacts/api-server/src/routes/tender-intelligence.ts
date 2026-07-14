@@ -248,7 +248,7 @@ router.post("/tender-intelligence/notify-billing", async (req, res) => {
     const { Resend } = await import("resend");
     const resend = new Resend(apiKey);
     const fromAddress = process.env.RESEND_FROM ?? "ONWRD Tender Desk <onboarding@resend.dev>";
-    const to = req.body?.to ?? "j.aymes@onwrdadvisors.com";
+    const to = req.body?.to ?? "r.dean@onwrdadvisors.com";
     const html = `
 <div style="font-family:sans-serif;max-width:600px;margin:0 auto;color:#fff;background:#0a0a0a;padding:32px;border-radius:8px">
   <img src="https://onwrdadvisors.com/wp-content/uploads/2024/01/onwrd-logo-white.png" style="height:36px;margin-bottom:24px" alt="ONWRD"/>
