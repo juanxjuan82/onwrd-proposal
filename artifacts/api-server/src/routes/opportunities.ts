@@ -42,7 +42,7 @@ async function runExtractRequirements(tenderId: number) {
   const sourceText = tender.rawText || tender.description;
 
   const completion = await openai.chat.completions.create({
-    model: "gpt-5.2",
+    model: AI_MODEL,
     max_completion_tokens: 4000,
     response_format: { type: "json_object" },
     messages: [
@@ -107,7 +107,7 @@ async function runBidScoring(tenderId: number) {
     : "No requirements extracted yet.";
 
   const completion = await openai.chat.completions.create({
-    model: "gpt-5.2",
+    model: AI_MODEL,
     max_completion_tokens: 2000,
     response_format: { type: "json_object" },
     messages: [
@@ -189,7 +189,7 @@ async function runGenerateStrategy(tenderId: number) {
     : "No requirements extracted.";
 
   const completion = await openai.chat.completions.create({
-    model: "gpt-5.2",
+    model: AI_MODEL,
     max_completion_tokens: 2000,
     response_format: { type: "json_object" },
     messages: [
