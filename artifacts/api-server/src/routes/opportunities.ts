@@ -10,7 +10,7 @@ import {
   proposalStrategiesTable,
 } from "@workspace/db";
 import { eq, desc, and } from "drizzle-orm";
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
 import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
 
 const router = Router();
@@ -544,8 +544,8 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
   (async () => {
     try {
       const completion = await openai.chat.completions.create({
-        model: "gpt-5.2",
-        max_completion_tokens: 16000,
+        model: AI_MODEL,
+        max_tokens: 16000,
         response_format: { type: "json_object" },
         messages: [
           {
@@ -587,7 +587,7 @@ ${SECTION_DEFINITIONS.map((s) => `- ${s.key}: ${s.title}`).join("\n")}`,
         .insert(proposalGenerationRunsTable)
         .values({
           proposalId: draft.id,
-          model: "gpt-5.2",
+          model: AI_MODEL,
           promptVersion: "2.0",
           retrievedKnowledgeIds: "[]",
           status: "completed",

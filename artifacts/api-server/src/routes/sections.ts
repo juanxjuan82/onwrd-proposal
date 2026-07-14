@@ -7,7 +7,7 @@ import {
   googleExportsTable,
 } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
 import { createGoogleDoc, appendContentWithLogo, shareWithAnyone } from "../lib/google-docs.js";
 
 const router = Router();
@@ -120,8 +120,8 @@ router.post("/proposals/:id/run-critic", async (req, res) => {
       .join("\n\n");
 
     const completion = await openai.chat.completions.create({
-      model: "gpt-5.2",
-      max_completion_tokens: 6000,
+      model: AI_MODEL,
+      max_tokens: 6000,
       response_format: { type: "json_object" },
       messages: [
         {
@@ -354,8 +354,8 @@ router.post("/proposals/:id/ai-improve-sections", async (req, res) => {
         .join("\n\n---\n\n");
 
       const completion = await openai.chat.completions.create({
-        model: "gpt-5.2",
-        max_completion_tokens: 12000,
+        model: AI_MODEL,
+        max_tokens: 12000,
         response_format: { type: "json_object" },
         messages: [
           {

@@ -245,26 +245,6 @@ export default function SettingsSources() {
         <p className="text-muted-foreground">Manage sources, search profiles, and crawl history.</p>
       </div>
 
-      <div className="flex items-center justify-between gap-4 px-4 py-3 rounded-lg border border-red-900/60 bg-red-900/10 mb-6">
-        <div className="flex items-center gap-3 min-w-0">
-          <AlertTriangle className="w-4 h-4 text-red-400 flex-shrink-0" />
-          <p className="text-sm text-red-300">
-            <span className="font-medium">AI features offline</span>
-            <span className="text-red-400/70 ml-1">— OpenAI quota exceeded. Proposal generation and AI scoring are unavailable.</span>
-          </p>
-        </div>
-        <Button
-          size="sm"
-          variant="outline"
-          className="flex-shrink-0 border-red-800 text-red-300 hover:bg-red-900/30 hover:text-red-200"
-          onClick={() => notifyBilling.mutate()}
-          disabled={notifyBilling.isPending || notifyBilling.isSuccess}
-        >
-          <Send className={`w-3.5 h-3.5 mr-1.5 ${notifyBilling.isPending ? "animate-pulse" : ""}`} />
-          {notifyBilling.isSuccess ? "Alert sent ✓" : notifyBilling.isPending ? "Sending…" : "Notify Admin"}
-        </Button>
-      </div>
-
       <div className="flex gap-1 mb-6 border-b border-border">
         {TABS.map((t) => (
           <button

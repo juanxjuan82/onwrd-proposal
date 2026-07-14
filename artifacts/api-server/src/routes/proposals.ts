@@ -2,7 +2,7 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { proposalsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
 import nodemailer from "nodemailer";
 import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
 import {
@@ -563,8 +563,8 @@ router.post("/proposals/parse-brief", async (req, res) => {
 
   try {
     const completion = await openai.chat.completions.create({
-      model: "gpt-5.2",
-      max_completion_tokens: 16000,
+      model: AI_MODEL,
+      max_tokens: 16000,
       messages: [
         {
           role: "system",
@@ -674,7 +674,7 @@ ${PROPOSAL_TEMPLATE}
 Return ONLY the completed proposal text — no JSON wrapper, no commentary.`;
 
     const completion = await openai.chat.completions.create({
-      model: "gpt-5.2",
+      model: AI_MODEL,
       messages: [
         { role: "system", content: intakeSystemPrompt },
         {
@@ -682,7 +682,7 @@ Return ONLY the completed proposal text — no JSON wrapper, no commentary.`;
           content: `Here is the project brief:\n\n${briefText}`,
         },
       ],
-      max_completion_tokens: 16000,
+      max_tokens: 16000,
     });
 
     const content = completion.choices[0]?.message?.content ?? "";

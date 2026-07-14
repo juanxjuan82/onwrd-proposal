@@ -2,7 +2,7 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { tendersTable, proposalsTable } from "@workspace/db";
 import { eq, desc } from "drizzle-orm";
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
 import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
 import {
   CreateTenderBody,
@@ -221,8 +221,8 @@ router.post("/tenders/extract-from-text", async (req, res) => {
 
   try {
     const completion = await openai.chat.completions.create({
-      model: "gpt-5.2",
-      max_completion_tokens: 4000,
+      model: AI_MODEL,
+      max_tokens: 4000,
       messages: [
         {
           role: "system",
@@ -323,8 +323,8 @@ ONWRD intends to respond to this tender. Generate a full proposal positioning ON
   (async () => {
     try {
       const completion = await openai.chat.completions.create({
-        model: "gpt-5.2",
-        max_completion_tokens: 16000,
+        model: AI_MODEL,
+        max_tokens: 16000,
         messages: [
           {
             role: "system",
