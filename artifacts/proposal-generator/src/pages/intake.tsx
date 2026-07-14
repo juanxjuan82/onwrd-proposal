@@ -4,7 +4,6 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { CheckCircle, ArrowLeft, ArrowRight } from "lucide-react";
 
 // ─── Schema ───────────────────────────────────────────────────────────────
@@ -16,213 +15,141 @@ const intakeSchema = z
     email: z.string().trim().min(1, "Email is required").email("Enter a valid email"),
     phone: z.string().optional(),
     preferredContact: z.string().optional(),
-    hearAbout: z.string().min(1, "Please tell us how you heard about ONWRD"),
+    hearAbout: z.string().min(1, "Please select one"),
     hearAboutOther: z.string().optional(),
-
-    orgName: z.string().trim().min(1, "Organization name is required"),
+    orgName: z.string().trim().min(1, "Organisation name is required"),
     website: z.string().optional(),
-    industry: z.string().min(1, "Industry / service category is required"),
+    industry: z.string().min(1, "Please select your industry"),
     industryOther: z.string().optional(),
-    market: z.string().min(1, "Primary market / geography is required"),
+    market: z.string().min(1, "Please select a market"),
     marketOther: z.string().optional(),
-
     problems: z.array(z.string()).min(1, "Please select at least one"),
     problemsOther: z.string().optional(),
+    agencyBefore: z.string().optional(),
     support: z.array(z.string()).min(1, "Please select at least one"),
     supportOther: z.string().optional(),
     investment: z.string().optional(),
-    agencyBefore: z.string().optional(),
-
-    decisionStage: z.string().min(1, "Please select where you are"),
+    decisionStage: z.string().min(1, "Please select one"),
   })
   .superRefine((v, ctx) => {
-    const requireOther = (selected: boolean, text: string | undefined, path: string) => {
-      if (selected && !text?.trim()) {
+    const req = (sel: boolean, val: string | undefined, path: string) => {
+      if (sel && !val?.trim())
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message: "Please specify" });
-      }
     };
-    requireOther(v.hearAbout === "Other", v.hearAboutOther, "hearAboutOther");
-    requireOther(v.industry === "Other", v.industryOther, "industryOther");
-    requireOther(v.market === "Other", v.marketOther, "marketOther");
-    requireOther(v.problems.includes("Other"), v.problemsOther, "problemsOther");
-    requireOther(v.support.includes("Other"), v.supportOther, "supportOther");
+    req(v.hearAbout === "Other", v.hearAboutOther, "hearAboutOther");
+    req(v.industry === "Other", v.industryOther, "industryOther");
+    req(v.market === "Other", v.marketOther, "marketOther");
+    req(v.problems.includes("Other"), v.problemsOther, "problemsOther");
+    req(v.support.includes("Other"), v.supportOther, "supportOther");
   });
 
-type IntakeValues = z.infer<typeof intakeSchema>;
+type V = z.infer<typeof intakeSchema>;
 
 // ─── Options ──────────────────────────────────────────────────────────────
-const CONTACT_OPTIONS = ["Email", "Phone"];
-const HEAR_OPTIONS = [
-  "Personal referral", "LinkedIn", "Instagram", "Google / web search",
-  "Event or conference", "Press or media", "Existing ONWRD client", "Other",
-];
-const INDUSTRY_OPTIONS = [
-  "Hospitality & Tourism", "Real Estate & Development", "Technology",
-  "Financial Services", "Non-Profit / Development Sector",
-  "Government & Public Sector", "Consumer Goods & Retail", "Other",
-];
-const MARKET_OPTIONS = [
-  "The Bahamas", "Caribbean (multi-island)", "Caribbean + US",
-  "Latin America", "North America", "Global", "Other",
-];
-const PROBLEM_OPTIONS = [
-  "People don't know who we are or what we do",
-  "We're entering a new market or launching something new",
-  "Our marketing is inconsistent, or the strategy is unclear",
-  "We've outgrown our current brand or how people think about us",
-  "Other",
-];
-const SUPPORT_OPTIONS = [
-  "Figuring out our overall marketing direction",
-  "Creating content — writing, visuals, video",
-  "Getting press coverage and media attention",
-  "Making our brand look more professional and consistent",
-  "Building or improving our website",
-  "Growing and managing our social media",
-  "I'm not sure — I need guidance on where to start",
-  "Other",
-];
-const INVESTMENT_OPTIONS = [
-  "Just starting out · Under $2,500/month",
-  "Ready to build · $2,500 – $5,000/month",
-  "Serious about growth · $5,000 – $10,000/month",
-  "Full partnership · $10,000+/month",
-  "Project-based — let's talk scope",
-  "Not sure yet — open to a recommendation",
-];
-const AGENCY_OPTIONS = [
-  "No. This would be a first",
-  "Yes, and it worked well",
-  "Yes, with mixed results",
-  "We've managed marketing in-house",
-];
-const DECISION_OPTIONS = [
-  "Ready to move, just need the right partner",
-  "Actively exploring options",
-  "Early stages but building the case internally",
-  "Not sure yet, still figuring out what we need",
-];
+const CONTACT = ["Email", "Phone"];
+const HEAR = ["Personal referral","LinkedIn","Instagram","Google / web search","Event or conference","Press or media","Existing ONWRD client","Other"];
+const INDUSTRY = ["Hospitality & Tourism","Real Estate & Development","Technology","Financial Services","Non-Profit / Development Sector","Government & Public Sector","Consumer Goods & Retail","Other"];
+const MARKET = ["The Bahamas","Caribbean (multi-island)","Caribbean + US","Latin America","North America","Global","Other"];
+const PROBLEMS = ["People don't know who we are or what we do","We're entering a new market or launching something new","Our marketing is inconsistent, or the strategy is unclear","We've outgrown our current brand or how people think about us","Other"];
+const SUPPORT = ["Figuring out our overall marketing direction","Creating content — writing, visuals, video","Getting press coverage and media attention","Making our brand look more professional and consistent","Building or improving our website","Growing and managing our social media","I'm not sure — I need guidance on where to start","Other"];
+const INVESTMENT = ["Just starting out · Under $2,500/month","Ready to build · $2,500 – $5,000/month","Serious about growth · $5,000 – $10,000/month","Full partnership · $10,000+/month","Project-based — let's talk scope","Not sure yet — open to a recommendation"];
+const AGENCY = ["No. This would be a first","Yes, and it worked well","Yes, with mixed results","We've managed marketing in-house"];
+const DECISION = ["Ready to move, just need the right partner","Actively exploring options","Early stages but building the case internally","Not sure yet, still figuring out what we need"];
 
-// ─── Steps config ─────────────────────────────────────────────────────────
+// ─── Steps ────────────────────────────────────────────────────────────────
+// Each step is sized to fit on a 768px viewport with no scroll.
 const STEPS = [
-  { label: "You", kicker: "01" },
-  { label: "Organisation", kicker: "02" },
-  { label: "The Brief", kicker: "03" },
-  { label: "Timing", kicker: "04" },
-];
+  { label: "You",        title: "Let's start with you"       },
+  { label: "Discovery",  title: "How did you find us?"        },
+  { label: "Org",        title: "Your organisation"           },
+  { label: "Market",     title: "Where do you operate?"       },
+  { label: "Challenge",  title: "What's the challenge?"       },
+  { label: "Support",    title: "Where do you need help?"     },
+  { label: "Investment", title: "How are you thinking about investment?" },
+  { label: "Timing",     title: "Last step"                   },
+] as const;
 
-const STEP_FIELDS: (keyof IntakeValues)[][] = [
-  ["firstName", "lastName", "jobTitle", "email", "phone", "preferredContact", "hearAbout", "hearAboutOther"],
-  ["orgName", "website", "industry", "industryOther", "market", "marketOther"],
-  ["problems", "problemsOther", "support", "supportOther", "investment", "agencyBefore"],
+const STEP_FIELDS: (keyof V)[][] = [
+  ["firstName","lastName","jobTitle","email","phone","preferredContact"],
+  ["hearAbout","hearAboutOther","orgName","website"],
+  ["industry","industryOther"],
+  ["market","marketOther"],
+  ["problems","problemsOther","agencyBefore"],
+  ["support","supportOther"],
+  ["investment"],
   ["decisionStage"],
 ];
 
-// ─── Format brief ─────────────────────────────────────────────────────────
-function withOther(value: string, other?: string) {
-  return value === "Other" && other ? other : value;
+// ─── Brief formatter ──────────────────────────────────────────────────────
+function wo(v: string, o?: string) { return v === "Other" && o ? o : v; }
+function mwo(vs: string[], o?: string) {
+  return [...vs.filter(v => v !== "Other"), ...(vs.includes("Other") && o ? [o] : [])].join(", ");
 }
-function multiWithOther(values: string[], other?: string) {
-  return [
-    ...values.filter((v) => v !== "Other"),
-    ...(values.includes("Other") && other ? [other] : []),
-  ].join(", ");
-}
-function formatBrief(v: IntakeValues): string {
-  const today = new Date().toISOString().split("T")[0];
-  return `Project Brief
-
-Date: ${today}
-Potential Client: ${v.orgName}
-Project Name: ${v.orgName}
-
-Contact
-Name: ${v.firstName} ${v.lastName}
-Job Title: ${v.jobTitle}
-Email: ${v.email}
-Phone: ${v.phone || "n/a"}
-Preferred Contact Method: ${v.preferredContact || "n/a"}
-How they heard about ONWRD: ${withOther(v.hearAbout, v.hearAboutOther)}
-
-Organization
-Company: ${v.orgName}
-Website: ${v.website || "n/a"}
-Industry / Service Category: ${withOther(v.industry, v.industryOther)}
-Primary Market / Geography: ${withOther(v.market, v.marketOther)}
-
-The Brief
-Problem to solve: ${multiWithOther(v.problems, v.problemsOther)}
-Where they need the most support: ${multiWithOther(v.support, v.supportOther)}
-Investment thinking: ${v.investment || "n/a"}
-Prior agency experience: ${v.agencyBefore || "n/a"}
-
-Timing
-Decision-making stage: ${v.decisionStage}`.trim();
+function brief(v: V) {
+  return `Project Brief\nDate: ${new Date().toISOString().split("T")[0]}\nClient: ${v.orgName}\n\nContact\n${v.firstName} ${v.lastName} · ${v.jobTitle}\nEmail: ${v.email}\nPhone: ${v.phone||"n/a"} · Preferred: ${v.preferredContact||"n/a"}\nHeard via: ${wo(v.hearAbout,v.hearAboutOther)}\n\nOrg\n${v.orgName} · ${v.website||"n/a"}\nIndustry: ${wo(v.industry,v.industryOther)}\nMarket: ${wo(v.market,v.marketOther)}\n\nBrief\nProblems: ${mwo(v.problems,v.problemsOther)}\nAgency history: ${v.agencyBefore||"n/a"}\nSupport needed: ${mwo(v.support,v.supportOther)}\nInvestment: ${v.investment||"n/a"}\n\nTiming\nDecision stage: ${v.decisionStage}`.trim();
 }
 
-// ─── Sub-components ────────────────────────────────────────────────────────
-function CheckboxGroup({ options, value, onChange }: {
-  options: string[]; value: string[]; onChange: (v: string[]) => void;
+// ─── Tile components ──────────────────────────────────────────────────────
+function Tile({ label, checked, onToggle, type = "radio" }: {
+  label: string; checked: boolean; onToggle: () => void; type?: "radio"|"checkbox";
 }) {
-  const toggle = (opt: string) =>
-    onChange(value.includes(opt) ? value.filter((v) => v !== opt) : [...value, opt]);
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-      {options.map((opt) => (
-        <label key={opt} className={`flex items-center gap-2.5 rounded-[4px] border px-3 py-2.5 text-sm cursor-pointer transition-colors
-          ${value.includes(opt) ? "border-[#0000FF] bg-[#0000FF]/10 text-white font-medium" : "border-[#333] bg-black text-[#999] hover:border-[#0000FF] hover:text-white"}`}>
-          <input type="checkbox" className="accent-primary shrink-0" checked={value.includes(opt)} onChange={() => toggle(opt)} />
-          {opt}
-        </label>
-      ))}
+    <label className={`flex items-center gap-2 rounded border px-3 py-1.5 text-[13px] leading-snug cursor-pointer transition-colors select-none
+      ${checked ? "border-[#0000FF] bg-[#0000FF]/10 text-white font-medium" : "border-[#262626] bg-[#0d0d0d] text-[#777] hover:border-[#0000FF]/50 hover:text-[#ccc]"}`}>
+      <input type={type} className="accent-primary shrink-0 w-3 h-3" checked={checked} onChange={onToggle} />
+      <span>{label}</span>
+    </label>
+  );
+}
+
+function Radio({ opts, val, set, cols = 2 }: { opts: string[]; val: string; set: (v: string) => void; cols?: 1|2 }) {
+  return (
+    <div className={`grid gap-1.5 ${cols === 1 ? "grid-cols-1" : "grid-cols-1 sm:grid-cols-2"}`}>
+      {opts.map(o => <Tile key={o} label={o} type="radio" checked={val === o} onToggle={() => set(o)} />)}
     </div>
   );
 }
 
-function RadioGroup({ options, value, onChange, columns = 2 }: {
-  options: string[]; value: string; onChange: (v: string) => void; columns?: 1 | 2;
-}) {
+function Checks({ opts, val, set }: { opts: string[]; val: string[]; set: (v: string[]) => void }) {
+  const toggle = (o: string) => set(val.includes(o) ? val.filter(x => x !== o) : [...val, o]);
   return (
-    <div className={`grid grid-cols-1 ${columns === 2 ? "sm:grid-cols-2" : ""} gap-2`}>
-      {options.map((opt) => (
-        <label key={opt} className={`flex items-center gap-2.5 rounded-[4px] border px-3 py-2.5 text-sm cursor-pointer transition-colors
-          ${value === opt ? "border-[#0000FF] bg-[#0000FF]/10 text-white font-medium" : "border-[#333] bg-black text-[#999] hover:border-[#0000FF] hover:text-white"}`}>
-          <input type="radio" className="accent-primary shrink-0" checked={value === opt} onChange={() => onChange(opt)} />
-          {opt}
-        </label>
-      ))}
+    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+      {opts.map(o => <Tile key={o} label={o} type="checkbox" checked={val.includes(o)} onToggle={() => toggle(o)} />)}
     </div>
   );
 }
 
-function FieldError({ msg }: { msg?: string }) {
+function Err({ msg }: { msg?: string }) {
   if (!msg) return null;
-  return <p className="text-xs text-destructive mt-1">{msg}</p>;
+  return <p className="text-[11px] text-destructive mt-1">{msg}</p>;
 }
 
-// ─── Progress bar ─────────────────────────────────────────────────────────
-function ProgressBar({ current, total }: { current: number; total: number }) {
+function Field({ label, req, opt, children }: { label: string; req?: boolean; opt?: boolean; children: React.ReactNode }) {
   return (
-    <div className="mb-8">
-      <div className="flex items-center gap-0">
-        {Array.from({ length: total }).map((_, i) => (
-          <div key={i} className="flex items-center flex-1">
-            <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 transition-all
-              ${i < current ? "bg-[#0000FF] text-white" : i === current ? "bg-[#0000FF] text-white ring-2 ring-[#0000FF]/30" : "bg-[#1a1a1a] text-[#555] border border-[#333]"}`}>
-              {i < current ? "✓" : i + 1}
-            </div>
-            {i < total - 1 && (
-              <div className={`flex-1 h-px mx-1 transition-colors ${i < current ? "bg-[#0000FF]" : "bg-[#222]"}`} />
-            )}
-          </div>
-        ))}
+    <div className="flex flex-col gap-1">
+      <span className="text-[11px] font-medium text-[#999] flex items-center gap-1">
+        {label}
+        {req && <span className="text-destructive">*</span>}
+        {opt && <span className="text-[#555] font-normal">(optional)</span>}
+      </span>
+      {children}
+    </div>
+  );
+}
+
+// ─── Progress ─────────────────────────────────────────────────────────────
+function Bar({ step, total }: { step: number; total: number }) {
+  return (
+    <div className="mb-5 shrink-0">
+      <div className="flex justify-between mb-1.5">
+        <span className="text-[10px] tracking-widest text-[#444] uppercase">Step {step+1} / {total}</span>
+        <span className="text-[10px] text-[#444]">{STEPS[step].label}</span>
       </div>
-      <div className="flex justify-between mt-2">
-        {STEPS.map((s, i) => (
-          <span key={i} className={`text-[10px] tracking-wide uppercase ${i === current ? "text-white" : i < current ? "text-[#0000FF]" : "text-[#444]"}`}>
-            {s.label}
-          </span>
-        ))}
+      <div className="h-[2px] bg-[#1c1c1c] rounded-full">
+        <div
+          className="h-full bg-[#0000FF] rounded-full transition-[width] duration-300"
+          style={{ width: `${((step+1)/total)*100}%` }}
+        />
       </div>
     </div>
   );
@@ -231,314 +158,261 @@ function ProgressBar({ current, total }: { current: number; total: number }) {
 // ─── Main ─────────────────────────────────────────────────────────────────
 export default function Intake() {
   const [step, setStep] = useState(0);
-  const [submitted, setSubmitted] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string|null>(null);
 
-  const intake = useForm<IntakeValues>({
+  const form = useForm<V>({
     resolver: zodResolver(intakeSchema),
     defaultValues: {
-      firstName: "", lastName: "", jobTitle: "", email: "", phone: "",
-      preferredContact: "", hearAbout: "", hearAboutOther: "",
-      orgName: "", website: "", industry: "", industryOther: "",
-      market: "", marketOther: "",
-      problems: [], problemsOther: "", support: [], supportOther: "",
-      investment: "", agencyBefore: "", decisionStage: "",
+      firstName:"",lastName:"",jobTitle:"",email:"",phone:"",preferredContact:"",
+      hearAbout:"",hearAboutOther:"",orgName:"",website:"",
+      industry:"",industryOther:"",market:"",marketOther:"",
+      problems:[],problemsOther:"",agencyBefore:"",
+      support:[],supportOther:"",investment:"",decisionStage:"",
     },
   });
+  const { formState: { errors, isSubmitting } } = form;
+  const w = form.watch;
 
-  const { errors } = intake.formState;
-  const hearAbout = intake.watch("hearAbout");
-  const industry = intake.watch("industry");
-  const market = intake.watch("market");
-  const problems = intake.watch("problems");
-  const support = intake.watch("support");
-
-  const next = async () => {
-    const valid = await intake.trigger(STEP_FIELDS[step]);
-    if (valid) setStep((s) => s + 1);
+  const advance = async () => {
+    if (await form.trigger(STEP_FIELDS[step])) setStep(s => s+1);
   };
 
-  const handleSubmit = async (values: IntakeValues) => {
-    setSubmitting(true);
-    setSubmitError(null);
-    const brief = formatBrief(values);
+  const submit = async (v: V) => {
+    setBusy(true); setErr(null);
     try {
-      const res = await fetch("/api/intake", {
+      const r = await fetch("/api/intake", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          briefText: brief,
-          clientName: values.orgName,
-          industry: withOther(values.industry, values.industryOther),
-        }),
+        body: JSON.stringify({ briefText: brief(v), clientName: v.orgName, industry: wo(v.industry, v.industryOther) }),
       });
-      if (!res.ok) throw new Error(`Request failed (${res.status})`);
-      setSubmitted(true);
+      if (!r.ok) throw new Error();
+      setDone(true);
     } catch {
-      setSubmitError("We couldn't submit your form. Please check your connection and try again.");
+      setErr("Couldn't submit. Please check your connection and try again.");
     } finally {
-      setSubmitting(false);
+      setBusy(false);
     }
   };
 
-  if (submitted) {
+  if (done) {
     return (
-      <div className="min-h-screen bg-black text-white flex flex-col">
-        <header className="bg-black border-b border-[#222]">
-          <div className="max-w-2xl mx-auto px-6 py-4">
-            <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-7 object-contain object-left" />
+      <div className="min-h-screen bg-black text-white flex items-center justify-center">
+        <div className="text-center space-y-3 max-w-xs px-6">
+          <div className="mx-auto w-12 h-12 rounded-full bg-[#111] border border-[#222] flex items-center justify-center">
+            <CheckCircle className="w-6 h-6" style={{ color: "#00FFD5" }} />
           </div>
-        </header>
-        <div className="flex-1 flex items-center justify-center p-6">
-          <div className="bg-black border border-[#222] rounded-[4px] p-12 text-center space-y-4 max-w-md w-full">
-            <div className="mx-auto w-14 h-14 rounded-full bg-[#111] flex items-center justify-center">
-              <CheckCircle className="w-7 h-7" style={{ color: "#00FFD5" }} />
-            </div>
-            <h1 className="text-2xl font-bold text-white">Thank you.</h1>
-            <p className="text-muted-foreground leading-relaxed">
-              We look forward to learning more about your organization and will be in touch within two business days.
-              In the meantime, learn more about who we are at{" "}
-              <a href="https://onwrdadvisors.com" target="_blank" rel="noopener noreferrer" className="text-white underline underline-offset-2">onwrdadvisors.com</a>.
-            </p>
-          </div>
+          <h2 className="text-xl font-semibold">Thank you.</h2>
+          <p className="text-[#666] text-sm leading-relaxed">
+            We'll be in touch within two business days.{" "}
+            <a href="https://onwrdadvisors.com" target="_blank" rel="noopener noreferrer" className="text-white underline underline-offset-2">onwrdadvisors.com</a>
+          </p>
         </div>
       </div>
     );
   }
 
+  const hearAbout = w("hearAbout");
+  const industry = w("industry");
+  const market = w("market");
+  const problems = w("problems");
+  const support = w("support");
+
   return (
-    <div className="min-h-screen bg-black text-white flex flex-col">
-      <header className="bg-black border-b border-[#222]">
-        <div className="max-w-2xl mx-auto px-6 py-4">
-          <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-7 object-contain object-left" />
+    <div className="h-screen bg-black text-white flex flex-col overflow-hidden">
+      {/* Header */}
+      <header className="shrink-0 border-b border-[#1a1a1a] px-6 py-3">
+        <div className="max-w-lg mx-auto">
+          <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-[22px] object-contain object-left" />
         </div>
       </header>
 
-      <main className="flex-1 max-w-2xl mx-auto w-full px-6 py-10">
-        {/* Intro — only on step 0 */}
-        {step === 0 && (
-          <div className="mb-8">
-            <div className="text-[11px] tracking-[0.15em] text-[#999] mb-2">PROPOSAL INTAKE FORM</div>
-            <h1 className="text-3xl font-bold text-white mb-3 tracking-tight">Tell us about your organization</h1>
-            <p className="text-muted-foreground leading-relaxed">
-              This helps us shape a proposal specific to your situation. Your information is treated with full confidentiality.
-            </p>
-          </div>
-        )}
+      {/* Body */}
+      <main className="flex-1 overflow-hidden flex flex-col max-w-lg mx-auto w-full px-6 py-5">
+        <Bar step={step} total={STEPS.length} />
 
-        <ProgressBar current={step} total={STEPS.length} />
+        {/* Step title */}
+        <div className="shrink-0 mb-4">
+          <h2 className="text-base font-semibold text-white">{STEPS[step].title}</h2>
+        </div>
 
-        <form onSubmit={intake.handleSubmit(handleSubmit)} noValidate>
-          {/* ── Step 0: You ── */}
-          {step === 0 && (
-            <div className="space-y-5">
-              <div>
-                <div className="text-[11px] tracking-[0.15em] text-[#999] mb-1">01</div>
-                <h2 className="text-xl font-semibold mb-5">Let's start with you</h2>
-              </div>
+        <form onSubmit={form.handleSubmit(submit)} noValidate className="flex-1 flex flex-col overflow-hidden">
+          {/* Step content — no overflow */}
+          <div className="flex-1">
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <Label htmlFor="firstName" className="mb-1.5 block">First Name <span className="text-destructive">*</span></Label>
-                  <Input id="firstName" {...intake.register("firstName")} />
-                  <FieldError msg={errors.firstName?.message} />
+            {/* ── 1: You ── */}
+            {step === 0 && (
+              <div className="space-y-2.5">
+                <div className="grid grid-cols-2 gap-2.5 items-start">
+                  <Field label="First name" req>
+                    <Input className="h-9 text-[13px]" {...form.register("firstName")} />
+                    <Err msg={errors.firstName?.message} />
+                  </Field>
+                  <Field label="Last name" req>
+                    <Input className="h-9 text-[13px]" {...form.register("lastName")} />
+                    <Err msg={errors.lastName?.message} />
+                  </Field>
                 </div>
-                <div>
-                  <Label htmlFor="lastName" className="mb-1.5 block">Last Name <span className="text-destructive">*</span></Label>
-                  <Input id="lastName" {...intake.register("lastName")} />
-                  <FieldError msg={errors.lastName?.message} />
+                <div className="grid grid-cols-2 gap-2.5 items-start">
+                  <Field label="Job title" req>
+                    <Input className="h-9 text-[13px]" {...form.register("jobTitle")} />
+                    <Err msg={errors.jobTitle?.message} />
+                  </Field>
+                  <Field label="Email" req>
+                    <Input className="h-9 text-[13px]" type="email" {...form.register("email")} />
+                    <Err msg={errors.email?.message} />
+                  </Field>
                 </div>
-                <div>
-                  <Label htmlFor="jobTitle" className="mb-1.5 block">Job Title <span className="text-destructive">*</span></Label>
-                  <Input id="jobTitle" {...intake.register("jobTitle")} />
-                  <FieldError msg={errors.jobTitle?.message} />
-                </div>
-                <div>
-                  <Label htmlFor="email" className="mb-1.5 block">Email Address <span className="text-destructive">*</span></Label>
-                  <Input id="email" type="email" {...intake.register("email")} />
-                  <FieldError msg={errors.email?.message} />
-                </div>
-                <div>
-                  <Label htmlFor="phone" className="mb-1.5 block">Phone <span className="text-muted-foreground text-xs">(optional)</span></Label>
-                  <Input id="phone" {...intake.register("phone")} />
-                </div>
-                <div>
-                  <Label className="mb-2 block">Preferred Contact <span className="text-muted-foreground text-xs">(optional)</span></Label>
-                  <Controller control={intake.control} name="preferredContact" render={({ field }) => (
-                    <RadioGroup options={CONTACT_OPTIONS} value={field.value ?? ""} onChange={field.onChange} />
-                  )} />
+                <div className="grid grid-cols-2 gap-2.5 items-start">
+                  <Field label="Phone" opt>
+                    <Input className="h-9 text-[13px]" {...form.register("phone")} />
+                  </Field>
+                  <Field label="Preferred contact" opt>
+                    <Controller control={form.control} name="preferredContact" render={({ field }) => (
+                      <Radio opts={CONTACT} val={field.value ?? ""} set={field.onChange} />
+                    )} />
+                  </Field>
                 </div>
               </div>
-
-              <div>
-                <Label className="mb-2 block">How did you hear about ONWRD? <span className="text-destructive">*</span></Label>
-                <Controller control={intake.control} name="hearAbout" render={({ field }) => (
-                  <RadioGroup options={HEAR_OPTIONS} value={field.value} onChange={field.onChange} />
-                )} />
-                <FieldError msg={errors.hearAbout?.message} />
-                {hearAbout === "Other" && (
-                  <>
-                    <Input className="mt-2" placeholder="Please specify..." {...intake.register("hearAboutOther")} />
-                    <FieldError msg={errors.hearAboutOther?.message} />
-                  </>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* ── Step 1: Organisation ── */}
-          {step === 1 && (
-            <div className="space-y-5">
-              <div>
-                <div className="text-[11px] tracking-[0.15em] text-[#999] mb-1">02</div>
-                <h2 className="text-xl font-semibold mb-5">Your organisation</h2>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <Label htmlFor="orgName" className="mb-1.5 block">Organisation Name <span className="text-destructive">*</span></Label>
-                  <Input id="orgName" {...intake.register("orgName")} />
-                  <FieldError msg={errors.orgName?.message} />
-                </div>
-                <div>
-                  <Label htmlFor="website" className="mb-1.5 block">Website <span className="text-muted-foreground text-xs">(optional)</span></Label>
-                  <Input id="website" placeholder="https://yourwebsite.com" {...intake.register("website")} />
-                </div>
-              </div>
-
-              <div>
-                <Label className="mb-2 block">Industry / Service Category <span className="text-destructive">*</span></Label>
-                <Controller control={intake.control} name="industry" render={({ field }) => (
-                  <RadioGroup options={INDUSTRY_OPTIONS} value={field.value} onChange={field.onChange} />
-                )} />
-                <FieldError msg={errors.industry?.message} />
-                {industry === "Other" && (
-                  <>
-                    <Input className="mt-2" placeholder="Please specify..." {...intake.register("industryOther")} />
-                    <FieldError msg={errors.industryOther?.message} />
-                  </>
-                )}
-              </div>
-
-              <div>
-                <Label className="mb-2 block">Primary Market / Geography <span className="text-destructive">*</span></Label>
-                <Controller control={intake.control} name="market" render={({ field }) => (
-                  <RadioGroup options={MARKET_OPTIONS} value={field.value} onChange={field.onChange} />
-                )} />
-                <FieldError msg={errors.market?.message} />
-                {market === "Other" && (
-                  <>
-                    <Input className="mt-2" placeholder="Please specify..." {...intake.register("marketOther")} />
-                    <FieldError msg={errors.marketOther?.message} />
-                  </>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* ── Step 2: The Brief ── */}
-          {step === 2 && (
-            <div className="space-y-6">
-              <div>
-                <div className="text-[11px] tracking-[0.15em] text-[#999] mb-1">03</div>
-                <h2 className="text-xl font-semibold mb-5">The brief</h2>
-              </div>
-
-              <div>
-                <Label className="mb-2 block">
-                  What problem are you trying to solve? <span className="text-destructive">*</span>
-                  <span className="text-muted-foreground text-xs ml-1">(select all that apply)</span>
-                </Label>
-                <Controller control={intake.control} name="problems" render={({ field }) => (
-                  <CheckboxGroup options={PROBLEM_OPTIONS} value={field.value} onChange={field.onChange} />
-                )} />
-                <FieldError msg={errors.problems?.message} />
-                {problems.includes("Other") && (
-                  <>
-                    <Input className="mt-2" placeholder="Please specify..." {...intake.register("problemsOther")} />
-                    <FieldError msg={errors.problemsOther?.message} />
-                  </>
-                )}
-              </div>
-
-              <div>
-                <Label className="mb-2 block">
-                  Where do you need the most support? <span className="text-destructive">*</span>
-                  <span className="text-muted-foreground text-xs ml-1">(select all that apply)</span>
-                </Label>
-                <Controller control={intake.control} name="support" render={({ field }) => (
-                  <CheckboxGroup options={SUPPORT_OPTIONS} value={field.value} onChange={field.onChange} />
-                )} />
-                <FieldError msg={errors.support?.message} />
-                {support.includes("Other") && (
-                  <>
-                    <Input className="mt-2" placeholder="Please specify..." {...intake.register("supportOther")} />
-                    <FieldError msg={errors.supportOther?.message} />
-                  </>
-                )}
-              </div>
-
-              <div>
-                <Label className="mb-2 block">How are you thinking about investment? <span className="text-muted-foreground text-xs">(optional)</span></Label>
-                <Controller control={intake.control} name="investment" render={({ field }) => (
-                  <RadioGroup options={INVESTMENT_OPTIONS} value={field.value ?? ""} onChange={field.onChange} columns={1} />
-                )} />
-              </div>
-
-              <div>
-                <Label className="mb-2 block">Have you worked with a marketing agency before? <span className="text-muted-foreground text-xs">(optional)</span></Label>
-                <Controller control={intake.control} name="agencyBefore" render={({ field }) => (
-                  <RadioGroup options={AGENCY_OPTIONS} value={field.value ?? ""} onChange={field.onChange} />
-                )} />
-              </div>
-            </div>
-          )}
-
-          {/* ── Step 3: Timing + Submit ── */}
-          {step === 3 && (
-            <div className="space-y-5">
-              <div>
-                <div className="text-[11px] tracking-[0.15em] text-[#999] mb-1">04</div>
-                <h2 className="text-xl font-semibold mb-2">Timing</h2>
-                <p className="text-sm text-muted-foreground mb-5">Last step — where are you in your decision-making?</p>
-              </div>
-
-              <div>
-                <Controller control={intake.control} name="decisionStage" render={({ field }) => (
-                  <RadioGroup options={DECISION_OPTIONS} value={field.value} onChange={field.onChange} columns={1} />
-                )} />
-                <FieldError msg={errors.decisionStage?.message} />
-              </div>
-
-              {submitError && <p className="text-sm text-destructive">{submitError}</p>}
-            </div>
-          )}
-
-          {/* ── Navigation ── */}
-          <div className={`flex mt-8 ${step > 0 ? "justify-between" : "justify-end"}`}>
-            {step > 0 && (
-              <Button type="button" variant="ghost" onClick={() => setStep((s) => s - 1)} className="gap-2 text-[#999] hover:text-white">
-                <ArrowLeft className="w-4 h-4" /> Back
-              </Button>
             )}
 
+            {/* ── 2: Discovery + Org basics ── */}
+            {step === 1 && (
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <Controller control={form.control} name="hearAbout" render={({ field }) => (
+                    <Radio opts={HEAR} val={field.value} set={field.onChange} />
+                  )} />
+                  <Err msg={errors.hearAbout?.message} />
+                  {hearAbout === "Other" && (
+                    <Input className="h-9 text-[13px]" placeholder="Please specify…" {...form.register("hearAboutOther")} />
+                  )}
+                  <Err msg={errors.hearAboutOther?.message} />
+                </div>
+                <div className="grid grid-cols-2 gap-2.5 items-start pt-1">
+                  <Field label="Organisation name" req>
+                    <Input className="h-9 text-[13px]" {...form.register("orgName")} />
+                    <Err msg={errors.orgName?.message} />
+                  </Field>
+                  <Field label="Website" opt>
+                    <Input className="h-9 text-[13px]" placeholder="https://…" {...form.register("website")} />
+                  </Field>
+                </div>
+              </div>
+            )}
+
+            {/* ── 3: Industry ── */}
+            {step === 2 && (
+              <div className="space-y-1.5">
+                <Controller control={form.control} name="industry" render={({ field }) => (
+                  <Radio opts={INDUSTRY} val={field.value} set={field.onChange} />
+                )} />
+                <Err msg={errors.industry?.message} />
+                {industry === "Other" && (
+                  <Input className="h-9 text-[13px]" placeholder="Please specify…" {...form.register("industryOther")} />
+                )}
+                <Err msg={errors.industryOther?.message} />
+              </div>
+            )}
+
+            {/* ── 4: Market ── */}
+            {step === 3 && (
+              <div className="space-y-1.5">
+                <Controller control={form.control} name="market" render={({ field }) => (
+                  <Radio opts={MARKET} val={field.value} set={field.onChange} />
+                )} />
+                <Err msg={errors.market?.message} />
+                {market === "Other" && (
+                  <Input className="h-9 text-[13px]" placeholder="Please specify…" {...form.register("marketOther")} />
+                )}
+                <Err msg={errors.marketOther?.message} />
+              </div>
+            )}
+
+            {/* ── 5: Problems + Agency ── */}
+            {step === 4 && (
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <p className="text-[11px] text-[#555]">Select all that apply</p>
+                  <Controller control={form.control} name="problems" render={({ field }) => (
+                    <Checks opts={PROBLEMS} val={field.value} set={field.onChange} />
+                  )} />
+                  <Err msg={errors.problems?.message} />
+                  {problems.includes("Other") && (
+                    <Input className="h-9 text-[13px]" placeholder="Please specify…" {...form.register("problemsOther")} />
+                  )}
+                  <Err msg={errors.problemsOther?.message} />
+                </div>
+                <Field label="Have you worked with a marketing agency before?" opt>
+                  <Controller control={form.control} name="agencyBefore" render={({ field }) => (
+                    <Radio opts={AGENCY} val={field.value ?? ""} set={field.onChange} />
+                  )} />
+                </Field>
+              </div>
+            )}
+
+            {/* ── 6: Support ── */}
+            {step === 5 && (
+              <div className="space-y-1.5">
+                <p className="text-[11px] text-[#555]">Select all that apply</p>
+                <Controller control={form.control} name="support" render={({ field }) => (
+                  <Checks opts={SUPPORT} val={field.value} set={field.onChange} />
+                )} />
+                <Err msg={errors.support?.message} />
+                {support.includes("Other") && (
+                  <Input className="h-9 text-[13px]" placeholder="Please specify…" {...form.register("supportOther")} />
+                )}
+                <Err msg={errors.supportOther?.message} />
+              </div>
+            )}
+
+            {/* ── 7: Investment ── */}
+            {step === 6 && (
+              <div className="space-y-1.5">
+                <p className="text-[11px] text-[#555]">Optional — helps us tailor our thinking</p>
+                <Controller control={form.control} name="investment" render={({ field }) => (
+                  <Radio opts={INVESTMENT} val={field.value ?? ""} set={field.onChange} cols={1} />
+                )} />
+              </div>
+            )}
+
+            {/* ── 8: Timing ── */}
+            {step === 7 && (
+              <div className="space-y-3">
+                <p className="text-[13px] text-[#666]">Where are you in your decision-making?</p>
+                <Controller control={form.control} name="decisionStage" render={({ field }) => (
+                  <Radio opts={DECISION} val={field.value} set={field.onChange} cols={1} />
+                )} />
+                <Err msg={errors.decisionStage?.message} />
+                {err && <p className="text-[11px] text-destructive">{err}</p>}
+              </div>
+            )}
+          </div>
+
+          {/* Navigation */}
+          <div className={`flex pt-4 shrink-0 ${step > 0 ? "justify-between" : "justify-end"}`}>
+            {step > 0 && (
+              <button
+                type="button"
+                onClick={() => setStep(s => s-1)}
+                className="flex items-center gap-1 text-[12px] text-[#444] hover:text-white transition-colors py-2"
+              >
+                <ArrowLeft className="w-3 h-3" /> Back
+              </button>
+            )}
             {step < STEPS.length - 1 ? (
-              <Button type="button" onClick={next} className="gap-2 min-w-28">
-                Next <ArrowRight className="w-4 h-4" />
+              <Button type="button" size="sm" onClick={advance} className="gap-1.5 h-9 px-5 text-[13px]">
+                {step === 6 ? "Almost done" : "Next"} <ArrowRight className="w-3.5 h-3.5" />
               </Button>
             ) : (
-              <Button type="submit" size="lg" className="min-w-32" disabled={submitting}>
-                {submitting ? "Submitting…" : "Submit"}
+              <Button type="submit" size="sm" className="h-9 px-6 text-[13px]" disabled={busy || isSubmitting}>
+                {busy ? "Submitting…" : "Submit"}
               </Button>
             )}
           </div>
         </form>
       </main>
-
-      <footer className="text-center text-xs text-muted-foreground py-8">
-        ONWRD Advisors · Nassau, The Bahamas · onwrdadvisors.com
-      </footer>
     </div>
   );
 }
