@@ -195,29 +195,164 @@ router.post("/tender-digest-settings/test", async (req, res) => {
     return;
   }
   try {
+    // Pull all PURSUE + CONSIDER tenders for sample digest
+    const allTenders = await db
+      .select()
+      .from(discoveredTendersTable)
+      .where(eq(discoveredTendersTable.status, "new"))
+      .orderBy(desc(discoveredTendersTable.fitScore));
+
+    const pursue = allTenders.filter((t) => t.recommendation === "PURSUE");
+    const consider = allTenders.filter((t) => t.recommendation === "CONSIDER");
+
+    // Sort: Bahamas first, then by fitScore desc
+    const sortBahamasFirst = (list: typeof allTenders) =>
+      [...list].sort((a, b) => {
+        const aBs = (a.country ?? "").toLowerCase().includes("bahamas") ? 1 : 0;
+        const bBs = (b.country ?? "").toLowerCase().includes("bahamas") ? 1 : 0;
+        if (bBs !== aBs) return bBs - aBs;
+        return (b.fitScore ?? 0) - (a.fitScore ?? 0);
+      });
+
+    const pursueSorted = sortBahamasFirst(pursue);
+    const considerSorted = sortBahamasFirst(consider);
+
+    const bahamasCount = allTenders.filter((t) =>
+      (t.country ?? "").toLowerCase().includes("bahamas")
+    ).length;
+
     const { Resend } = await import("resend");
     const resend = new Resend(apiKey);
     const fromAddress = process.env.RESEND_FROM ?? "ONWRD Tender Desk <onboarding@resend.dev>";
+
+    const flagFor = (country: string | null) => {
+      const c = (country ?? "").toLowerCase();
+      if (c.includes("bahamas")) return "🇧🇸 ";
+      if (c.includes("barbados")) return "🇧🇧 ";
+      if (c.includes("jamaica")) return "🇯🇲 ";
+      if (c.includes("trinidad")) return "🇹🇹 ";
+      if (c.includes("cayman")) return "🇰🇾 ";
+      if (c.includes("antigua")) return "🇦🇬 ";
+      if (c.includes("belize")) return "🇧🇿 ";
+      if (c.includes("guyana")) return "🇬🇾 ";
+      if (c.includes("haiti")) return "🇭🇹 ";
+      if (c.includes("turks")) return "🇹🇨 ";
+      return "🌍 ";
+    };
+
+    const rows = (list: typeof allTenders) =>
+      list
+        .map((t) => {
+          const isBahamas = (t.country ?? "").toLowerCase().includes("bahamas");
+          const rowBg = isBahamas ? "background:#0f1a10;" : "";
+          const titleColor = isBahamas ? "#4ade80" : "#ffffff";
+          const deadlineStr = t.deadline ? new Date(t.deadline).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "–";
+          const daysLeft = t.deadline
+            ? Math.ceil((new Date(t.deadline).getTime() - Date.now()) / 86400000)
+            : null;
+          const urgency =
+            daysLeft !== null && daysLeft <= 14 && daysLeft >= 0
+              ? `<span style="color:#f87171;font-size:11px"> ⚠ ${daysLeft}d left</span>`
+              : "";
+          return `<tr style="${rowBg}">
+              <td style="padding:10px 8px;border-bottom:1px solid #1f1f1f">
+                ${flagFor(t.country)}<strong style="color:${titleColor}">${t.title}</strong>
+                ${isBahamas ? '<span style="background:#14532d;color:#4ade80;font-size:10px;padding:1px 6px;border-radius:999px;margin-left:6px">Bahamas</span>' : ""}
+              </td>
+              <td style="padding:10px 8px;border-bottom:1px solid #1f1f1f;color:#aaa;font-size:13px">${t.organization ?? "–"}</td>
+              <td style="padding:10px 8px;border-bottom:1px solid #1f1f1f;text-align:center">
+                <span style="background:#1e3a1e;color:#4ade80;padding:2px 8px;border-radius:999px;font-size:13px;font-weight:600">${t.fitScore ?? "–"}</span>
+              </td>
+              <td style="padding:10px 8px;border-bottom:1px solid #1f1f1f;color:#aaa;font-size:13px">${deadlineStr}${urgency}</td>
+            </tr>`;
+        })
+        .join("");
+
+    const today = new Date().toLocaleDateString("en-US", {
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+
     const html = `
-<div style="font-family:sans-serif;max-width:700px;margin:0 auto;color:#fff;background:#0a0a0a;padding:32px">
-  <img src="https://onwrdadvisors.com/wp-content/uploads/2024/01/onwrd-logo-white.png" style="height:40px;margin-bottom:24px" alt="ONWRD"/>
-  <h2 style="color:#fff;margin-bottom:4px">Tender Intelligence Digest — Test Email</h2>
-  <p style="color:#888;margin-top:0">${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}</p>
-  <p>This is a test email confirming your digest is configured correctly. 🎉</p>
-  <p>When live tenders are discovered each morning, you'll see a summary here with <strong style="color:#4ade80">🔥 Pursue</strong> and <strong style="color:#facc15">⚡ Consider</strong> opportunities.</p>
-  <p style="margin-top:32px;color:#555;font-size:12px">ONWRD Proposal Desk — automated tender intelligence</p>
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:700px;margin:0 auto;color:#fff;background:#0a0a0a;padding:0">
+  <!-- Header -->
+  <div style="background:#0d0d0d;border-bottom:1px solid #1f1f1f;padding:24px 32px;display:flex;align-items:center">
+    <img src="https://onwrdadvisors.com/wp-content/uploads/2024/01/onwrd-logo-white.png" style="height:36px" alt="ONWRD"/>
+  </div>
+
+  <!-- Body -->
+  <div style="padding:32px">
+    <h2 style="color:#fff;margin:0 0 4px">Tender Intelligence Digest</h2>
+    <p style="color:#666;margin:0 0 24px;font-size:14px">${today} &nbsp;·&nbsp; Sample / Test Send</p>
+
+    <!-- Summary pill row -->
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:28px">
+      <div style="background:#1e3a1e;border:1px solid #166534;border-radius:10px;padding:12px 20px;min-width:110px;text-align:center">
+        <div style="font-size:24px;font-weight:700;color:#4ade80">${pursue.length}</div>
+        <div style="font-size:12px;color:#86efac;margin-top:2px">Pursue</div>
+      </div>
+      <div style="background:#1c1a0a;border:1px solid #713f12;border-radius:10px;padding:12px 20px;min-width:110px;text-align:center">
+        <div style="font-size:24px;font-weight:700;color:#facc15">${consider.length}</div>
+        <div style="font-size:12px;color:#fde047;margin-top:2px">Consider</div>
+      </div>
+      <div style="background:#0f1a10;border:1px solid #166534;border-radius:10px;padding:12px 20px;min-width:110px;text-align:center">
+        <div style="font-size:24px;font-weight:700;color:#34d399">🇧🇸 ${bahamasCount}</div>
+        <div style="font-size:12px;color:#6ee7b7;margin-top:2px">Bahamas opps</div>
+      </div>
+    </div>
+
+    ${pursueSorted.length > 0 ? `
+    <h3 style="color:#4ade80;margin:0 0 12px;font-size:16px">🔥 Pursue (${pursueSorted.length})</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:32px">
+      <thead><tr style="color:#555;font-size:12px;text-transform:uppercase;letter-spacing:.05em">
+        <th style="text-align:left;padding:8px">Opportunity</th>
+        <th style="text-align:left;padding:8px">Organisation</th>
+        <th style="text-align:center;padding:8px">Score</th>
+        <th style="text-align:left;padding:8px">Deadline</th>
+      </tr></thead>
+      <tbody>${rows(pursueSorted)}</tbody>
+    </table>` : `<p style="color:#555;font-size:14px">No PURSUE opportunities in current database — they'll appear here when crawlers surface marketing/comms RFPs.</p>`}
+
+    ${considerSorted.length > 0 ? `
+    <h3 style="color:#facc15;margin:0 0 12px;font-size:16px">⚡ Consider (${considerSorted.length})</h3>
+    <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:32px">
+      <thead><tr style="color:#555;font-size:12px;text-transform:uppercase;letter-spacing:.05em">
+        <th style="text-align:left;padding:8px">Opportunity</th>
+        <th style="text-align:left;padding:8px">Organisation</th>
+        <th style="text-align:center;padding:8px">Score</th>
+        <th style="text-align:left;padding:8px">Deadline</th>
+      </tr></thead>
+      <tbody>${rows(considerSorted)}</tbody>
+    </table>` : ""}
+
+    <div style="background:#111;border:1px solid #1f1f1f;border-radius:10px;padding:16px 20px;font-size:13px;color:#666">
+      <strong style="color:#888">About this digest</strong><br/>
+      Bahamas opportunities are highlighted and sorted to the top. The daily digest runs at 06:00 and scans ${allTenders.length} active sources including Bahamas Gov, World Bank, IDB, CDB, and Caribbean Tourism Organisation.
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <div style="border-top:1px solid #1a1a1a;padding:20px 32px;font-size:11px;color:#444">
+    ONWRD Proposal Desk — automated tender intelligence &nbsp;·&nbsp; Manage preferences at your Proposal Desk dashboard
+  </div>
 </div>`;
+
     const { error } = await resend.emails.send({
       from: fromAddress,
       to: emails,
-      subject: `[ONWRD] Digest test — ${new Date().toLocaleDateString()}`,
+      subject: `[ONWRD] ${pursue.length} to pursue, ${consider.length} to consider — Tender Digest ${new Date().toLocaleDateString()}`,
       html,
     });
     if (error) {
       res.status(500).json({ error: error.message ?? "Resend returned an error" });
       return;
     }
-    res.json({ message: `Test email sent to ${emails.join(", ")}` });
+    res.json({
+      message: `Digest sent to ${emails.join(", ")}`,
+      summary: { pursue: pursue.length, consider: consider.length, bahamasOpps: bahamasCount },
+    });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Unknown error";
     res.status(500).json({ error: msg });
