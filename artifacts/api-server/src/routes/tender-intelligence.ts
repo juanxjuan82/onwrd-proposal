@@ -252,20 +252,44 @@ router.post("/tender-intelligence/notify-billing", async (req, res) => {
     const html = `
 <div style="font-family:sans-serif;max-width:600px;margin:0 auto;color:#fff;background:#0a0a0a;padding:32px;border-radius:8px">
   <img src="https://onwrdadvisors.com/wp-content/uploads/2024/01/onwrd-logo-white.png" style="height:36px;margin-bottom:24px" alt="ONWRD"/>
-  <h2 style="color:#fff;margin-bottom:4px">Action Required: OpenAI Billing</h2>
+  <h2 style="color:#fff;margin-bottom:4px">Action Required: AI Features Offline</h2>
   <p style="color:#888;margin-top:0;font-size:13px">${new Date().toLocaleString("en-US", { dateStyle: "full", timeStyle: "short" })}</p>
   <div style="background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:16px;margin:20px 0">
     <p style="color:#f87171;font-weight:600;margin:0 0 8px">⚠️ AI features are currently offline</p>
-    <p style="color:#aaa;margin:0;font-size:14px">The OpenAI API key on the ONWRD Proposal Desk has exceeded its quota. Proposal generation and AI scoring are unavailable until the account is topped up.</p>
+    <p style="color:#aaa;margin:0;font-size:14px">The OpenAI API key on the ONWRD Proposal Desk has exceeded its billing quota. Proposal generation and AI scoring are unavailable. Tender crawling and keyword scoring are still running normally.</p>
   </div>
-  <p style="color:#ccc;font-size:14px"><strong style="color:#fff">To fix:</strong> Log in to <a href="https://platform.openai.com/account/billing" style="color:#60a5fa">platform.openai.com/account/billing</a> and add credit to the account.</p>
-  <p style="color:#ccc;font-size:14px">Tender crawling and keyword scoring are still running normally. Only AI-powered features (proposal generation, AI scoring) are affected.</p>
+  <p style="color:#fff;font-size:15px;font-weight:600;margin-bottom:12px">To restore AI features, choose one of the following:</p>
+  <div style="background:#0f1f0f;border:1px solid #1a3a1a;border-radius:6px;padding:16px;margin-bottom:12px">
+    <p style="color:#4ade80;font-weight:700;margin:0 0 6px">Option 1 — Google Gemini (free, fastest)</p>
+    <ol style="color:#ccc;font-size:14px;margin:0;padding-left:18px;line-height:1.8">
+      <li>Go to <a href="https://aistudio.google.com" style="color:#60a5fa">aistudio.google.com</a></li>
+      <li>Sign in with a Google account → click <strong>Get API key</strong></li>
+      <li>Copy the key and send it to the dev team to update in the system</li>
+    </ol>
+    <p style="color:#666;font-size:12px;margin:8px 0 0">No credit card needed. Free tier covers ~1,500 requests/day.</p>
+  </div>
+  <div style="background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:16px;margin-bottom:12px">
+    <p style="color:#facc15;font-weight:700;margin:0 0 6px">Option 2 — Top up OpenAI (no code changes needed)</p>
+    <ol style="color:#ccc;font-size:14px;margin:0;padding-left:18px;line-height:1.8">
+      <li>Go to <a href="https://platform.openai.com/account/billing" style="color:#60a5fa">platform.openai.com/account/billing</a></li>
+      <li>Add a payment method and purchase credit (minimum $10)</li>
+      <li>The system will resume automatically — no dev work required</li>
+    </ol>
+  </div>
+  <div style="background:#1a1a1a;border:1px solid #333;border-radius:6px;padding:16px">
+    <p style="color:#94a3b8;font-weight:700;margin:0 0 6px">Option 3 — Anthropic Claude</p>
+    <ol style="color:#ccc;font-size:14px;margin:0;padding-left:18px;line-height:1.8">
+      <li>Go to <a href="https://console.anthropic.com" style="color:#60a5fa">console.anthropic.com</a> → create account</li>
+      <li>New accounts receive $5 free credit</li>
+      <li>Copy API key and send to dev team</li>
+    </ol>
+  </div>
   <p style="margin-top:32px;color:#555;font-size:12px">Sent from ONWRD Proposal Desk — automated billing alert</p>
 </div>`;
     const { error } = await resend.emails.send({
       from: fromAddress,
       to: Array.isArray(to) ? to : [to],
-      subject: `[ONWRD] Action required: OpenAI billing quota exceeded`,
+      subject: `[ONWRD] Action required: AI features offline — options to restore`,
       html,
     });
     if (error) { res.status(500).json({ error: error.message }); return; }
