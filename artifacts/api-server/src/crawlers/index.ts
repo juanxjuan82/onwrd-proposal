@@ -102,8 +102,8 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
     opp.title, opp.description, opp.sector ?? "", opp.organization, opp.country ?? "",
   ].join(" ").toLowerCase();
 
-  // ── Marketing gate — must match at least one core term or instant SKIP ──
-  const marketingGate: string[] = [
+  // ── Stage 1: Marketing gate — must match at least one core term ──────────
+  const marketingGate = [
     "marketing", "communications", "branding", "brand",
     "campaign", "public relations", "advertising", "media relations",
     "digital marketing", "social media", "creative services",
@@ -112,34 +112,62 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
     "awareness campaign", "visibility campaign", "community engagement",
     "stakeholder communications", "digital communications",
   ];
-  const passesGate = marketingGate.some((kw) => text.includes(kw));
-  if (!passesGate) {
-    const { geographyScore, geoRegion } = computeGeoScore(opp.country, [opp.title, opp.description, opp.sector ?? ""].join(" "));
-    return {
-      fitScore: 0,
-      recommendation: "SKIP",
-      reasoning: "No marketing or communications terms found — not a fit for ONWRD.",
-      geographyScore,
-      geoRegion,
-      bahamasAdvantageScore: 0,
-      confidence: "LOW",
-    };
+  if (!marketingGate.some((kw) => text.includes(kw))) {
+    const { geographyScore, geoRegion } = computeGeoScore(opp.country, text);
+    return { fitScore: 0, recommendation: "SKIP", reasoning: "No marketing or communications terms — not a fit for ONWRD.", geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
   }
 
-  // ── Elite signals — ONWRD's exact core services (+20 pts each) ──────────
-  const eliteSignals: string[] = [
-    "marketing", "communications", "branding", "campaign",
-    "public relations", "media relations",
-    "media campaign", "media strategy",
-    "communications campaign", "communications strategy",
-    "marketing campaign", "marketing strategy",
-    "brand strategy", "brand identity",
+  // ── Stage 1: Hard disqualifiers ──────────────────────────────────────────
+  const disqualifiers = [
+    "us citizen only", "u.s. citizen only",
+    "must be a resident of", "registered vendor in the state of",
+    "on-site weekly", "in-person attendance required at bi-weekly",
+    "must hold active secret clearance", "security clearance required",
   ];
+  if (disqualifiers.some((kw) => text.includes(kw))) {
+    const { geographyScore, geoRegion } = computeGeoScore(opp.country, text);
+    return { fitScore: 0, recommendation: "SKIP", reasoning: "Hard disqualifier matched — eligibility restricted to local/US-only vendors.", geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
+  }
 
-  // ── High signals — strong indicators of relevant work (+12 pts each) ────
-  const highSignals: string[] = [
-    "communication strategy", "rebranding",
-    "advertising", "pr campaign",
+  // ── Stage 1: International remote-viability check ─────────────────────────
+  const { geographyScore, geoRegion } = computeGeoScore(
+    opp.country, [opp.title, opp.description, opp.sector ?? ""].join(" "),
+  );
+  const isLocalRegion = geographyScore >= 75; // Bahamas or Caribbean auto-pass
+  if (!isLocalRegion) {
+    const remoteIndicators = [
+      "remote", "virtual delivery", "international bidders", "international firms",
+      "worldwide", "global firms", "open to all", "any country",
+    ];
+    const multilateralOrgs = [
+      "inter-american development bank", "idb", "world bank", "ibrd", "ifc",
+      "united nations", "undp", "unicef", "unfpa", "unwomen", "unep",
+      "european union", "eu ", "caribbean development bank", "cdb",
+      "caricom", "cto", "oecs",
+    ];
+    const hasRemote = remoteIndicators.some((kw) => text.includes(kw));
+    const isMultilateral = multilateralOrgs.some((kw) => text.includes(kw));
+    if (!hasRemote && !isMultilateral) {
+      return { fitScore: 0, recommendation: "SKIP", reasoning: "International RFP with no remote delivery or multilateral viability — delivery logistics not feasible.", geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
+    }
+  }
+
+  // ── Stage 2: Component A — Geographic Alignment (max 35 pts) ─────────────
+  const geoComponent = geographyScore === 100 ? 35   // Bahamas
+    : geographyScore >= 75 ? 28                       // Caribbean
+    : geographyScore >= 60 ? 20                       // SIDS
+    : geographyScore >= 35 ? 15                       // LatAm
+    : 10;                                             // Global (passed remote check)
+
+  // ── Stage 2: Component B — Core Capabilities (max 30 pts) ────────────────
+  const eliteSignals = [
+    "marketing", "communications", "branding", "campaign",
+    "public relations", "media relations", "media campaign", "media strategy",
+    "communications campaign", "communications strategy",
+    "marketing campaign", "marketing strategy", "brand strategy", "brand identity",
+  ];
+  const highSignals = [
+    "communication strategy", "rebranding", "advertising", "pr campaign",
     "creative services", "creative agency", "content strategy", "copywriting",
     "editorial", "storytelling", "messaging", "narrative",
     "tourism", "destination marketing", "destination branding",
@@ -149,26 +177,18 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
     "video production", "multimedia", "photography", "graphic design",
     "public awareness", "awareness campaign", "community engagement",
     "stakeholder engagement", "behavior change", "outreach", "sensitization",
-    "social mobilization", "advocacy", "knowledge dissemination",
-    "visibility campaign",
+    "social mobilization", "advocacy", "knowledge dissemination", "visibility campaign",
   ];
-
-  // Medium signals — useful but watch for false positives
-  const mediumSignals: string[] = [
+  const mediumSignals = [
     "consulting", "advisory", "strategic communications",
     "communications plan", "engagement plan", "engagement strategy",
-    "market research", "feasibility study",
-    "visibility", "documentation", "knowledge management",
+    "market research", "visibility", "documentation", "knowledge management",
   ];
-
-  // Reduced-weight M&E terms — only score if paired with comms terms
-  const weakSignals: string[] = [
+  const weakSignals = [
     "capacity building", "training", "assessment", "evaluation",
     "survey", "research", "monitoring", "reporting",
   ];
-
-  // Negative signals
-  const negativeSignals: string[] = [
+  const negativeSignals = [
     "construction", "civil works", "road works", "road construction",
     "bridge", "dam", "dredging", "excavation", "drilling",
     "water supply", "sanitation", "sewage", "wastewater",
@@ -183,96 +203,73 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
     "technical feasibility", "structural engineering", "geotechnical",
   ];
 
-  let rawSector = 0;
+  let rawCap = 0;
   const matchedTerms: string[] = [];
   let hasHighSignal = false;
 
   for (const kw of eliteSignals) {
-    if (text.includes(kw)) {
-      rawSector += 20;
-      matchedTerms.push(kw.trim());
-      hasHighSignal = true;
-    }
+    if (text.includes(kw)) { rawCap += 8; matchedTerms.push(kw.trim()); hasHighSignal = true; }
   }
   for (const kw of highSignals) {
-    if (text.includes(kw)) {
-      rawSector += 12;
-      matchedTerms.push(kw.trim());
-      hasHighSignal = true;
-    }
+    if (text.includes(kw)) { rawCap += 5; matchedTerms.push(kw.trim()); hasHighSignal = true; }
   }
   for (const kw of mediumSignals) {
-    if (text.includes(kw)) {
-      rawSector += 8;
-      matchedTerms.push(kw.trim());
-    }
+    if (text.includes(kw)) { rawCap += 3; matchedTerms.push(kw.trim()); }
   }
-  // Weak signals only score if a high signal is also present
   if (hasHighSignal) {
-    for (const kw of weakSignals) {
-      if (text.includes(kw)) {
-        rawSector += 4;
-      }
-    }
+    for (const kw of weakSignals) { if (text.includes(kw)) rawCap += 2; }
   }
-  for (const kw of negativeSignals) {
-    if (text.includes(kw)) rawSector -= 12;
+  for (const kw of negativeSignals) { if (text.includes(kw)) rawCap -= 6; }
+  const capComponent = Math.max(0, Math.min(30, rawCap));
+
+  // ── Stage 2: Component C — Industry Vertical (max 20 pts) ────────────────
+  const industryTiers: Array<{ terms: string[]; pts: number }> = [
+    { terms: ["financial services", "banking", "insurance", "fintech", "investment"], pts: 20 },
+    { terms: ["tourism", "hospitality", "hotel", "resort", "travel", "visitor economy", "destination"], pts: 20 },
+    { terms: ["ministry", "government", "public sector", "national authority", "state agency"], pts: 18 },
+    { terms: ["ngo", "non-governmental", "nonprofit", "non-profit", "civil society", "foundation"], pts: 16 },
+    { terms: ["multilateral", "idb", "world bank", "undp", "unicef", "cdb", "development bank"], pts: 16 },
+    { terms: ["health", "education", "environment", "climate", "energy transition"], pts: 10 },
+  ];
+  let industryComponent = 5; // baseline
+  for (const tier of industryTiers) {
+    if (tier.terms.some((kw) => text.includes(kw))) { industryComponent = tier.pts; break; }
   }
-  rawSector = Math.max(0, Math.min(100, rawSector));
 
-  // Geography scoring
-  const { geographyScore, geoRegion } = computeGeoScore(
-    opp.country,
-    [opp.title, opp.description, opp.sector ?? ""].join(" "),
-  );
+  // ── Stage 2: Component D — Scale & Feasibility (max 15 pts) ──────────────
+  const scaleIndicators = ["timeline", "milestones", "deliverables", "budget", "proposal template", "scope of work", "terms of reference", "rfp", "request for proposal"];
+  const scaleMatches = scaleIndicators.filter((kw) => text.includes(kw)).length;
+  const scaleComponent = Math.min(15, Math.round((scaleMatches / scaleIndicators.length) * 15));
 
-  // Weighted formula: geography 30%, sector 70%
-  const fitScore = Math.max(0, Math.min(100, Math.round(geographyScore * 0.30 + rawSector * 0.70)));
-  const bahamasAdvantageScore = computeBahamasAdvantage(geographyScore, rawSector);
+  // ── Final score ───────────────────────────────────────────────────────────
+  const fitScore = Math.min(100, geoComponent + capComponent + industryComponent + scaleComponent);
+  const bahamasAdvantageScore = computeBahamasAdvantage(geographyScore, Math.round((capComponent / 30) * 100));
 
-  // Thresholds calibrated for the weighted formula
-  const recommendation = fitScore >= 60 ? "PURSUE" : fitScore >= 35 ? "CONSIDER" : "SKIP";
+  // Thresholds: PURSUE ≥75, CONSIDER 45–74, SKIP <45
+  const recommendation = fitScore >= 75 ? "PURSUE" : fitScore >= 45 ? "CONSIDER" : "SKIP";
 
-  // Confidence: HIGH needs both geo + sector signal; MEDIUM = one of the two
   const hasGeoSignal = geographyScore >= 75;
-  const hasSectorSignal = rawSector >= 14;
+  const hasSectorSignal = capComponent >= 10;
   const confidence = hasGeoSignal && hasSectorSignal ? "HIGH"
     : hasGeoSignal || hasSectorSignal ? "MEDIUM"
     : "LOW";
 
-  // Human-readable reasoning
   const geoLabel: Record<string, string> = {
-    bahamas: "🇧🇸 Bahamas",
-    caribbean: "🌴 Caribbean",
-    sids: "🏝️ SIDS",
-    latam: "🌎 Latin America",
-    global: "🌐 Global",
+    bahamas: "🇧🇸 Bahamas", caribbean: "🌴 Caribbean",
+    sids: "🏝️ SIDS", latam: "🌎 Latin America", global: "🌐 Global",
   };
   const topMatches = [...new Set(matchedTerms)].slice(0, 4);
-  const geoStr = `${geoLabel[geoRegion] ?? geoRegion} geography (${geographyScore}/100)`;
-  const sectorStr = topMatches.length > 0
-    ? `Matched: ${topMatches.join(", ")}`
-    : "No sector keywords matched";
-  const reasoning = `${geoStr}. ${sectorStr}. (Scored by keyword engine — AI unavailable.)`;
+  const reasoning = `${geoLabel[geoRegion] ?? geoRegion} (geo ${geoComponent}/35). Capabilities ${capComponent}/30. Industry ${industryComponent}/20. Scale ${scaleComponent}/15.${topMatches.length ? ` Keywords: ${topMatches.join(", ")}.` : ""} (Keyword engine)`;
 
   return { fitScore, recommendation, reasoning, geographyScore, geoRegion, bahamasAdvantageScore, confidence };
 }
 
 // ── AI scoring with keyword fallback ───────────────────────────────────────
 async function scoreOpportunity(opp: TenderOpportunity): Promise<ScoringResult> {
-  // Apply marketing gate before spending an AI call
-  const gateText = [opp.title, opp.description, opp.sector ?? "", opp.organization].join(" ").toLowerCase();
-  const gateTerms = [
-    "marketing", "communications", "branding", "brand",
-    "campaign", "public relations", "advertising", "media relations",
-    "digital marketing", "social media", "creative services",
-    "content strategy", "communications strategy", "communications plan",
-    "pr ", "rebranding", "destination marketing", "tourism marketing",
-    "awareness campaign", "visibility campaign", "community engagement",
-    "stakeholder communications", "digital communications",
-  ];
-  if (!gateTerms.some((kw) => gateText.includes(kw))) {
-    return keywordScore(opp); // will return score 0 immediately
+  // Run keyword filter first — if it SKIPs at Stage 1, no point calling AI
+  const keyResult = keywordScore(opp);
+  if (keyResult.fitScore === 0 && keyResult.recommendation === "SKIP") {
+    return keyResult;
   }
 
   try {
@@ -286,22 +283,38 @@ async function scoreOpportunity(opp: TenderOpportunity): Promise<ScoringResult> 
 
 ONWRD specialises in: marketing campaigns, branding, communications strategy, digital marketing, social media, tourism promotion, community engagement, public awareness campaigns, stakeholder engagement, creative production, and development-sector communications.
 
-Evaluate each opportunity on:
-- Geography: Bahamas=100, Caribbean=75, SIDS=60, Latin America=35, Global=20
-- Sector fit: comms/marketing/tourism/branding = high; M&E/audit/construction = low/negative
+Score each opportunity using this 4-component rubric (total 100 points):
+
+1. GEOGRAPHIC ALIGNMENT (max 35 pts)
+   - Bahamas: 35 | Caribbean: 28 | SIDS: 20 | Latin America: 15 | Global (multilateral/remote): 10
+
+2. CORE CAPABILITIES (max 30 pts)
+   - How well does the scope match: marketing, branding, communications strategy, PR, digital, social media, creative production?
+   - Strong match = 25-30 | Moderate = 15-24 | Weak = 5-14 | None = 0
+
+3. INDUSTRY VERTICAL (max 20 pts)
+   - Financial services or Tourism/Hospitality: 20 | Government/Ministry: 18 | NGO/Multilateral: 16 | Health/Education/Climate: 10 | Other: 5
+
+4. SCALE & FEASIBILITY (max 15 pts)
+   - Are timeline, milestones, deliverables, budget, or scope clearly defined? More structure = higher score.
+
+DISQUALIFY (return fitScore 0, SKIP) if:
+- No marketing/communications terms at all
+- Restricted to US-only or local-registered vendors
+- International with no remote delivery or multilateral backing
 
 Return ONLY valid JSON:
 {
-  "fitScore": <0-100, weighted: geography 30% + sector 70%>,
+  "fitScore": <sum of 4 components, 0-100>,
   "recommendation": "PURSUE" | "CONSIDER" | "SKIP",
-  "reasoning": "<why pursue or skip — 2 sentences max>",
-  "geographyScore": <0-100>,
+  "reasoning": "<2 sentences: key strength and any concern>",
+  "geographyScore": <raw geo score: bahamas=100, caribbean=75, sids=60, latam=35, global=20>,
   "geoRegion": "bahamas" | "caribbean" | "sids" | "latam" | "global",
-  "bahamasAdvantageScore": <0-100, ONWRD's local competitive edge>,
+  "bahamasAdvantageScore": <0-100, ONWRD's competitive edge given local presence>,
   "confidence": "HIGH" | "MEDIUM" | "LOW"
 }
 
-PURSUE ≥60, CONSIDER 35-59, SKIP <35.`,
+PURSUE ≥75, CONSIDER 45-74, SKIP <45.`,
         },
         {
           role: "user",
