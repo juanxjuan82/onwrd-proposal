@@ -248,7 +248,7 @@ router.post("/tender-intelligence/notify-billing", async (req, res) => {
     const { Resend } = await import("resend");
     const resend = new Resend(apiKey);
     const fromAddress = process.env.RESEND_FROM ?? "ONWRD Tender Desk <onboarding@resend.dev>";
-    const to = req.body?.to ?? "r.dean@onwrdadvisors.com";
+    const to = req.body?.to ?? "j.aymes@onwrdadvisors.com";
     const html = `
 <div style="font-family:sans-serif;max-width:600px;margin:0 auto;color:#fff;background:#0a0a0a;padding:32px;border-radius:8px">
   <img src="https://onwrdadvisors.com/wp-content/uploads/2024/01/onwrd-logo-white.png" style="height:36px;margin-bottom:24px" alt="ONWRD"/>
@@ -284,12 +284,12 @@ router.post("/tender-intelligence/notify-billing", async (req, res) => {
       <li>Copy API key and send to dev team</li>
     </ol>
   </div>
-  <p style="margin-top:32px;color:#555;font-size:12px">Sent from ONWRD Proposal Desk — automated billing alert</p>
+  <p style="color:#888;font-size:13px;margin-top:24px">📨 Please forward to <strong style="color:#ccc">r.dean@onwrdadvisors.com</strong> if they manage the API billing.</p>
+  <p style="margin-top:16px;color:#555;font-size:12px">Sent from ONWRD Proposal Desk — automated billing alert</p>
 </div>`;
     const { error } = await resend.emails.send({
       from: fromAddress,
       to: Array.isArray(to) ? to : [to],
-      cc: ["j.aymes@onwrdadvisors.com"],
       subject: `[ONWRD] Action required: AI features offline — options to restore`,
       html,
     });
