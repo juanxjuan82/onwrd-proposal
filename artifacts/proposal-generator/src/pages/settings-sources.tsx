@@ -351,25 +351,48 @@ export default function SettingsSources() {
       {tab === "scoring" && (
         <div className="space-y-6 max-w-3xl">
 
-          {/* Formula */}
+          {/* Stage 1 filters */}
           <div className="p-5 rounded-lg border border-border bg-card">
-            <h3 className="font-semibold text-white text-sm mb-1">Scoring Formula</h3>
-            <p className="text-xs text-muted-foreground mb-4">Every opportunity is scored 0–100 using a weighted blend of geography and sector fit.</p>
-            <div className="flex items-center gap-3 flex-wrap">
-              <div className="flex-1 min-w-[140px] p-3 rounded-md bg-muted/20 border border-border text-center">
-                <div className="text-2xl font-bold text-amber-400">30%</div>
-                <div className="text-xs text-muted-foreground mt-0.5">Geography Score</div>
+            <h3 className="font-semibold text-white text-sm mb-1">Stage 1 — Instant Filters</h3>
+            <p className="text-xs text-muted-foreground mb-4">Applied before any scoring. Any match here returns score 0 and skips immediately — no AI call spent.</p>
+            <div className="space-y-3">
+              <div>
+                <p className="text-xs font-medium text-red-400 uppercase tracking-wide mb-2">Hard disqualifiers <span className="text-muted-foreground normal-case font-normal">(auto-SKIP)</span></p>
+                <div className="flex flex-wrap gap-1.5">
+                  {["no marketing/communications terms","us citizen only","u.s. citizen only","must be a resident of","registered vendor in the state of","on-site weekly","in-person attendance required at bi-weekly","security clearance required"].map((kw) => (
+                    <span key={kw} className="px-2 py-0.5 rounded-full bg-red-900/20 text-red-400 text-xs border border-red-900/40">{kw}</span>
+                  ))}
+                </div>
               </div>
-              <div className="text-muted-foreground font-bold text-lg">+</div>
-              <div className="flex-1 min-w-[140px] p-3 rounded-md bg-muted/20 border border-border text-center">
-                <div className="text-2xl font-bold text-blue-400">70%</div>
-                <div className="text-xs text-muted-foreground mt-0.5">Sector Keyword Score</div>
+              <div>
+                <p className="text-xs font-medium text-yellow-400 uppercase tracking-wide mb-2">International viability check <span className="text-muted-foreground normal-case font-normal">(non-Caribbean must pass)</span></p>
+                <p className="text-xs text-muted-foreground mb-2">If the opportunity is outside Bahamas / Caribbean, it must show at least one of:</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {["remote","virtual delivery","international bidders","international firms","worldwide","idb","world bank","undp","unicef","cdb","caricom","european union"].map((kw) => (
+                    <span key={kw} className="px-2 py-0.5 rounded-full bg-yellow-900/20 text-yellow-400 text-xs border border-yellow-900/40">{kw}</span>
+                  ))}
+                </div>
               </div>
-              <div className="text-muted-foreground font-bold text-lg">=</div>
-              <div className="flex-1 min-w-[140px] p-3 rounded-md bg-muted/20 border border-primary/30 text-center">
-                <div className="text-2xl font-bold text-white">Fit Score</div>
-                <div className="text-xs text-muted-foreground mt-0.5">0 – 100</div>
-              </div>
+            </div>
+          </div>
+
+          {/* 4-component formula */}
+          <div className="p-5 rounded-lg border border-border bg-card">
+            <h3 className="font-semibold text-white text-sm mb-1">Stage 2 — Scoring Formula</h3>
+            <p className="text-xs text-muted-foreground mb-4">Opportunities that pass Stage 1 are scored across four components totalling 100 points.</p>
+            <div className="grid grid-cols-2 gap-3">
+              {[
+                { pts: 35, label: "Geographic Alignment", color: "text-amber-400", desc: "Bahamas=35 · Caribbean=28 · SIDS=20 · LatAm=15 · Global=10" },
+                { pts: 30, label: "Core Capabilities",    color: "text-blue-400",  desc: "Keyword match against ONWRD's services: marketing, branding, comms, PR, digital…" },
+                { pts: 20, label: "Industry Vertical",    color: "text-emerald-400", desc: "Finance/Tourism=20 · Government=18 · NGO/Multilateral=16 · Health/Climate=10" },
+                { pts: 15, label: "Scale & Feasibility",  color: "text-purple-400", desc: "Structured RFP signals: TOR, deliverables, milestones, budget, scope of work…" },
+              ].map(({ pts, label, color, desc }) => (
+                <div key={label} className="p-4 rounded-md bg-muted/20 border border-border">
+                  <div className={`text-2xl font-bold ${color}`}>{pts} pts</div>
+                  <div className="text-sm font-medium text-white mt-0.5">{label}</div>
+                  <div className="text-xs text-muted-foreground mt-1 leading-relaxed">{desc}</div>
+                </div>
+              ))}
             </div>
           </div>
 
@@ -379,34 +402,35 @@ export default function SettingsSources() {
             <p className="text-xs text-muted-foreground mb-4">Final fit score determines the recommendation shown in the Inbox.</p>
             <div className="space-y-2">
               {[
-                { label: "🔥 PURSUE",  range: "≥ 60", color: "border-emerald-800 bg-emerald-900/20 text-emerald-400" },
-                { label: "⚡ CONSIDER", range: "35 – 59", color: "border-yellow-800 bg-yellow-900/20 text-yellow-400" },
-                { label: "— SKIP",     range: "< 35",  color: "border-gray-700 bg-gray-900/20 text-gray-400" },
-              ].map(({ label, range, color }) => (
-                <div key={label} className={`flex items-center justify-between px-4 py-2.5 rounded-md border ${color}`}>
-                  <span className="font-semibold text-sm">{label}</span>
-                  <span className="text-sm font-mono">{range}</span>
+                { label: "🔥 PURSUE",   range: "≥ 75", note: "Strong fit across geography, capabilities, and sector", color: "border-emerald-800 bg-emerald-900/20 text-emerald-400" },
+                { label: "⚡ CONSIDER", range: "45 – 74", note: "Partial fit — worth reviewing before deciding", color: "border-yellow-800 bg-yellow-900/20 text-yellow-400" },
+                { label: "— SKIP",     range: "< 45",  note: "Poor fit or failed Stage 1 filter", color: "border-gray-700 bg-gray-900/20 text-gray-400" },
+              ].map(({ label, range, note, color }) => (
+                <div key={label} className={`flex items-center justify-between px-4 py-3 rounded-md border ${color}`}>
+                  <div>
+                    <span className="font-semibold text-sm">{label}</span>
+                    <p className="text-xs opacity-70 mt-0.5">{note}</p>
+                  </div>
+                  <span className="text-sm font-mono font-bold">{range}</span>
                 </div>
               ))}
             </div>
           </div>
 
-          {/* Geography */}
+          {/* Geography detail */}
           <div className="p-5 rounded-lg border border-border bg-card">
-            <h3 className="font-semibold text-white text-sm mb-1">Geography Scores</h3>
-            <p className="text-xs text-muted-foreground mb-4">Derived from the opportunity's country field and title / description text.</p>
+            <h3 className="font-semibold text-white text-sm mb-1">Geographic Alignment Detail</h3>
+            <p className="text-xs text-muted-foreground mb-4">Detected from country field, title, and description. Bahamas and Caribbean auto-pass Stage 1.</p>
             <div className="space-y-2">
               {[
-                { region: "🇧🇸 Bahamas",    score: 100, signals: "Nassau, Freeport, New Providence, Grand Bahama, Andros, Exuma…", highlight: true },
-                { region: "🌴 Caribbean",   score: 75,  signals: "CARICOM, OECS, Jamaica, Barbados, Trinidad, Guyana, Belize, St Lucia…", highlight: false },
-                { region: "🏝️ SIDS",        score: 60,  signals: "Small Island Developing States, Pacific Island, Maldives, Fiji…", highlight: false },
-                { region: "🌎 Latin America", score: 35, signals: "Mexico, Colombia, Peru, Brazil, Panama, Costa Rica…", highlight: false },
-                { region: "🌐 Global",      score: 20,  signals: "All other countries / no location signal", highlight: false },
-              ].map(({ region, score, signals, highlight }) => (
+                { region: "🇧🇸 Bahamas",      pts: 35, signals: "Nassau, Freeport, New Providence, Grand Bahama, Andros, Exuma…", highlight: true },
+                { region: "🌴 Caribbean",     pts: 28, signals: "CARICOM, OECS, Jamaica, Barbados, Trinidad, Guyana, Belize, St Lucia…", highlight: false },
+                { region: "🏝️ SIDS",          pts: 20, signals: "Small Island Developing States, Pacific Island, Maldives, Fiji…", highlight: false },
+                { region: "🌎 Latin America", pts: 15, signals: "Mexico, Colombia, Peru, Brazil, Panama, Costa Rica…", highlight: false },
+                { region: "🌐 Global",        pts: 10, signals: "Multilateral or remote-eligible international (passed Stage 1)", highlight: false },
+              ].map(({ region, pts, signals, highlight }) => (
                 <div key={region} className={`flex items-start gap-3 px-4 py-3 rounded-md border ${highlight ? "border-amber-800/50 bg-amber-900/10" : "border-border bg-muted/10"}`}>
-                  <div className="w-10 text-center">
-                    <span className={`text-lg font-bold ${highlight ? "text-amber-400" : "text-white"}`}>{score}</span>
-                  </div>
+                  <div className={`w-10 text-center text-lg font-bold flex-shrink-0 ${highlight ? "text-amber-400" : "text-white"}`}>{pts}</div>
                   <div className="flex-1 min-w-0">
                     <div className={`text-sm font-medium ${highlight ? "text-amber-300" : "text-white"}`}>{region}</div>
                     <div className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{signals}</div>
@@ -416,109 +440,51 @@ export default function SettingsSources() {
             </div>
           </div>
 
-          {/* Sector keywords */}
+          {/* Capability keywords */}
           <div className="p-5 rounded-lg border border-border bg-card">
-            <h3 className="font-semibold text-white text-sm mb-1">Sector Keywords</h3>
-            <p className="text-xs text-muted-foreground mb-4">Keyword hits accumulate into the sector score (max 100). Negative signals subtract from it.</p>
-
+            <h3 className="font-semibold text-white text-sm mb-1">Core Capabilities Keywords</h3>
+            <p className="text-xs text-muted-foreground mb-4">Accumulate toward the 30-point capabilities component. Negative signals subtract.</p>
             <div className="space-y-4">
               <div>
-                <p className="text-xs font-medium text-white uppercase tracking-wide mb-2">Elite signals <span className="text-muted-foreground normal-case font-normal">(+20 pts each — ONWRD's core services)</span></p>
+                <p className="text-xs font-medium text-white uppercase tracking-wide mb-2">Elite <span className="text-muted-foreground normal-case font-normal">(+8 pts each)</span></p>
                 <div className="flex flex-wrap gap-1.5">
-                  {[
-                    "marketing","communications","branding","campaign",
-                    "public relations","media relations",
-                    "media campaign","media strategy",
-                    "communications campaign","communications strategy",
-                    "marketing campaign","marketing strategy",
-                    "brand strategy","brand identity",
-                  ].map((kw) => (
+                  {["marketing","communications","branding","campaign","public relations","media relations","media campaign","media strategy","communications strategy","marketing strategy","brand strategy","brand identity"].map((kw) => (
                     <span key={kw} className="px-2 py-0.5 rounded-full bg-white/10 text-white text-xs border border-white/25 font-medium">{kw}</span>
                   ))}
                 </div>
               </div>
-
               <div>
-                <p className="text-xs font-medium text-emerald-400 uppercase tracking-wide mb-2">High signals <span className="text-muted-foreground normal-case font-normal">(+12 pts each)</span></p>
+                <p className="text-xs font-medium text-emerald-400 uppercase tracking-wide mb-2">High <span className="text-muted-foreground normal-case font-normal">(+5 pts each)</span></p>
                 <div className="flex flex-wrap gap-1.5">
-                  {[
-                    "communication strategy","rebranding",
-                    "advertising","pr campaign","creative services","creative agency",
-                    "content strategy","copywriting","editorial","storytelling","messaging","narrative",
-                    "tourism","destination marketing","destination branding","hospitality","visitor experience","travel promotion",
-                    "social media","digital marketing","digital communications","digital campaign","online presence",
-                    "video production","multimedia","photography","graphic design",
-                    "public awareness","awareness campaign","community engagement","stakeholder engagement",
-                    "behavior change","outreach","sensitization","social mobilization","advocacy",
-                    "knowledge dissemination","visibility campaign",
-                  ].map((kw) => (
+                  {["rebranding","advertising","pr campaign","creative services","content strategy","copywriting","storytelling","messaging","tourism","destination marketing","hospitality","social media","digital marketing","digital campaign","video production","multimedia","graphic design","awareness campaign","community engagement","stakeholder engagement","outreach","advocacy","visibility campaign"].map((kw) => (
                     <span key={kw} className="px-2 py-0.5 rounded-full bg-emerald-900/20 text-emerald-400 text-xs border border-emerald-900/40">{kw}</span>
                   ))}
                 </div>
               </div>
-
               <div>
-                <p className="text-xs font-medium text-yellow-400 uppercase tracking-wide mb-2">Medium signals <span className="text-muted-foreground normal-case font-normal">(+8 pts each)</span></p>
+                <p className="text-xs font-medium text-yellow-400 uppercase tracking-wide mb-2">Medium <span className="text-muted-foreground normal-case font-normal">(+3 pts each)</span></p>
                 <div className="flex flex-wrap gap-1.5">
-                  {[
-                    "consulting","advisory","strategic communications","communications plan",
-                    "engagement plan","engagement strategy","market research",
-                    "visibility","documentation","knowledge management",
-                  ].map((kw) => (
+                  {["consulting","advisory","strategic communications","communications plan","engagement plan","market research","visibility","documentation","knowledge management"].map((kw) => (
                     <span key={kw} className="px-2 py-0.5 rounded-full bg-yellow-900/20 text-yellow-400 text-xs border border-yellow-900/40">{kw}</span>
                   ))}
                 </div>
               </div>
-
               <div>
-                <p className="text-xs font-medium text-slate-400 uppercase tracking-wide mb-2">Weak signals <span className="text-muted-foreground normal-case font-normal">(+4 pts, only when paired with a high signal)</span></p>
+                <p className="text-xs font-medium text-slate-400 uppercase tracking-wide mb-2">Weak <span className="text-muted-foreground normal-case font-normal">(+2 pts, only when paired with a high signal)</span></p>
                 <div className="flex flex-wrap gap-1.5">
                   {["capacity building","training","assessment","evaluation","survey","research","monitoring","reporting"].map((kw) => (
                     <span key={kw} className="px-2 py-0.5 rounded-full bg-slate-900/40 text-slate-400 text-xs border border-slate-700/40">{kw}</span>
                   ))}
                 </div>
               </div>
-
               <div>
-                <p className="text-xs font-medium text-red-400 uppercase tracking-wide mb-2">Negative signals <span className="text-muted-foreground normal-case font-normal">(−12 pts each)</span></p>
+                <p className="text-xs font-medium text-red-400 uppercase tracking-wide mb-2">Negative <span className="text-muted-foreground normal-case font-normal">(−6 pts each)</span></p>
                 <div className="flex flex-wrap gap-1.5">
-                  {[
-                    "construction","civil works","road works","road construction","bridge","dam","dredging","excavation","drilling",
-                    "water supply","sanitation","sewage","wastewater","electricity","power plant","energy infrastructure","solar panel",
-                    "medical equipment","pharmaceutical","drugs","medicine","health supplies",
-                    "office supplies","office furniture","stationery","vehicles","fleet",
-                    "food supply","food procurement","catering","nutrition supplies",
-                    "cleaning services","security services","guard services",
-                    "it equipment","hardware","network equipment","servers","data center",
-                    "software license","laboratory equipment","spare parts",
-                    "financial audit","external audit","engineering consultancy",
-                    "technical feasibility","structural engineering","geotechnical",
-                  ].map((kw) => (
+                  {["construction","civil works","road works","bridge","dam","dredging","drilling","water supply","sanitation","sewage","electricity","power plant","solar panel","medical equipment","pharmaceutical","drugs","office supplies","vehicles","fleet","food supply","catering","cleaning services","security services","it equipment","hardware","servers","software license","laboratory equipment","financial audit","external audit","structural engineering","geotechnical"].map((kw) => (
                     <span key={kw} className="px-2 py-0.5 rounded-full bg-red-900/20 text-red-400 text-xs border border-red-900/40">{kw}</span>
                   ))}
                 </div>
               </div>
-            </div>
-          </div>
-
-          {/* Bahamas advantage */}
-          <div className="p-5 rounded-lg border border-border bg-card">
-            <h3 className="font-semibold text-white text-sm mb-1">Bahamas Advantage Score</h3>
-            <p className="text-xs text-muted-foreground mb-3">A secondary signal (shown in expanded items) reflecting ONWRD's local competitive edge on each opportunity. Weighted: geography 65% + sector 35%.</p>
-            <div className="flex flex-wrap gap-3">
-              {[
-                { label: "Bahamas comms/tourism", score: "90–100", note: "Maximum home advantage" },
-                { label: "Caribbean comms/tourism", score: "65–80", note: "Regional edge" },
-                { label: "SIDS comms",             score: "50–65", note: "Some relevance" },
-                { label: "Latin America comms",    score: "30–45", note: "Limited advantage" },
-                { label: "Global, any sector",     score: "15–25", note: "No geographic edge" },
-              ].map(({ label, score, note }) => (
-                <div key={label} className="flex-1 min-w-[180px] p-3 rounded-md bg-muted/10 border border-border">
-                  <div className="text-amber-400 font-bold text-sm">{score}</div>
-                  <div className="text-white text-xs mt-0.5">{label}</div>
-                  <div className="text-muted-foreground text-xs mt-0.5">{note}</div>
-                </div>
-              ))}
             </div>
           </div>
 
