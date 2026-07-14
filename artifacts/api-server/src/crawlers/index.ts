@@ -102,6 +102,15 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
     opp.title, opp.description, opp.sector ?? "", opp.organization, opp.country ?? "",
   ].join(" ").toLowerCase();
 
+  // ── Deadline: hard filter — skip expired tenders first ───────────────────
+  if (opp.deadline) {
+    const deadline = opp.deadline instanceof Date ? opp.deadline : new Date(opp.deadline);
+    if (deadline < new Date()) {
+      const { geographyScore, geoRegion } = computeGeoScore(opp.country, text);
+      return { fitScore: 0, recommendation: "SKIP", reasoning: "Deadline has passed — tender is expired.", geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
+    }
+  }
+
   // ── Stage 1: Marketing gate — must match at least one core term ──────────
   const marketingGate = [
     "marketing", "communications", "branding", "brand",
@@ -242,7 +251,16 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
   const scaleComponent = Math.min(15, Math.round((scaleMatches / scaleIndicators.length) * 15));
 
   // ── Final score ───────────────────────────────────────────────────────────
-  const fitScore = Math.min(100, geoComponent + capComponent + industryComponent + scaleComponent);
+  const baseScore = geoComponent + capComponent + industryComponent + scaleComponent;
+
+  // Urgency boost: +5 if deadline is set and within 14 days
+  const urgencyBoost = (() => {
+    if (!opp.deadline) return 0;
+    const daysLeft = (opp.deadline.getTime() - Date.now()) / (1000 * 60 * 60 * 24);
+    return daysLeft <= 14 ? 5 : 0;
+  })();
+
+  const fitScore = Math.min(100, baseScore + urgencyBoost);
   const bahamasAdvantageScore = computeBahamasAdvantage(geographyScore, Math.round((capComponent / 30) * 100));
 
   // Thresholds: PURSUE ≥60, CONSIDER 40–59, SKIP <40
@@ -259,7 +277,7 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
     sids: "🏝️ SIDS", latam: "🌎 Latin America", global: "🌐 Global",
   };
   const topMatches = [...new Set(matchedTerms)].slice(0, 4);
-  const reasoning = `${geoLabel[geoRegion] ?? geoRegion} (geo ${geoComponent}/35). Capabilities ${capComponent}/30. Industry ${industryComponent}/20. Scale ${scaleComponent}/15.${topMatches.length ? ` Keywords: ${topMatches.join(", ")}.` : ""} (Keyword engine)`;
+  const reasoning = `${geoLabel[geoRegion] ?? geoRegion} (geo ${geoComponent}/35). Capabilities ${capComponent}/30. Industry ${industryComponent}/20. Scale ${scaleComponent}/15.${urgencyBoost ? ` ⏰ Urgency +${urgencyBoost}.` : ""}${topMatches.length ? ` Keywords: ${topMatches.join(", ")}.` : ""} (Keyword engine)`;
 
   return { fitScore, recommendation, reasoning, geographyScore, geoRegion, bahamasAdvantageScore, confidence };
 }
@@ -354,6 +372,7 @@ export async function rescoreWithKeywords(): Promise<number> {
       description: item.description,
       country: item.country ?? undefined,
       sector: item.sector ?? undefined,
+      deadline: item.deadline ? new Date(item.deadline) : undefined,
     };
     const result = keywordScore(opp);
     await db.update(discoveredTendersTable).set({
