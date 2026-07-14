@@ -217,9 +217,10 @@ router.post("/tender-digest-settings/test", async (req, res) => {
     const pursueSorted = sortBahamasFirst(pursue);
     const considerSorted = sortBahamasFirst(consider);
 
-    const bahamasCount = allTenders.filter((t) =>
-      (t.country ?? "").toLowerCase().includes("bahamas")
-    ).length;
+    const isBahamasEntry = (t: (typeof allTenders)[number]) =>
+      (t.country ?? "").toLowerCase().includes("bahamas");
+    const bahamasCount = [...pursue, ...consider].filter(isBahamasEntry).length;
+    const bahamasTracked = allTenders.filter(isBahamasEntry).length;
 
     const { Resend } = await import("resend");
     const resend = new Resend(apiKey);
@@ -299,7 +300,8 @@ router.post("/tender-digest-settings/test", async (req, res) => {
       </div>
       <div style="background:#0f1a10;border:1px solid #166534;border-radius:10px;padding:12px 20px;min-width:110px;text-align:center">
         <div style="font-size:24px;font-weight:700;color:#34d399">🇧🇸 ${bahamasCount}</div>
-        <div style="font-size:12px;color:#6ee7b7;margin-top:2px">Bahamas opps</div>
+        <div style="font-size:12px;color:#6ee7b7;margin-top:2px">Bahamas to action</div>
+        ${bahamasTracked > bahamasCount ? `<div style="font-size:11px;color:#4b7a5a;margin-top:2px">${bahamasTracked} tracked total</div>` : ""}
       </div>
     </div>
 
@@ -329,7 +331,7 @@ router.post("/tender-digest-settings/test", async (req, res) => {
 
     <div style="background:#111;border:1px solid #1f1f1f;border-radius:10px;padding:16px 20px;font-size:13px;color:#666">
       <strong style="color:#888">About this digest</strong><br/>
-      Bahamas opportunities are highlighted and sorted to the top. The daily digest runs at 06:00 and scans ${allTenders.length} active sources including Bahamas Gov, World Bank, IDB, CDB, and Caribbean Tourism Organisation.
+      Bahamas opportunities are highlighted and sorted to the top. The daily digest runs at 06:00 and scans sources including Bahamas Gov, World Bank, IDB, CDB, and Caribbean Tourism Organisation. ${bahamasTracked} Bahamas tenders currently tracked — ${bahamasCount > 0 ? `${bahamasCount} actionable` : "none actionable yet (current postings are infrastructure/IT)"}.
     </div>
   </div>
 
@@ -351,7 +353,7 @@ router.post("/tender-digest-settings/test", async (req, res) => {
     }
     res.json({
       message: `Digest sent to ${emails.join(", ")}`,
-      summary: { pursue: pursue.length, consider: consider.length, bahamasOpps: bahamasCount },
+      summary: { pursue: pursue.length, consider: consider.length, bahamasActionable: bahamasCount, bahamasTracked },
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : "Unknown error";
