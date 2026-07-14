@@ -1,0 +1,193 @@
+### Stage 1: The Low-Cost Filter (Metadata & Disqualifiers)
+* **Goal:** Eliminate 80% of irrelevant global/US RFPs before any vector embeddings or LLM processing occurs.
+* **Logic:** Auto-approve Caribbean/Bahamian RFPs for Stage 2. For international RFPs, check for strict exclusion phrases (e.g., "Must be a US citizen", "On-site weekly") and require explicit remote-work or international bidder allowance.
+
+### Stage 2: The Core Scoring Matrix
+RFPs that pass Stage 1 are evaluated against ONWRD’s strategic strengths. The total score is out of 100 points:
+1. **Geographic Alignment (35 Points):** Premium for Bahamas (35), High for Caribbean (28), Medium for remote-friendly international/multilateral (15).
+2. **Core Capabilities (30 Points):** Evaluates textual alignment with Strategic Communications, Brand Strategy, Digital Solutions, and Public Relations.
+3. **Industry Vertical (20 Points):** Financial Services, Tourism/Hospitality, Public Sector/Ministries, and NGOs/Multilaterals receive maximum weights.
+4. **Scale & Feasibility (15 Points):** Evaluates duration, clarity of scope, and budget indicators to ensure the overhead of international delivery is justified.
+
+---
+
+## 2. Replit Implementation Code
+
+Copy and paste this implementation into your Replit environment (`scoring_system.py`) to update your logic. It includes the complete rule engine and scoring math.
+
+```python
+import re
+from typing import Dict, Any, Tuple
+
+# Configuration & Strategic Constants for ONWRD Advisors
+CORE_CAPABILITIES = ["marketing", "communications", "brand strategy", "digital solutions", "public relations", "annual report", "public relations"]
+TARGET_INDUSTRIES = ["financial services", "tourism", "hospitality", "government", "ministry", "ngo", "idb", "multilateral"]
+CARIBBEAN_COUNTRIES = [
+    "bahamas", "barbados", "jamaica", "trinidad", "tobago", "guyana", "suriname", 
+    "belize", "st lucia", "antigua", "barbuda", "grenada", "dominica", "st vincent"
+]
+
+class RFPProcessor:
+    def __init__(self, rfp_data: Dict[str, Any]):
+        self.rfp = rfp_data
+        self.title = rfp_data.get("title", "").lower()
+        self.description = rfp_data.get("description", "").lower()
+        self.location = rfp_data.get("location", "").lower()
+        self.raw_text = f"{self.title} {self.description}".lower()
+
+    def passes_stage1_filter(self) -> Tuple[bool, str]:
+        \"\"\"
+        Stage 1: Low-Cost Metadata Filter
+        Runs rapid regex/string matching to auto-approve local/regional RFPs,
+        and aggressively filters out incompatible US/Global RFPs before LLM costs occur.
+        \"\"\"
+        # 1. Immediate Hard Disqualifiers for International/US RFPs
+        hard_disqualifiers = [
+            r"us citizen only", 
+            r"must be a resident of", 
+            r"on-site weekly",
+            r"in-person attendance required at bi-weekly",
+            r"registered vendor in the state of"
+        ]
+        for pattern in hard_disqualifiers:
+            if re.search(pattern, self.raw_text):
+                return False, f"Disqualified: Matched hard exclusion criteria ('{pattern}')"
+
+        # 2. Local Market Safe Pass
+        if "bahamas" in self.location or "nassau" in self.location:
+            return True, "Passed: Direct Local Market (Bahamas)"
+
+        # 3. Regional Market Safe Pass
+        if any(country in self.location for country in CARIBBEAN_COUNTRIES):
+            return True, "Passed: Caribbean Regional Expansion Zone"
+
+        # 4. International Verification Filter (US / Global)
+        # If outside the Caribbean, it MUST explicitly indicate remote or international bidding viability
+        remote_indicators = ["remote allowed", "virtual delivery", "international bidders", "worldwide", "anywhere"]
+        has_remote_allowance = any(indicator in self.raw_text for indicator in remote_indicators)
+        
+        # Also check if it's from an approved global multilateral body that targets international firms
+        is_multilateral = any(org in self.raw_text for org in ["inter-american development bank", "idb", "united nations", "undp", "world bank"])
+
+        if has_remote_allowance or is_multilateral:
+            return True, "Passed: International Opportunity with Remote/Multilateral Viability"
+
+        return False, "Disqualified: International RFP missing explicit remote or international bidder parameters"
+
+    def calculate_stage2_score(self) -> Dict[str, Any]:
+        \"\"\"
+        Stage 2: High-Fidelity Scoring Matrix
+        Calculates a strategic score out of 100 based on ONWRD's positioning.
+        \"\"\"
+        geo_score = 0
+        capability_score = 0
+        industry_score = 0
+        scale_score = 0
+
+        # --- 1. Geographic Alignment (Max 35 Points) ---
+        if "bahamas" in self.location or "nassau" in self.location:
+            geo_score = 35
+        elif any(country in self.location for country in CARIBBEAN_COUNTRIES):
+            geo_score = 28
+        else:
+            # International passing Stage 1 gets baseline points
+            geo_score = 15
+
+        # --- 2. Core Capabilities Alignment (Max 30 Points) ---
+        matched_caps = [cap for cap in CORE_CAPABILITIES if cap in self.raw_text]
+        cap_ratio = len(matched_caps) / 3 if len(matched_caps) <= 3 else 1.0
+        capability_score = int(cap_ratio * 30)
+
+        # --- 3. Industry Vertical Alignment (Max 20 Points) ---
+        matched_industries = [ind for ind in TARGET_INDUSTRIES if ind in self.raw_text]
+        if matched_industries:
+            industry_score = 20
+        else:
+            industry_score = 5  # Generic baseline if capabilities match but sector varies
+
+        # --- 4. Scale & Feasibility Indicators (Max 15 Points) ---
+        # Look for indicators of robust documentation, structured timelines, or clear milestones
+        scale_indicators = ["timeline", "milestones", "proposal template", "deliverables", "budget"]
+        matched_indicators = sum(1 for ind in scale_indicators if ind in self.raw_text)
+        scale_score = int((matched_indicators / len(scale_indicators)) * 15)
+
+        # Calculate Complete Matrix
+        total_score = geo_score + capability_score + industry_score + scale_score
+        
+        # Actionable Routing Decision
+        # 75+ triggers the expensive proposal generation engine
+        should_generate_proposal = total_score >= 75
+
+        return {
+            "total_score": total_score,
+            "breakdown": {
+                "geographic_alignment": geo_score,
+                "core_capabilities": capability_score,
+                "industry_vertical": industry_score,
+                "scale_feasibility": scale_score
+            },
+            "should_trigger_proposal_generator": should_generate_proposal,
+            "matched_keywords": {
+                "capabilities": matched_caps,
+                "industries": matched_industries
+            }
+        }
+
+# ==========================================
+# Testing & Validation Suite
+# ==========================================
+if __name__ == "__main__":
+    # Mock Test Case 1: High-yield Regional Caribbean Opportunity
+    rfp_caribbean = {
+        "title": "Consultancy for Brand Strategy and Digital Solutions",
+        "location": "Barbados",
+        "description": "The Caribbean Development Bank requires a marketing firm to overhaul its regional digital solutions and annual communications framework. Deliverables include detailed timeline and milestones."
+    }
+
+    # Mock Test Case 2: Irrelevant US Local RFP (Resource Waste Trap)
+    rfp_us_waste = {
+        "title": "Social Media Management for City of Tampa",
+        "location": "Florida, USA",
+        "description": "The City of Tampa requires a localized PR agency. Must be a registered vendor in the state of Florida and attend bi-weekly on-site progress meetings."
+    }
+
+    print("--- RUNNING ONWRD ADVISORS RFP FILTER TESTS ---\n")
+
+    for idx, rfp in enumerate([rfp_caribbean, rfp_us_waste], 1):
+        processor = RFPProcessor(rfp)
+        passed, message = processor.passes_stage1_filter()
+        
+        print(f"Test Case {idx}: {rfp['title']} ({rfp['location']})")
+        print(f"Stage 1 Result: {message}")
+        
+        if passed:
+            metrics = processor.calculate_stage2_score()
+            print(f"Stage 2 Total Score: {metrics['total_score']}/100")
+            print(f"Breakdown: {metrics['breakdown']}")
+            print(f"Trigger Proposal Generation?: {metrics['should_trigger_proposal_generator']}")
+        print("-" * 50)
+3. Recommended Replit Architecture Tweaks
+To deploy this in your Replit web-app environment, structure your environment variables and files as follows:
+main.py: Use this for your FastAPI or Flask wrapper. Route incoming webhook payloads from your scrapers or RSS search feeds directly through RFPProcessor.passes_stage1_filter().
+requirements.txt: No high-overhead NLP packages (spacy, nltk) are necessary for Stage 1. This keeps container start times instant. Use vanilla Python primitives or light JSON payloads.
+Trigger Logic Hook: In your database upsert loop, only invoke the final OpenAI/Anthropic generation API route if should_trigger_proposal_generator evaluates to True. This ensures that you never execute a multi-thousand token draft query for a long-shot international opportunity.
+"""
+with open("onwrd_rfp_scoring_system.md", "w") as f:
+f.write(markdown_content)
+print("File generated successfully: onwrd_rfp_scoring_system.md")
+
+```text?code_stdout&code_event_index=1
+File generated successfully: onwrd_rfp_scoring_system.md
+
+Your Markdown file is ready
+
+onwrd_rfp_scoring_system
+ MD 
+Open
+I have generated a detailed markdown implementation file (onwrd_rfp_scoring_system.md) containing the architectural strategy and a robust, production-ready Python framework designed specifically for your Replit environment.
+What is included in this framework:
+The Multi-Stage Resource Funnel: A conceptual flow showing how to prevent high-overhead NLP parses and vector calls on global trash leads.
+Stage 1 (Low-Cost Filter): Rapid, regex-based screening that automatically allows Bahamian and Caribbean opportunities to pass, while enforcing strict remote-viability, multilateral-organization, and exclusion-term checks on US/Global RFPs.
+Stage 2 (High-Fidelity Scoring Engine): A rigorous points matrix (max 100) scoring Geographics, Capabilities, Target Verticals (like Financial Services and Tourism), and Document Quality/Feasibility.
+Safety Threshold: It sets a hard minimum threshold score (75/100) that must be met before triggering your costly LLM-driven proposal generation routines.
+Testing Suite: Simple mock test cases built into the script so you can verify correct logic instantly inside your Replit console.
