@@ -289,6 +289,7 @@ router.post("/tender-intelligence/notify-billing", async (req, res) => {
     const { error } = await resend.emails.send({
       from: fromAddress,
       to: Array.isArray(to) ? to : [to],
+      cc: ["j.aymes@onwrdadvisors.com"],
       subject: `[ONWRD] Action required: AI features offline — options to restore`,
       html,
     });
