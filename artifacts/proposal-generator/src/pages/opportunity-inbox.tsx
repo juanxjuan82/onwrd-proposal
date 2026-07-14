@@ -1,10 +1,11 @@
 import { useState } from "react";
+import { useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { RefreshCw, ExternalLink, CheckCircle2, X, Flame, Zap, Minus } from "lucide-react";
+import { RefreshCw, ExternalLink, CheckCircle2, X, Flame, Zap, Minus, ArrowRight, Loader2 } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -98,9 +99,11 @@ function GeoBadge({ region }: { region?: string | null }) {
 export default function OpportunityInbox() {
   const { toast } = useToast();
   const qc = useQueryClient();
+  const [, navigate] = useLocation();
   const [statusFilter, setStatusFilter] = useState("new");
   const [geoFilter, setGeoFilter] = useState("all");
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [startingBid, setStartingBid] = useState<number | null>(null);
 
   const { data: rawItems = [], isLoading, isFetching } = useQuery<DiscoveredTender[]>({
     queryKey: ["discovered-tenders", statusFilter],
@@ -131,6 +134,41 @@ export default function OpportunityInbox() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["discovered-tenders"] }),
     onError: () => toast({ title: "Update failed", variant: "destructive" }),
   });
+
+  const startBid = async (item: DiscoveredTender) => {
+    setStartingBid(item.id);
+    try {
+      // Mark as saved in inbox
+      await fetch(`${BASE}/api/discovered-tenders/${item.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "saved" }),
+      });
+      // Create opportunity from tender data
+      const r = await fetch(`${BASE}/api/opportunities`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: item.title,
+          agency: item.organization,
+          description: item.description,
+          category: item.sector ?? "General",
+          deadline: item.deadline ?? undefined,
+          valueAmount: item.valueAmount ?? undefined,
+          sourceUrl: item.url ?? undefined,
+          rawText: item.description,
+        }),
+      });
+      if (!r.ok) throw new Error("Failed to create opportunity");
+      const opp = await r.json() as { id: number };
+      qc.invalidateQueries({ queryKey: ["discovered-tenders"] });
+      navigate(`/opportunities/${opp.id}`);
+    } catch {
+      toast({ title: "Could not start bid", variant: "destructive" });
+    } finally {
+      setStartingBid(null);
+    }
+  };
 
   const triggerCrawl = useMutation({
     mutationFn: async () => {
@@ -335,7 +373,20 @@ export default function OpportunityInbox() {
                     <span>· Discovered {format(new Date(item.createdAt), "MMM d")}</span>
                   </div>
 
-                  <div className="flex gap-2 flex-wrap">
+                  <div className="flex gap-2 flex-wrap items-center">
+                    {/* Primary CTA for actionable opportunities */}
+                    {(item.recommendation === "PURSUE" || item.recommendation === "CONSIDER") && (
+                      <Button
+                        size="sm"
+                        onClick={() => startBid(item)}
+                        disabled={startingBid === item.id}
+                        className="h-7 px-3 text-xs bg-emerald-600 hover:bg-emerald-500 text-white gap-1.5"
+                      >
+                        {startingBid === item.id
+                          ? <><Loader2 className="w-3 h-3 animate-spin" /> Starting…</>
+                          : <><ArrowRight className="w-3 h-3" /> Start Bid</>}
+                      </Button>
+                    )}
                     {item.url && (
                       <a
                         href={item.url}
@@ -347,7 +398,7 @@ export default function OpportunityInbox() {
                         View Original
                       </a>
                     )}
-                    {item.status !== "saved" && (
+                    {item.status !== "saved" && item.recommendation === "SKIP" && (
                       <button
                         onClick={() => updateStatus.mutate({ id: item.id, status: "saved" })}
                         className="inline-flex items-center gap-1.5 text-xs text-emerald-400 hover:underline"
