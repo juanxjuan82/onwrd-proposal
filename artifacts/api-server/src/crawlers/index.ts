@@ -245,8 +245,8 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
   const fitScore = Math.min(100, geoComponent + capComponent + industryComponent + scaleComponent);
   const bahamasAdvantageScore = computeBahamasAdvantage(geographyScore, Math.round((capComponent / 30) * 100));
 
-  // Thresholds: PURSUE ≥62, CONSIDER 40–61, SKIP <40
-  const recommendation = fitScore >= 62 ? "PURSUE" : fitScore >= 40 ? "CONSIDER" : "SKIP";
+  // Thresholds: PURSUE ≥60, CONSIDER 40–59, SKIP <40
+  const recommendation = fitScore >= 60 ? "PURSUE" : fitScore >= 40 ? "CONSIDER" : "SKIP";
 
   const hasGeoSignal = geographyScore >= 75;
   const hasSectorSignal = capComponent >= 10;
@@ -314,7 +314,7 @@ Return ONLY valid JSON:
   "confidence": "HIGH" | "MEDIUM" | "LOW"
 }
 
-PURSUE ≥62, CONSIDER 40-61, SKIP <40.`,
+PURSUE ≥60, CONSIDER 40-59, SKIP <40.`,
         },
         {
           role: "user",

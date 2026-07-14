@@ -402,8 +402,8 @@ export default function SettingsSources() {
             <p className="text-xs text-muted-foreground mb-4">Final fit score determines the recommendation shown in the Inbox.</p>
             <div className="space-y-2">
               {[
-                { label: "🔥 PURSUE",   range: "≥ 62", note: "Strong fit across geography, capabilities, and sector", color: "border-emerald-800 bg-emerald-900/20 text-emerald-400" },
-                { label: "⚡ CONSIDER", range: "40 – 61", note: "Partial fit — worth reviewing before deciding", color: "border-yellow-800 bg-yellow-900/20 text-yellow-400" },
+                { label: "🔥 PURSUE",   range: "≥ 60", note: "Strong fit across geography, capabilities, and sector", color: "border-emerald-800 bg-emerald-900/20 text-emerald-400" },
+                { label: "⚡ CONSIDER", range: "40 – 59", note: "Partial fit — worth reviewing before deciding", color: "border-yellow-800 bg-yellow-900/20 text-yellow-400" },
                 { label: "— SKIP",     range: "< 40",  note: "Poor fit or failed Stage 1 filter", color: "border-gray-700 bg-gray-900/20 text-gray-400" },
               ].map(({ label, range, note, color }) => (
                 <div key={label} className={`flex items-center justify-between px-4 py-3 rounded-md border ${color}`}>
