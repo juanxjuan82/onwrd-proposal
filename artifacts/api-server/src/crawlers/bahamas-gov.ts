@@ -1,62 +1,102 @@
 import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
 
-// procure.bahamas.gov.bs is unreachable from this environment.
-// Targets reachable Bahamas government pages for procurement/RFP announcements.
-const BAHAMAS_URLS = [
-  "https://www.bahamas.gov.bs/wps/portal/public/gov/government/news",
-  "https://www.bahamas.gov.bs/wps/portal/public/gov/government",
-  "https://mof.gov.bs/",
+const TENDER_URLS = [
+  "https://www.bahamas.gov.bs/tender-notices",
+  "https://www.bahamas.gov.bs/tender-and-rfps",
 ];
+
+const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
+// Map category text to a sector label
+function mapCategory(cat: string): string {
+  const c = cat.toLowerCase();
+  if (c.includes("idb") || c.includes("inter-american")) return "IDB / Government";
+  if (c.includes("caribbean development bank") || c.includes("cdb")) return "CDB / Government";
+  if (c.includes("un ") || c.includes("united nations")) return "UN / Government";
+  if (c.includes("tourism")) return "Tourism / Government";
+  if (c.includes("finance") || c.includes("ministry of finance")) return "Finance / Government";
+  if (c.includes("rfp") || c.includes("request for proposal")) return "Government Procurement";
+  if (c.includes("expression of interest") || c.includes("eoi")) return "Government Procurement";
+  if (c.includes("bid")) return "Government Procurement";
+  return "Government";
+}
 
 export class BahamasGovAdapter implements TenderSourceAdapter {
   adapterType = "bahamas_gov";
 
   async fetchOpportunities(): Promise<TenderOpportunity[]> {
     const results: TenderOpportunity[] = [];
+    const seen = new Set<string>();
 
-    for (const url of BAHAMAS_URLS) {
+    for (const pageUrl of TENDER_URLS) {
       try {
-        const r = await safeFetch(url, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)",
-            Accept: "text/html",
-          },
+        const r = await safeFetch(pageUrl, {
+          headers: { "User-Agent": USER_AGENT, Accept: "text/html" },
         });
         if (!r.ok) continue;
         const html = await r.text();
-        if (html.length < 500) continue;
+        if (html.length < 1000) continue;
 
-        const linkPattern =
-          /<a[^>]+href="([^"]*(?:procur|tender|rfp|bid|solicitat|contract|grant)[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
-        let match;
-        const seen = new Set<string>();
+        // Pattern 1: links with title + category span (tender-notices page format)
+        const pattern1 = /<a\s+href="([^"]+)"[^>]*title="([^"]+)"[^>]*>[\s\S]*?<span class="category">([^<]+)<\/span>/g;
+        let m: RegExpExecArray | null;
+        while ((m = pattern1.exec(html)) !== null) {
+          const url = m[1].trim();
+          const title = stripHtml(m[2], 300);
+          const category = m[3].trim();
 
-        while ((match = linkPattern.exec(html)) !== null) {
-          const href = match[1];
-          const rawTitle = stripHtml(match[2], 200);
-          if (!rawTitle || rawTitle.length < 8) continue;
-          if (seen.has(rawTitle)) continue;
-          seen.add(rawTitle);
+          if (!title || title.length < 8) continue;
+          if (url.includes("bahamas.gov.bs") && !url.includes("cdn.") && !url.includes("gov.bs/wps")) {
+            // internal page link — not a document, skip
+          }
+          // Skip contract awards, job ads, and purely technical roles
+          if (/notification of contract award|contract award/i.test(category)) continue;
+          if (/junior|senior network|data engineer|systems administrator|software developer|business analyst|job seeker|network engineer|cirt (systems|deputy|security)|computer incident response/i.test(title)) continue;
 
-          const fullUrl = href.startsWith("http") ? href : `https://www.bahamas.gov.bs${href}`;
+          const key = title.toLowerCase().slice(0, 60);
+          if (seen.has(key)) continue;
+          seen.add(key);
+
+          const externalId = `bah-${Buffer.from((url + title).slice(0, 50)).toString("base64").slice(0, 16)}`;
 
           results.push({
-            externalId: `bah-${Buffer.from((href + rawTitle).slice(0, 40)).toString("base64").slice(0, 16)}`,
-            title: rawTitle,
-            organization: "Government of the Bahamas",
-            url: fullUrl,
-            description: `Bahamas government procurement: ${rawTitle}`,
+            externalId,
+            title,
+            organization: "Government of The Bahamas",
+            url: url.startsWith("http") ? url : `https://www.bahamas.gov.bs${url}`,
+            description: `Bahamas government procurement notice. Category: ${category}. Source: ${pageUrl}`,
             country: "Bahamas",
-            sector: "Government",
+            sector: mapCategory(category),
           });
-
-          if (results.length >= 15) break;
         }
 
-        if (results.length > 0) break;
+        // Pattern 2: plain anchor links to CDN docs with recognisable tender titles
+        const pattern2 = /href="(https:\/\/cdn\.bahamas\.gov\.bs\/[^"]+\.pdf)"[^>]*title="([^"]+)"/g;
+        while ((m = pattern2.exec(html)) !== null) {
+          const url = m[1].trim();
+          const title = stripHtml(m[2], 300);
+          if (!title || title.length < 8) continue;
+          if (/notification of contract award|contract award/i.test(title)) continue;
+
+          const key = title.toLowerCase().slice(0, 60);
+          if (seen.has(key)) continue;
+          seen.add(key);
+
+          results.push({
+            externalId: `bah-${Buffer.from(url.slice(-40)).toString("base64").slice(0, 16)}`,
+            title,
+            organization: "Government of The Bahamas",
+            url,
+            description: `Bahamas government tender document: ${title}`,
+            country: "Bahamas",
+            sector: "Government Procurement",
+          });
+        }
+
+        if (results.length >= 30) break;
       } catch { /* try next URL */ }
     }
 
-    return results;
+    return results.slice(0, 30);
   }
 }
