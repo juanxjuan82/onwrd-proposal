@@ -248,22 +248,35 @@ ${bidScore ? `Bid Score: ${bidScore.fitScore}/100 (${bidScore.fitLevel})\nScorin
 }
 
 async function autoAnalyzeOpportunity(tenderId: number) {
+  const fail = async (step: string, err: unknown) => {
+    console.error(`[auto-pipeline] ${step} failed for tender ${tenderId}:`, err);
+    await db
+      .update(tendersTable)
+      .set({ status: "analysis_failed", updatedAt: new Date() })
+      .where(eq(tendersTable.id, tenderId));
+  };
+
+  await db
+    .update(tendersTable)
+    .set({ status: "analysing", updatedAt: new Date() })
+    .where(eq(tendersTable.id, tenderId));
+
   try {
     await runExtractRequirements(tenderId);
   } catch (err) {
-    console.error(`[auto-pipeline] requirement extraction failed for tender ${tenderId}:`, err);
+    await fail("requirement extraction", err);
     return;
   }
   try {
     await runBidScoring(tenderId);
   } catch (err) {
-    console.error(`[auto-pipeline] bid scoring failed for tender ${tenderId}:`, err);
+    await fail("bid scoring", err);
     return;
   }
   try {
     await runGenerateStrategy(tenderId);
   } catch (err) {
-    console.error(`[auto-pipeline] strategy generation failed for tender ${tenderId}:`, err);
+    await fail("strategy generation", err);
   }
 }
 

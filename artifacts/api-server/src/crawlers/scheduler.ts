@@ -42,11 +42,19 @@ async function sendDigestEmail(newCount: number): Promise<void> {
 
     if (newTenders.length === 0) return;
 
+    const appBase = process.env.APP_URL
+      ?? (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}/proposal-generator` : "");
+    const inboxUrl = `${appBase}/inbox`;
+
     const rows = (list: typeof newTenders) =>
       list
         .map(
           (t) => `<tr>
-              <td style="padding:8px;border-bottom:1px solid #222"><strong>${t.title}</strong></td>
+              <td style="padding:8px;border-bottom:1px solid #222">
+                ${t.sourceUrl
+                  ? `<a href="${t.sourceUrl}" style="color:#fff;text-decoration:none"><strong>${t.title}</strong> <span style="color:#555;font-size:11px">↗</span></a>`
+                  : `<strong>${t.title}</strong>`}
+              </td>
               <td style="padding:8px;border-bottom:1px solid #222">${t.organization}</td>
               <td style="padding:8px;border-bottom:1px solid #222">${t.fitScore ?? "–"}</td>
               <td style="padding:8px;border-bottom:1px solid #222">${t.deadline ? new Date(t.deadline).toLocaleDateString() : "–"}</td>
@@ -84,6 +92,11 @@ async function sendDigestEmail(newCount: number): Promise<void> {
     </tr></thead>
     <tbody>${rows(consider)}</tbody>
   </table>` : ""}
+
+  ${appBase ? `
+  <div style="margin-top:32px;text-align:center">
+    <a href="${inboxUrl}" style="display:inline-block;background:#fff;color:#000;font-weight:600;font-size:14px;padding:12px 28px;border-radius:6px;text-decoration:none">Open Tender Inbox →</a>
+  </div>` : ""}
 
   <p style="margin-top:32px;color:#555;font-size:12px">ONWRD Proposal Desk — automated tender intelligence</p>
 </div>`;

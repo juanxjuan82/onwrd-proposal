@@ -26,7 +26,7 @@ import { format } from "date-fns";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
-const ANALYZING_STATUSES = ["opportunity_found", "requirements_extracted"];
+const ANALYZING_STATUSES = ["opportunity_found", "analysing", "requirements_extracted"];
 
 interface Requirement {
   id: number;
@@ -209,6 +209,7 @@ export default function OpportunityDetail() {
   const { data: opp, isLoading } = useOpportunityDetail(id);
 
   const isAnalyzing = opp ? ANALYZING_STATUSES.includes(opp.status) : false;
+  const analysisFailed = opp?.status === "analysis_failed";
 
   const extractRequirements = useMutation({
     mutationFn: async () => {
@@ -357,6 +358,33 @@ export default function OpportunityDetail() {
             <p className="text-xs text-muted-foreground mt-0.5">
               Extracting requirements, scoring bid fit, and generating a strategy brief. This takes about 30–60 seconds.
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Analysis failed banner */}
+      {analysisFailed && (
+        <div className="flex items-start gap-3 p-4 rounded-lg border border-destructive/40 bg-destructive/5">
+          <AlertCircle className="w-4 h-4 text-destructive mt-0.5 flex-shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-destructive">Auto-analysis failed</p>
+            <p className="text-xs text-muted-foreground mt-0.5 mb-3">
+              The AI couldn't complete the pipeline — likely a temporary quota issue. Run each step manually below.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" onClick={() => extractRequirements.mutate()} disabled={extractRequirements.isPending}>
+                {extractRequirements.isPending ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <RefreshCw className="w-3 h-3 mr-1" />}
+                Extract Requirements
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => scoreBid.mutate()} disabled={scoreBid.isPending}>
+                {scoreBid.isPending ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <Target className="w-3 h-3 mr-1" />}
+                Score Bid
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => generateStrategy.mutate()} disabled={generateStrategy.isPending}>
+                {generateStrategy.isPending ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <Lightbulb className="w-3 h-3 mr-1" />}
+                Strategy Brief
+              </Button>
+            </div>
           </div>
         </div>
       )}
