@@ -117,6 +117,11 @@ async function runBidScoring(tenderId: number) {
 
 ONWRD's strengths: marketing strategy, brand identity, digital marketing, content development, website design, campaign management, social media, communications strategy. ONWRD works across the Caribbean region, particularly the Bahamas. ONWRD is a mid-size boutique agency — not suitable for very large infrastructure or construction tenders.
 
+CRITICAL FILTER — INDIVIDUAL ROLES:
+If the posting is recruiting an individual person for employment (e.g. "Marketing Manager wanted", "we are hiring a Communications Officer", job ads, staff vacancies), it is NOT an opportunity for an agency. Score it fitScore: 0, fitLevel: "no_bid", and include the flag "Individual employment role — not an RFP for agency services". Do not evaluate it further.
+
+Only score opportunities where an organisation is procuring services from a company/agency (RFPs, tenders, requests for proposals, consultancy contracts, service contracts, etc.).
+
 Evaluate the tender and return JSON with:
 - fitScore: integer 0-100 (how well ONWRD fits this opportunity)
 - fitLevel: "strong" (75-100), "moderate" (50-74), "weak" (25-49), or "no_bid" (0-24)
@@ -267,12 +272,17 @@ async function autoAnalyzeOpportunity(tenderId: number) {
     await fail("requirement extraction", err);
     return;
   }
+  let bidScore;
   try {
-    await runBidScoring(tenderId);
+    bidScore = await runBidScoring(tenderId);
   } catch (err) {
     await fail("bid scoring", err);
     return;
   }
+
+  // Skip strategy generation for no_bid (includes individual employment roles)
+  if (bidScore.fitLevel === "no_bid") return;
+
   try {
     await runGenerateStrategy(tenderId);
   } catch (err) {
