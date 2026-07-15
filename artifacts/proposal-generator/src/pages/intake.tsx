@@ -189,10 +189,14 @@ export default function Intake() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ briefText: brief(v), clientName: v.orgName, industry: wo(v.industry, v.industryOther) }),
       });
-      if (!r.ok) throw new Error();
+      if (!r.ok) {
+        let msg = "Couldn't submit. Please check your connection and try again.";
+        try { const j = await r.json(); if (j?.error) msg = j.error; } catch { /* ignore */ }
+        throw new Error(msg);
+      }
       setDone(true);
-    } catch {
-      setErr("Couldn't submit. Please check your connection and try again.");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Couldn't submit. Please check your connection and try again.");
     } finally {
       setBusy(false);
     }

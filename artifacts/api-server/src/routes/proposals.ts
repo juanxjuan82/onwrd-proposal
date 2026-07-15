@@ -690,17 +690,29 @@ ${PROPOSAL_TEMPLATE}
 
 Return ONLY the completed proposal text — no JSON wrapper, no commentary.`;
 
-    const completion = await openai.chat.completions.create({
-      model: AI_MODEL,
-      messages: [
-        { role: "system", content: intakeSystemPrompt },
-        {
-          role: "user",
-          content: `Here is the project brief:\n\n${briefText}`,
-        },
-      ],
-      max_tokens: 16000,
-    });
+    let completion: Awaited<ReturnType<typeof openai.chat.completions.create>> | undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        completion = await openai.chat.completions.create({
+          model: AI_MODEL,
+          messages: [
+            { role: "system", content: intakeSystemPrompt },
+            { role: "user", content: `Here is the project brief:\n\n${briefText}` },
+          ],
+          max_tokens: 16000,
+        });
+        break;
+      } catch (err) {
+        const isRateLimit = (err as { status?: number })?.status === 429;
+        if (isRateLimit && attempt < 2) {
+          const delay = (attempt + 1) * 3000;
+          console.warn(`[intake] AI rate limit hit, retrying in ${delay}ms (attempt ${attempt + 1})`);
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+        throw err;
+      }
+    }
 
     const content = completion.choices[0]?.message?.content ?? "";
 
@@ -743,7 +755,12 @@ Return ONLY the completed proposal text — no JSON wrapper, no commentary.`;
     })();
   } catch (err) {
     req.log.error({ err }, "Error processing intake submission");
-    res.status(500).json({ error: "Failed to process submission" });
+    const status = (err as { status?: number })?.status;
+    if (status === 429) {
+      res.status(503).json({ error: "Our proposal engine is briefly overloaded — please wait 30 seconds and try again." });
+    } else {
+      res.status(500).json({ error: "Failed to process submission. Please try again." });
+    }
   }
 });
 
