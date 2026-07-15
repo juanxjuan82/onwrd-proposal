@@ -3,7 +3,7 @@ import { db } from "@workspace/db";
 import { proposalsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
 import {
   ParseBriefBody,
@@ -23,34 +23,45 @@ async function sendIntakeNotification(
   industry: string,
   proposalId: number,
 ) {
-  const extraRecipients = ["s.esmeralda@onwrdadvisors.com"];
-  const envEmail = process.env.NOTIFICATION_EMAIL;
-  const to = [...(envEmail ? [envEmail] : []), ...extraRecipients].join(", ");
-  if (!to) return;
-
-  const host = process.env.SMTP_HOST ?? "smtp.gmail.com";
-  const port = Number(process.env.SMTP_PORT ?? 587);
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
-
-  if (!user || !pass) {
-    console.warn("[intake] NOTIFICATION_EMAIL set but SMTP_USER/SMTP_PASS missing — skipping email");
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) {
+    console.warn("[intake] RESEND_API_KEY not set — skipping notification email");
     return;
   }
 
-  const transporter = nodemailer.createTransport({ host, port, auth: { user, pass } });
+  const from = process.env.RESEND_FROM ?? "ONWRD Proposal Desk <desk@onwrdadvisors.com>";
+  const to = ["j.aymes@onwrdadvisors.com", "s.esmeralda@onwrdadvisors.com"];
 
-  const domain = process.env.REPLIT_DOMAINS?.split(",")[0] ?? process.env.REPLIT_DEV_DOMAIN;
-  const proposalUrl = domain
-    ? `https://${domain}/proposals/${proposalId}`
-    : `/proposals/${proposalId}`;
+  const appBase = process.env.APP_URL
+    ?? (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}/proposal-generator` : "");
+  const proposalUrl = appBase ? `${appBase}/proposals/${proposalId}` : `/proposals/${proposalId}`;
 
-  await transporter.sendMail({
-    from: user,
+  const resend = new Resend(apiKey);
+  const { error } = await resend.emails.send({
+    from,
     to,
     subject: `New brief submitted — ${clientName}`,
-    text: `A new project brief has been submitted.\n\nClient: ${clientName}\nIndustry: ${industry}\n\nA draft proposal has been generated and is ready for your review:\n${proposalUrl}\n\n— ONWRD Proposal Tool`,
+    html: `
+<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a0a;color:#fff;padding:32px;border-radius:8px">
+  <img src="https://onwrdadvisors.com/wp-content/uploads/2024/01/onwrd-logo-white.png" style="height:32px;margin-bottom:24px" alt="ONWRD"/>
+  <h2 style="color:#fff;margin:0 0 4px">New client brief received</h2>
+  <p style="color:#888;margin:0 0 24px">${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}</p>
+  <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px">
+    <tr><td style="color:#555;padding:6px 0;width:120px">Client</td><td style="color:#fff;font-weight:600">${clientName}</td></tr>
+    <tr><td style="color:#555;padding:6px 0">Industry</td><td style="color:#fff">${industry}</td></tr>
+    <tr><td style="color:#555;padding:6px 0">Proposal ID</td><td style="color:#fff">#${proposalId}</td></tr>
+  </table>
+  <p style="color:#888;font-size:14px;margin-bottom:20px">A draft proposal has been generated and is ready for your review.</p>
+  ${appBase ? `<a href="${proposalUrl}" style="display:inline-block;background:#fff;color:#000;font-weight:600;font-size:14px;padding:12px 28px;border-radius:6px;text-decoration:none">View Draft Proposal →</a>` : ""}
+  <p style="margin-top:32px;color:#333;font-size:12px">ONWRD Proposal Desk — automated proposal generation</p>
+</div>`,
   });
+
+  if (error) {
+    console.error("[intake] Resend error:", error);
+  } else {
+    console.log(`[intake] Notification sent to ${to.join(", ")}`);
+  }
 }
 
 const PROPOSAL_TEMPLATE = `ONWRD PROJECT PROPOSAL
