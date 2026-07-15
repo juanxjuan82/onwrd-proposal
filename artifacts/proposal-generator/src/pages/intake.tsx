@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { CheckCircle, ArrowLeft, ArrowRight, Mail, Phone } from "lucide-react";
 
+const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+
 // ─── Schema ───────────────────────────────────────────────────────────────
 const intakeSchema = z
   .object({
@@ -182,7 +184,7 @@ export default function Intake() {
   const submit = async (v: V) => {
     setBusy(true); setErr(null);
     try {
-      const r = await fetch("/api/intake", {
+      const r = await fetch(`${BASE}/api/intake`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ briefText: brief(v), clientName: v.orgName, industry: wo(v.industry, v.industryOther) }),
