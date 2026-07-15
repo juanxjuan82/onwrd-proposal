@@ -4,7 +4,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { CheckCircle, ArrowLeft, ArrowRight } from "lucide-react";
+import { CheckCircle, ArrowLeft, ArrowRight, Mail, Phone } from "lucide-react";
 
 // ─── Schema ───────────────────────────────────────────────────────────────
 const intakeSchema = z
@@ -223,13 +223,13 @@ export default function Intake() {
     <div className="h-screen bg-black text-white flex flex-col overflow-hidden">
       {/* Header */}
       <header className="shrink-0 border-b border-[#1a1a1a] px-6 py-3">
-        <div className="max-w-lg mx-auto">
+        <div className="max-w-2xl mx-auto">
           <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-[22px] object-contain object-left" />
         </div>
       </header>
 
       {/* Body */}
-      <main className="flex-1 overflow-hidden flex flex-col max-w-lg mx-auto w-full px-6 py-5">
+      <main className="flex-1 overflow-hidden flex flex-col max-w-2xl mx-auto w-full px-6 py-5">
         <Bar step={step} total={STEPS.length} />
 
         {/* Step title */}
@@ -270,7 +270,25 @@ export default function Intake() {
                   </Field>
                   <Field label="Preferred contact" opt>
                     <Controller control={form.control} name="preferredContact" render={({ field }) => (
-                      <Radio opts={CONTACT} val={field.value ?? ""} set={field.onChange} />
+                      <div className="flex gap-2">
+                        {[
+                          { val: "Email", icon: <Mail className="w-4 h-4" />, label: "Email" },
+                          { val: "Phone", icon: <Phone className="w-4 h-4" />, label: "Phone" },
+                        ].map(({ val, icon, label }) => (
+                          <button
+                            key={val}
+                            type="button"
+                            onClick={() => field.onChange(field.value === val ? "" : val)}
+                            className={`flex items-center gap-2 rounded border px-4 py-2 text-[13px] transition-colors flex-1 justify-center
+                              ${field.value === val
+                                ? "border-[#0000FF] bg-[#0000FF]/10 text-white font-medium"
+                                : "border-[#262626] bg-[#0d0d0d] text-[#777] hover:border-[#0000FF]/50 hover:text-[#ccc]"}`}
+                          >
+                            {icon}
+                            <span>{label}</span>
+                          </button>
+                        ))}
+                      </div>
                     )} />
                   </Field>
                 </div>
