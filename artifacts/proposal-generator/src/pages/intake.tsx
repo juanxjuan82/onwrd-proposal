@@ -223,13 +223,13 @@ export default function Intake() {
     <div className="h-screen bg-black text-white flex flex-col overflow-hidden">
       {/* Header */}
       <header className="shrink-0 border-b border-[#1a1a1a] px-6 py-3">
-        <div className="max-w-2xl mx-auto">
+        <div className="max-w-3xl mx-auto">
           <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-[22px] object-contain object-left" />
         </div>
       </header>
 
       {/* Body */}
-      <main className="flex-1 overflow-hidden flex flex-col max-w-2xl mx-auto w-full px-6 py-5">
+      <main className="flex-1 overflow-hidden flex flex-col max-w-3xl mx-auto w-full px-6 py-5">
         <Bar step={step} total={STEPS.length} />
 
         {/* Step title */}

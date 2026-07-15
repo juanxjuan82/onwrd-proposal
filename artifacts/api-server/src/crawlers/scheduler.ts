@@ -98,6 +98,12 @@ async function sendDigestEmail(newCount: number): Promise<void> {
     <a href="${inboxUrl}" style="display:inline-block;background:#fff;color:#000;font-weight:600;font-size:14px;padding:12px 28px;border-radius:6px;text-decoration:none">Open Tender Inbox →</a>
   </div>` : ""}
 
+  <div style="margin-top:16px;padding:20px;background:#111;border-radius:8px;border:1px solid #222">
+    <p style="color:#888;font-size:13px;margin:0 0 12px">Share with a prospective client</p>
+    <a href="https://proposals.onwrdadvisors.com/intake" style="display:inline-block;background:#0000FF;color:#fff;font-weight:600;font-size:14px;padding:12px 28px;border-radius:6px;text-decoration:none">Start a Client Proposal →</a>
+    <p style="color:#555;font-size:11px;margin:10px 0 0">proposals.onwrdadvisors.com/intake</p>
+  </div>
+
   <p style="margin-top:32px;color:#555;font-size:12px">ONWRD Proposal Desk — automated tender intelligence</p>
 </div>`;
 
