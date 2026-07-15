@@ -22,6 +22,7 @@ async function sendIntakeNotification(
   clientName: string,
   industry: string,
   proposalId: number,
+  googleDocUrl: string | null,
 ) {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
@@ -34,7 +35,10 @@ async function sendIntakeNotification(
 
   const appBase = process.env.APP_URL
     ?? (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}/proposal-generator` : "");
-  const proposalUrl = appBase ? `${appBase}/proposals/${proposalId}` : `/proposals/${proposalId}`;
+  const appUrl = appBase ? `${appBase}/proposals/${proposalId}` : null;
+
+  const ctaUrl = googleDocUrl ?? appUrl;
+  const ctaLabel = googleDocUrl ? "Open in Google Docs →" : "View Draft Proposal →";
 
   const resend = new Resend(apiKey);
   const { error } = await resend.emails.send({
@@ -50,9 +54,11 @@ async function sendIntakeNotification(
     <tr><td style="color:#555;padding:6px 0;width:120px">Client</td><td style="color:#fff;font-weight:600">${clientName}</td></tr>
     <tr><td style="color:#555;padding:6px 0">Industry</td><td style="color:#fff">${industry}</td></tr>
     <tr><td style="color:#555;padding:6px 0">Proposal ID</td><td style="color:#fff">#${proposalId}</td></tr>
+    ${googleDocUrl ? `<tr><td style="color:#555;padding:6px 0">Google Doc</td><td><a href="${googleDocUrl}" style="color:#4ade80;font-size:12px;word-break:break-all">${googleDocUrl}</a></td></tr>` : ""}
   </table>
   <p style="color:#888;font-size:14px;margin-bottom:20px">A draft proposal has been generated and is ready for your review.</p>
-  ${appBase ? `<a href="${proposalUrl}" style="display:inline-block;background:#fff;color:#000;font-weight:600;font-size:14px;padding:12px 28px;border-radius:6px;text-decoration:none">View Draft Proposal →</a>` : ""}
+  ${ctaUrl ? `<a href="${ctaUrl}" style="display:inline-block;background:#fff;color:#000;font-weight:600;font-size:14px;padding:12px 28px;border-radius:6px;text-decoration:none">${ctaLabel}</a>` : ""}
+  ${googleDocUrl && appUrl ? `<p style="margin-top:12px;font-size:12px;color:#555">Also available in the app: <a href="${appUrl}" style="color:#555">${appUrl}</a></p>` : ""}
   <p style="margin-top:32px;color:#333;font-size:12px">ONWRD Proposal Desk — automated proposal generation</p>
 </div>`,
   });
@@ -60,7 +66,7 @@ async function sendIntakeNotification(
   if (error) {
     console.error("[intake] Resend error:", error);
   } else {
-    console.log(`[intake] Notification sent to ${to.join(", ")}`);
+    console.log(`[intake] Notification sent to ${to.join(", ")}${googleDocUrl ? " with Google Doc link" : ""}`);
   }
 }
 
@@ -709,12 +715,32 @@ Return ONLY the completed proposal text — no JSON wrapper, no commentary.`;
       })
       .returning();
 
-    // Fire-and-forget email notification (never fails the request)
-    sendIntakeNotification(clientName, industry, saved.id).catch((err) =>
-      console.error("[intake] Email notification failed:", err),
-    );
-
+    // Respond immediately — client doesn't need to wait for export or email
     res.json({ success: true });
+
+    // Fire-and-forget: export to Google Docs, then notify with the doc link
+    (async () => {
+      let googleDocUrl: string | null = null;
+      try {
+        const { createGoogleDoc, appendContentWithLogo, shareWithAnyone } = await import("../lib/google-docs.js");
+        const title = `ONWRD Proposal — ${clientName}`;
+        const doc = await createGoogleDoc(title);
+        const docId = doc.documentId;
+        googleDocUrl = `https://docs.google.com/document/d/${docId}/edit`;
+        await appendContentWithLogo(docId, content);
+        await shareWithAnyone(docId);
+        await db
+          .update(proposalsTable)
+          .set({ googleDocUrl, status: "exported", updatedAt: new Date() })
+          .where(eq(proposalsTable.id, saved.id));
+        console.log(`[intake] Google Doc created: ${googleDocUrl}`);
+      } catch (err) {
+        console.error("[intake] Google Docs export failed — will notify with app link:", err);
+      }
+      sendIntakeNotification(clientName, industry, saved.id, googleDocUrl).catch((err) =>
+        console.error("[intake] Email notification failed:", err),
+      );
+    })();
   } catch (err) {
     req.log.error({ err }, "Error processing intake submission");
     res.status(500).json({ error: "Failed to process submission" });
