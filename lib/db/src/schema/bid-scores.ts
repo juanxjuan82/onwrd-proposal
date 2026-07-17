@@ -11,6 +11,8 @@ export const bidScoresTable = pgTable("bid_scores", {
   fitLevel: text("fit_level").notNull().default("weak"),
   reasoning: text("reasoning").notNull().default(""),
   flags: text("flags").notNull().default("[]"),
+  completenessScore: integer("completeness_score").notNull().default(0),
+  missingFields: text("missing_fields").notNull().default("[]"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 });
 

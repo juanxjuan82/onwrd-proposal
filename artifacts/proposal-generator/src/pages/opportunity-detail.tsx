@@ -43,6 +43,8 @@ interface BidScore {
   fitLevel: string;
   reasoning: string;
   flags: string;
+  completenessScore: number;
+  missingFields: string;
 }
 
 interface ProposalStrategy {
@@ -311,6 +313,7 @@ export default function OpportunityDetail() {
   }
 
   const flags: string[] = opp.bidScore ? JSON.parse(opp.bidScore.flags || "[]") : [];
+  const missingFields: string[] = opp.bidScore ? JSON.parse(opp.bidScore.missingFields || "[]") : [];
 
   return (
     <div className="p-8 max-w-5xl mx-auto space-y-8">
@@ -437,16 +440,43 @@ export default function OpportunityDetail() {
         </div>
 
         {opp.bidScore ? (
-          <div className={`p-5 rounded-lg border ${fitBg(opp.bidScore.fitLevel)}`}>
+          <div className={`p-5 rounded-lg border ${fitBg(opp.bidScore.fitLevel)} space-y-4`}>
+            {/* Score row */}
             <div className="flex items-start gap-4">
-              <div className="text-center">
+              {/* Fit score */}
+              <div className="text-center min-w-[64px]">
                 <div className={`text-4xl font-bold ${fitColor(opp.bidScore.fitLevel)}`}>
                   {opp.bidScore.fitScore}
                 </div>
                 <div className={`text-xs font-medium mt-1 ${fitColor(opp.bidScore.fitLevel)}`}>
                   {opp.bidScore.fitLevel === "no_bid" ? "No Bid" : opp.bidScore.fitLevel === "strong" ? "Strong Fit" : opp.bidScore.fitLevel === "moderate" ? "Moderate" : "Weak Fit"}
                 </div>
+                <div className="text-[10px] text-muted-foreground mt-0.5 uppercase tracking-wide">Fit</div>
               </div>
+
+              {/* Divider */}
+              <div className="self-stretch w-px bg-current/20" />
+
+              {/* Completeness score */}
+              <div className="text-center min-w-[64px]">
+                <div className={`text-4xl font-bold ${
+                  opp.bidScore.completenessScore >= 70 ? "text-emerald-400"
+                  : opp.bidScore.completenessScore >= 40 ? "text-amber-400"
+                  : "text-red-400"
+                }`}>
+                  {opp.bidScore.completenessScore}
+                </div>
+                <div className={`text-xs font-medium mt-1 ${
+                  opp.bidScore.completenessScore >= 70 ? "text-emerald-400"
+                  : opp.bidScore.completenessScore >= 40 ? "text-amber-400"
+                  : "text-red-400"
+                }`}>
+                  {opp.bidScore.completenessScore >= 70 ? "Complete" : opp.bidScore.completenessScore >= 40 ? "Partial" : "Thin"}
+                </div>
+                <div className="text-[10px] text-muted-foreground mt-0.5 uppercase tracking-wide">Brief</div>
+              </div>
+
+              {/* Reasoning + flags */}
               <div className="flex-1 space-y-3">
                 <p className="text-sm text-foreground leading-relaxed">{opp.bidScore.reasoning}</p>
                 {flags.length > 0 && (
@@ -461,7 +491,22 @@ export default function OpportunityDetail() {
                 )}
               </div>
             </div>
-            <div className="mt-3 pt-3 border-t border-current/20 flex justify-end">
+
+            {/* Missing fields */}
+            {missingFields.length > 0 && (
+              <div className="pt-3 border-t border-current/20">
+                <p className="text-xs text-muted-foreground font-medium mb-2 uppercase tracking-wide">Gaps in this brief</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {missingFields.map((f, i) => (
+                    <span key={i} className="rounded-full bg-amber-900/40 text-amber-300 border border-amber-700/40 px-2.5 py-0.5 text-xs">
+                      {f}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="pt-3 border-t border-current/20 flex justify-end">
               <Button size="sm" variant="ghost" onClick={() => scoreBid.mutate()} disabled={scoreBid.isPending} className="text-xs">
                 Re-score
               </Button>

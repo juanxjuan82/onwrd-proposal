@@ -130,6 +130,8 @@ Evaluate the tender and return JSON with:
 - fitLevel: "strong" (75-100), "moderate" (50-74), "weak" (25-49), or "no_bid" (0-24)
 - reasoning: 2-3 sentence explanation of the score
 - flags: array of strings, each a specific concern or positive factor (e.g. "Requires ISO certification ONWRD doesn't hold", "Directly in ONWRD's core discipline", "Deadline is only 7 days away")
+- completenessScore: integer 0-100 measuring how much useful information is present to write a strong proposal (100 = clear objectives, full scope, explicit requirements, budget and timeline stated; 0 = vague or near-empty posting)
+- missingFields: array of short strings naming critical gaps that would strengthen a proposal response (e.g. "Budget not specified", "Timeline vague", "Evaluation criteria unclear", "Contact details absent"). Empty array if the tender is complete.
 
 ${ONWRD_CASE_STUDIES}`,
       },
@@ -163,6 +165,8 @@ ${requirementsSummary}`,
       fitLevel: data.fitLevel ?? "weak",
       reasoning: data.reasoning ?? "",
       flags: JSON.stringify(data.flags ?? []),
+      completenessScore: typeof data.completenessScore === "number" ? Math.min(100, Math.max(0, Math.round(data.completenessScore))) : 0,
+      missingFields: JSON.stringify(Array.isArray(data.missingFields) ? data.missingFields : []),
     })
     .returning();
 
