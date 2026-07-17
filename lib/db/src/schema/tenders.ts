@@ -21,6 +21,8 @@ export const tendersTable = pgTable("tenders", {
   proposalId: integer("proposal_id").references(() => proposalsTable.id, {
     onDelete: "set null",
   }),
+  googleDocId: text("google_doc_id"),
+  googleDocUrl: text("google_doc_url"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });

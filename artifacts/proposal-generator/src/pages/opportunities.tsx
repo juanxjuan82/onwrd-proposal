@@ -15,7 +15,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Plus, Target, CheckCircle2, XCircle, Clock, AlertCircle,
   Globe, Upload, AlertTriangle, RefreshCw, ExternalLink, Loader2,
-  ChevronRight, Pencil,
+  ChevronRight, Pencil, Zap, FileText,
 } from "lucide-react";
 import { format } from "date-fns";
 
@@ -45,6 +45,8 @@ interface Opportunity {
   contactInfo?: string | null;
   description: string;
   rawText?: string | null;
+  googleDocId?: string | null;
+  googleDocUrl?: string | null;
   createdAt: string;
   updatedAt: string;
   bidScore: BidScore | null;
@@ -73,6 +75,7 @@ function fitBg(level: string) {
 
 function statusIcon(status: string) {
   if (status === "no_bid") return <XCircle className="w-3.5 h-3.5 text-red-400" />;
+  if (status === "bid_started") return <Zap className="w-3.5 h-3.5 text-emerald-400" />;
   if (status === "exported_to_drive" || status === "approved_for_export")
     return <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />;
   if (status === "proposal_drafting" || status === "needs_onwrd_input")
@@ -90,6 +93,7 @@ function statusLabel(status: string) {
     screened: "Screened",
     analysis_failed: "Analysis Failed",
     no_bid: "No Bid",
+    bid_started: "Bid Started",
     proposal_drafting: "Drafting",
     needs_onwrd_input: "Needs Input",
     ready_for_review: "Ready for Review",
@@ -192,6 +196,25 @@ function useCreateOpportunity() {
   });
 }
 
+function useGenerateBid() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (opportunityId: number): Promise<{ docId: string; docUrl: string; title: string }> => {
+      const r = await fetch(`${BASE}/api/proposals/generate-bid`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ opportunityId }),
+      });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        throw new Error((e as { error?: string }).error ?? "Bid generation failed");
+      }
+      return r.json();
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["opportunities"] }),
+  });
+}
+
 // ── Score display ────────────────────────────────────────────────────────────
 function ScoreColumn({ opp }: { opp: Opportunity }) {
   const bs = opp.bidScore;
@@ -258,6 +281,23 @@ function EnrichDrawer({
   const { toast } = useToast();
   const update = useUpdateOpportunity(opp.id);
   const rescore = useRescoreOpportunity(opp.id);
+  const generateBid = useGenerateBid();
+  const [bidDocUrl, setBidDocUrl] = useState<string | null>(opp.googleDocUrl ?? null);
+
+  const handleStartBid = async () => {
+    try {
+      toast({ title: "Generating bid proposal…", description: "This takes about 20–30 seconds. Hang tight." });
+      const result = await generateBid.mutateAsync(opp.id);
+      setBidDocUrl(result.docUrl);
+      toast({
+        title: "Bid proposal ready!",
+        description: "Your Google Doc has been created and shared.",
+      });
+      window.open(result.docUrl, "_blank", "noopener,noreferrer");
+    } catch (err) {
+      toast({ title: "Bid generation failed", description: (err as Error).message, variant: "destructive" });
+    }
+  };
 
   const [form, setForm] = useState({
     title: opp.title,
@@ -434,23 +474,53 @@ function EnrichDrawer({
         </div>
 
         {/* Footer actions */}
-        <div className="px-6 py-4 border-t bg-card shrink-0 flex items-center justify-between gap-3">
-          <Button
-            variant="outline"
-            size="sm"
-            className="gap-1.5 text-xs"
-            onClick={handleRescore}
-            disabled={rescore.isPending || update.isPending}
-          >
-            {rescore.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-            Re-score
-          </Button>
+        <div className="px-6 py-4 border-t bg-card shrink-0 space-y-3">
+          {/* Start Bid button + doc link */}
           <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" className="text-xs" onClick={onClose}>Cancel</Button>
-            <Button size="sm" className="text-xs gap-1.5" onClick={handleSave} disabled={update.isPending || rescore.isPending}>
-              {update.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}
-              Save Changes
+            {bidDocUrl ? (
+              <a
+                href={bidDocUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex-1 inline-flex items-center justify-center gap-2 rounded-md border border-emerald-700/50 bg-emerald-950/30 text-emerald-400 text-xs px-3 py-2 hover:bg-emerald-900/40 transition-colors"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                Open Bid Doc in Google Docs
+                <ExternalLink className="w-3 h-3 opacity-60" />
+              </a>
+            ) : (
+              <Button
+                className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white gap-2 text-sm"
+                onClick={handleStartBid}
+                disabled={generateBid.isPending}
+              >
+                {generateBid.isPending
+                  ? <><Loader2 className="w-4 h-4 animate-spin" /> Generating Bid…</>
+                  : <><Zap className="w-4 h-4" /> Start Bid</>
+                }
+              </Button>
+            )}
+          </div>
+
+          {/* Secondary actions */}
+          <div className="flex items-center justify-between gap-3">
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5 text-xs"
+              onClick={handleRescore}
+              disabled={rescore.isPending || update.isPending || generateBid.isPending}
+            >
+              {rescore.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+              Re-score
             </Button>
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" size="sm" className="text-xs" onClick={onClose}>Cancel</Button>
+              <Button size="sm" className="text-xs gap-1.5" onClick={handleSave} disabled={update.isPending || rescore.isPending || generateBid.isPending}>
+                {update.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}
+                Save Changes
+              </Button>
+            </div>
           </div>
         </div>
       </SheetContent>
@@ -469,6 +539,7 @@ function OpportunityCard({ opp, onReview }: { opp: Opportunity; onReview: () => 
               <SourceBadge opp={opp} />
               <span className={`inline-flex items-center gap-1 text-xs ${
                 opp.status === "no_bid" ? "text-red-400"
+                  : opp.status === "bid_started" ? "text-emerald-400"
                   : opp.status === "screened" || opp.status === "ready_for_review" ? "text-emerald-400"
                   : opp.status === "analysing" ? "text-blue-400"
                   : "text-muted-foreground"
@@ -478,6 +549,18 @@ function OpportunityCard({ opp, onReview }: { opp: Opportunity; onReview: () => 
               </span>
               {opp.status === "analysing" && (
                 <Loader2 className="w-3 h-3 text-blue-400 animate-spin" />
+              )}
+              {opp.googleDocUrl && (
+                <a
+                  href={opp.googleDocUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="inline-flex items-center gap-1 text-[10px] text-emerald-400 border border-emerald-800/50 bg-emerald-950/30 rounded-full px-2 py-0.5 hover:bg-emerald-900/40 transition-colors"
+                >
+                  <FileText className="w-2.5 h-2.5" />
+                  View Bid Doc
+                </a>
               )}
             </div>
             <h2 className="text-sm font-medium text-foreground group-hover:text-primary transition-colors leading-snug mb-1">

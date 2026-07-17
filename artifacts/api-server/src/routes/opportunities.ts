@@ -839,4 +839,183 @@ router.post("/tenders/manual", (req, res, next) => {
   }
 });
 
+// ── Generate Bid Proposal ─────────────────────────────────────────────────────
+router.post("/proposals/generate-bid", async (req, res) => {
+  const { opportunityId } = req.body as { opportunityId: number };
+
+  if (!opportunityId || typeof opportunityId !== "number") {
+    res.status(400).json({ error: "opportunityId is required and must be a number" });
+    return;
+  }
+
+  try {
+    // 1. Fetch tender
+    const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, opportunityId));
+    if (!tender) {
+      res.status(404).json({ error: "Opportunity not found" });
+      return;
+    }
+
+    // 2. Fetch latest bid score
+    const [bidScore] = await db
+      .select()
+      .from(bidScoresTable)
+      .where(eq(bidScoresTable.tenderId, opportunityId))
+      .orderBy(desc(bidScoresTable.createdAt))
+      .limit(1);
+
+    // 3. Fetch extracted requirements
+    const requirements = await db
+      .select()
+      .from(tenderRequirementsTable)
+      .where(eq(tenderRequirementsTable.tenderId, opportunityId));
+
+    // 4. Fetch strategy
+    const [strategy] = await db
+      .select()
+      .from(proposalStrategiesTable)
+      .where(eq(proposalStrategiesTable.tenderId, opportunityId))
+      .orderBy(desc(proposalStrategiesTable.createdAt))
+      .limit(1);
+
+    // 5. Compile the master brief
+    const parts: string[] = [];
+    parts.push(`TENDER TITLE: ${tender.title}`);
+    parts.push(`ISSUING AUTHORITY: ${tender.agency}`);
+    parts.push(`CATEGORY: ${tender.category}`);
+    if (tender.valueAmount) parts.push(`ESTIMATED CONTRACT VALUE: ${tender.valueAmount}`);
+    if (tender.deadline) {
+      const d = new Date(tender.deadline);
+      parts.push(`SUBMISSION DEADLINE: ${d.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })}`);
+    }
+    if (tender.contactInfo) parts.push(`CONTACT: ${tender.contactInfo}`);
+    if (tender.sourceUrl) parts.push(`SOURCE URL: ${tender.sourceUrl}`);
+    parts.push(`\nDESCRIPTION:\n${tender.description}`);
+    if (tender.rawText && tender.rawText.length > 50) {
+      parts.push(`\nFULL RFP / TENDER DOCUMENT:\n${tender.rawText.slice(0, 10000)}`);
+    }
+    if (requirements.length > 0) {
+      parts.push(
+        `\nEXTRACTED REQUIREMENTS:\n${requirements
+          .map((r, i) => `${i + 1}. [${r.category ?? "General"}] ${r.description}`)
+          .join("\n")}`,
+      );
+    }
+    if (bidScore) {
+      parts.push(
+        `\nBID INTELLIGENCE:\nFit Score: ${bidScore.fitScore}/100 (${bidScore.fitLevel})\nBrief Completeness: ${bidScore.completenessScore}/100\nAnalysis: ${bidScore.reasoning}`,
+      );
+    }
+    if (strategy) {
+      const themes = (() => {
+        try { return (JSON.parse(strategy.winThemes) as string[]).join(", "); } catch { return strategy.winThemes; }
+      })();
+      parts.push(
+        `\nWIN STRATEGY:\nPositioning: ${strategy.positioning}\nWin Themes: ${themes}`,
+      );
+    }
+
+    const briefContext = parts.join("\n");
+
+    const systemPrompt = `You are the Senior Proposal Writer at ONWRD Advisors — a Caribbean-based strategy and communications consultancy with a track record of winning public-sector and development-finance tenders. Your proposals are known for being incisive, client-centred, and strategically grounded.
+
+Your task is to write a complete, ready-to-submit proposal document for the tender described below. The output must be polished, persuasive, and use ONWRD's authoritative voice — confident without being arrogant, expert without being impenetrable.
+
+DOCUMENT STRUCTURE (follow this exactly, using # Markdown headings):
+
+# ONWRD PROJECT PROPOSAL
+
+## EXECUTIVE SUMMARY
+Two to three paragraphs. Open with a direct statement of ONWRD's understanding of the client's core challenge. Then articulate why ONWRD is uniquely placed to solve it. Close with a one-sentence commitment statement.
+
+## UNDERSTANDING THE REQUIREMENT
+Demonstrate deep reading of the RFP. Restate the problem in sharper terms than the client used. Name the key outcomes the issuing authority is trying to achieve.
+
+## OUR PROPOSED APPROACH
+### Phase 1 — Discovery & Stakeholder Alignment
+### Phase 2 — Strategy & Framework Development
+### Phase 3 — Implementation & Delivery
+### Phase 4 — Review & Knowledge Transfer
+For each phase: key activities, deliverables, who leads.
+
+## RELEVANT CREDENTIALS & CASE STUDIES
+Draw ONLY from the real ONWRD case studies provided. Do not invent credentials. Select the 2–3 most relevant to this specific tender. For each: project name, the challenge, ONWRD's contribution, the result.
+
+## TEAM & EXPERTISE
+Position ONWRD's principals as sector experts. Speak to relevant expertise without inventing individuals. Keep it concise.
+
+## PROPOSED TIMELINE
+A milestone table in Markdown format with columns: Phase | Key Activity | Deliverable | Week.
+
+## INVESTMENT SUMMARY
+If a contract value is provided, suggest a breakdown. If not, write: "ONWRD will provide a detailed investment proposal upon request, structured to align with the budget parameters of this procurement."
+
+## WHY ONWRD
+A closing section that crystallises the core argument for choosing ONWRD: regional expertise, strategic depth, and a proven track record of delivering results in the Caribbean development sector.
+
+---
+
+STYLE RULES:
+- Write in first-person plural ("We propose", "Our approach", "ONWRD will…")
+- No filler phrases like "In conclusion," or "It is important to note that"
+- Use bold (**text**) for key deliverables and named outputs
+- Use bullet lists for activities and requirements only — not for prose
+- Tables for timelines only
+- Maximum 2,500 words in the body (not counting headings)
+- Never hallucinate credentials, case studies, or team members not mentioned in the brief or the real case study list`;
+
+    // 6. Call Gemini 2.0 Flash
+    const { GoogleGenerativeAI } = await import("@google/generative-ai");
+    if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not set");
+    const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    const model = genai.getGenerativeModel({ model: "gemini-2.0-flash" });
+
+    req.log.info({ tenderId: opportunityId }, "[generate-bid] Calling Gemini 2.0 Flash…");
+
+    const geminiResult = await model.generateContent({
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: `${systemPrompt}\n\n---\nTENDER BRIEF:\n${briefContext}\n\n---\nONWRD REAL CASE STUDIES (use only these):\n${ONWRD_CASE_STUDIES}\n\n---\nNow write the complete proposal document:`,
+            },
+          ],
+        },
+      ],
+      generationConfig: { maxOutputTokens: 8192 },
+    });
+
+    const proposalContent = geminiResult.response.text();
+    if (!proposalContent) throw new Error("Gemini returned empty proposal content");
+
+    req.log.info({ tenderId: opportunityId, chars: proposalContent.length }, "[generate-bid] Proposal generated, exporting to Google Docs…");
+
+    // 7. Export to Google Docs
+    const { createGoogleDoc, appendContentWithLogo, shareWithAnyone } = await import("../lib/google-docs.js");
+    const docTitle = `ONWRD Bid — ${tender.title.slice(0, 60)} — ${tender.agency}`.slice(0, 100);
+    const doc = await createGoogleDoc(docTitle);
+    const docId = doc.documentId;
+    const docUrl = `https://docs.google.com/document/d/${docId}/edit`;
+
+    await appendContentWithLogo(docId, proposalContent);
+    await shareWithAnyone(docId);
+
+    req.log.info({ tenderId: opportunityId, docId, docUrl }, "[generate-bid] Google Doc created");
+
+    // 8. Update tender status
+    await db
+      .update(tendersTable)
+      .set({ status: "bid_started", googleDocId: docId, googleDocUrl: docUrl, updatedAt: new Date() })
+      .where(eq(tendersTable.id, opportunityId));
+
+    res.json({ docId, docUrl, title: docTitle });
+  } catch (err) {
+    req.log.error({ err }, "[generate-bid] Error generating bid proposal");
+    const message = err instanceof Error ? err.message : "Unknown error";
+    res.status(500).json({ error: `Failed to generate bid proposal: ${message}` });
+  }
+});
+
 export default router;
+
