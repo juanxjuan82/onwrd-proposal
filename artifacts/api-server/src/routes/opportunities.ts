@@ -964,30 +964,23 @@ STYLE RULES:
 - Maximum 2,500 words in the body (not counting headings)
 - Never hallucinate credentials, case studies, or team members not mentioned in the brief or the real case study list`;
 
-    // 6. Call Gemini 2.0 Flash
-    const { GoogleGenerativeAI } = await import("@google/generative-ai");
-    if (!process.env.GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not set");
-    const genai = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    const model = genai.getGenerativeModel({ model: "gemini-2.0-flash" });
+    // 6. Call OpenAI (master proposal generation)
+    req.log.info({ tenderId: opportunityId }, "[generate-bid] Calling OpenAI proposal writer…");
 
-    req.log.info({ tenderId: opportunityId }, "[generate-bid] Calling Gemini 2.0 Flash…");
-
-    const geminiResult = await model.generateContent({
-      contents: [
+    const completion = await openai.chat.completions.create({
+      model: AI_MODEL,
+      max_tokens: 8192,
+      messages: [
+        { role: "system", content: systemPrompt },
         {
           role: "user",
-          parts: [
-            {
-              text: `${systemPrompt}\n\n---\nTENDER BRIEF:\n${briefContext}\n\n---\nONWRD REAL CASE STUDIES (use only these):\n${ONWRD_CASE_STUDIES}\n\n---\nNow write the complete proposal document:`,
-            },
-          ],
+          content: `TENDER BRIEF:\n${briefContext}\n\n---\nONWRD REAL CASE STUDIES (use only these):\n${ONWRD_CASE_STUDIES}\n\n---\nNow write the complete proposal document:`,
         },
       ],
-      generationConfig: { maxOutputTokens: 8192 },
     });
 
-    const proposalContent = geminiResult.response.text();
-    if (!proposalContent) throw new Error("Gemini returned empty proposal content");
+    const proposalContent = completion.choices[0]?.message?.content ?? "";
+    if (!proposalContent) throw new Error("OpenAI returned empty proposal content");
 
     req.log.info({ tenderId: opportunityId, chars: proposalContent.length }, "[generate-bid] Proposal generated, exporting to Google Docs…");
 
