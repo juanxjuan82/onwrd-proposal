@@ -17,6 +17,7 @@ import Knowledge from "./pages/knowledge";
 import SettingsGoogle from "./pages/settings-google";
 import OpportunityInbox from "./pages/opportunity-inbox";
 import SettingsSources from "./pages/settings-sources";
+import SettingsImport from "./pages/settings-import";
 
 const queryClient = new QueryClient();
 
@@ -41,6 +42,7 @@ function Router() {
             <Route path="/inbox" component={OpportunityInbox} />
             <Route path="/settings" component={SettingsGoogle} />
             <Route path="/settings/sources" component={SettingsSources} />
+            <Route path="/settings/import" component={SettingsImport} />
             <Route component={NotFound} />
           </Switch>
         </MainLayout>

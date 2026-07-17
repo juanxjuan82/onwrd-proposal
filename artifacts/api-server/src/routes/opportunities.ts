@@ -1,4 +1,7 @@
 import { Router } from "express";
+import multer from "multer";
+import mammoth from "mammoth";
+import pdfParse from "pdf-parse/lib/pdf-parse.js";
 import { db } from "@workspace/db";
 import {
   tendersTable,
@@ -666,6 +669,123 @@ ${SECTION_DEFINITIONS.map((s) => `- ${s.key}: ${s.title}`).join("\n")}`,
         .where(eq(proposalsTable.id, draft.id));
     }
   })();
+});
+
+// ── Manual tender import ───────────────────────────────────────────────────
+const manualUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 },
+}).single("file");
+
+router.post("/tenders/manual", (req, res, next) => {
+  manualUpload(req, res, (err: unknown) => {
+    if (err) {
+      const e = err as { code?: string; message?: string };
+      if (e.code === "LIMIT_FILE_SIZE") {
+        res.status(413).json({ error: "File too large. Max 50 MB." });
+        return;
+      }
+      res.status(400).json({ error: e.message ?? "Upload failed" });
+      return;
+    }
+    next();
+  });
+}, async (req, res) => {
+  const bodyUrl = (req.body as Record<string, string>)?.url?.trim() || null;
+  const file = req.file ?? null;
+
+  if (!file && !bodyUrl) {
+    res.status(400).json({ error: "Provide a file (.pdf, .docx, .txt) or a URL." });
+    return;
+  }
+
+  try {
+    let rawText = "";
+    let sourceUrl: string | null = null;
+
+    if (file) {
+      const { mimetype, originalname, buffer } = file;
+      const name = originalname.toLowerCase();
+      if (
+        mimetype === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+        name.endsWith(".docx")
+      ) {
+        const result = await mammoth.extractRawText({ buffer });
+        rawText = result.value;
+      } else if (mimetype === "application/pdf" || name.endsWith(".pdf")) {
+        const result = await pdfParse(buffer);
+        rawText = (result.text ?? "").trim();
+        if (!rawText) {
+          res.status(400).json({
+            error: "No selectable text found in this PDF. It may be a scanned image — try copy/pasting the text instead.",
+          });
+          return;
+        }
+      } else if (mimetype === "text/plain" || name.endsWith(".txt")) {
+        rawText = buffer.toString("utf-8");
+      } else {
+        res.status(400).json({ error: "Unsupported file type. Upload a .pdf, .docx, or .txt file." });
+        return;
+      }
+    } else if (bodyUrl) {
+      sourceUrl = bodyUrl;
+      let html = "";
+      try {
+        const resp = await fetch(bodyUrl, {
+          signal: AbortSignal.timeout(15_000),
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; ONWRDBot/1.0)" },
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        html = await resp.text();
+      } catch (err) {
+        res.status(400).json({ error: `Could not fetch URL: ${(err as Error).message}` });
+        return;
+      }
+      rawText = html
+        .replace(/<script[\s\S]*?<\/script>/gi, " ")
+        .replace(/<style[\s\S]*?<\/style>/gi, " ")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&nbsp;/gi, " ")
+        .replace(/&amp;/gi, "&")
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">")
+        .replace(/\s{2,}/g, "\n")
+        .trim();
+    }
+
+    if (!rawText || rawText.length < 50) {
+      res.status(400).json({ error: "Not enough text could be extracted. Try a different file or URL." });
+      return;
+    }
+
+    const firstLine = rawText.split("\n").find((l) => l.trim().length > 5)?.trim() ?? "";
+    let title = firstLine.slice(0, 120);
+    if (!title && sourceUrl) {
+      try { title = new URL(sourceUrl).hostname; } catch { title = "Manual Import"; }
+    }
+    if (!title) title = "Manual Import";
+
+    const [created] = await db
+      .insert(tendersTable)
+      .values({
+        title,
+        agency: "Manual Import",
+        description: rawText.slice(0, 500),
+        category: "General",
+        rawText,
+        sourceUrl,
+        status: "opportunity_found",
+        recommendationScore: 0,
+      })
+      .returning();
+
+    res.status(201).json({ id: created.id, title: created.title, status: created.status });
+
+    void autoAnalyzeOpportunity(created.id);
+  } catch (err) {
+    req.log.error({ err }, "Error processing manual tender import");
+    res.status(500).json({ error: "Failed to process import. Please try again." });
+  }
 });
 
 export default router;

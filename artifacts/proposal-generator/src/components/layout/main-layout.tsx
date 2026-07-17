@@ -1,5 +1,5 @@
 import { Link, useLocation } from "wouter";
-import { Plus, LayoutDashboard, Briefcase, Target, BookOpen, Settings, Inbox } from "lucide-react";
+import { Plus, LayoutDashboard, Briefcase, Target, BookOpen, Settings, Inbox, UploadCloud } from "lucide-react";
 
 export function MainLayout({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
@@ -71,6 +71,14 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
             >
               <Target className="w-5 h-5 flex-shrink-0" />
               Sources
+            </Link>
+            <Link
+              href="/settings/import"
+              className={navItem(location.startsWith("/settings/import"))}
+              data-testid="nav-import"
+            >
+              <UploadCloud className="w-5 h-5 flex-shrink-0" />
+              Import
             </Link>
             <Link
               href="/settings"
