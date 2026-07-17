@@ -31,3 +31,23 @@ SMTP_USER = "john.aymes@gmail.com"
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = "587"
 RESEND_FROM = "ONWRD Tender Desk <desk@onwrdadvisors.com>"
+
+[[ports]]
+localPort = 8080
+externalPort = 8080
+
+[[ports]]
+localPort = 8081
+externalPort = 80
+
+[[ports]]
+localPort = 8082
+externalPort = 3002
+
+[[ports]]
+localPort = 25931
+externalPort = 3000
+
+[[ports]]
+localPort = 25932
+externalPort = 3001

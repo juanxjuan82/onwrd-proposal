@@ -2,8 +2,8 @@ import cron from "node-cron";
 import { runCrawler, seedDefaultSources, seedDefaultSearchProfiles } from "./index.js";
 import { Resend } from "resend";
 import { db } from "@workspace/db";
-import { discoveredTendersTable, tenderDigestSettingsTable } from "@workspace/db";
-import { eq, gte, and } from "drizzle-orm";
+import { discoveredTendersTable, tenderDigestSettingsTable, intakeDraftsTable } from "@workspace/db";
+import { eq, gte, and, lt } from "drizzle-orm";
 
 async function getDigestRecipients(): Promise<{ emails: string[]; enabled: boolean }> {
   try {
@@ -142,5 +142,22 @@ export async function startScheduler(): Promise<void> {
     }
   });
 
-  console.log("[tender-cron] Scheduler started. Daily crawl at 06:00.");
+  // Hourly: mark intake drafts as abandoned if not converted within 24 hours
+  cron.schedule("0 * * * *", async () => {
+    try {
+      const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const abandoned = await db
+        .update(intakeDraftsTable)
+        .set({ status: "draft_abandoned", updatedAt: new Date() })
+        .where(and(eq(intakeDraftsTable.status, "draft"), lt(intakeDraftsTable.updatedAt, cutoff)))
+        .returning({ id: intakeDraftsTable.id });
+      if (abandoned.length > 0) {
+        console.log(`[intake-cron] Marked ${abandoned.length} draft(s) as abandoned.`);
+      }
+    } catch (err) {
+      console.error("[intake-cron] Failed to mark abandoned drafts:", err);
+    }
+  });
+
+  console.log("[tender-cron] Scheduler started. Daily crawl at 06:00. Hourly abandoned-draft sweep active.");
 }

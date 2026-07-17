@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { CheckCircle, Mail, Phone } from "lucide-react";
+import { CheckCircle, Mail, Phone, UploadCloud, X, FileText } from "lucide-react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
@@ -35,7 +35,7 @@ const intakeSchema = z
     investment: z.string().optional(),
     decisionStage: z.string().min(1, "Please select one"),
     projectType: z.string().min(1, "Please select a project type"),
-    projectBrief: z.string().trim().min(10, "Please describe your project (at least 10 characters)"),
+    projectBrief: z.string().trim(),
   })
   .superRefine((v, ctx) => {
     const req = (sel: boolean, val: string | undefined, path: string) => {
@@ -69,6 +69,12 @@ function mwo(vs: string[], o?: string) {
 }
 function brief(v: V) {
   return `Project Brief\nDate: ${new Date().toISOString().split("T")[0]}\nClient: ${v.orgName}\n\nContact\n${v.firstName} ${v.lastName} · ${v.jobTitle}\nEmail: ${v.email}\nPhone: ${v.phone||"n/a"} · Preferred: ${v.preferredContact||"n/a"}\nHeard via: ${wo(v.hearAbout,v.hearAboutOther)}\n\nOrg\n${v.orgName} · ${v.website||"n/a"}\nIndustry: ${wo(v.industry,v.industryOther)}\nMarket: ${wo(v.market,v.marketOther)}\n\nBrief\nProblems: ${mwo(v.problems,v.problemsOther)}\nAgency history: ${v.agencyBefore||"n/a"}\nSupport needed: ${mwo(v.support,v.supportOther)}\nInvestment: ${v.investment||"n/a"}\nProject type: ${v.projectType}\n\n${v.projectBrief}\n\nTiming\nDecision stage: ${v.decisionStage}`.trim();
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // ─── Tile components ──────────────────────────────────────────────────────
@@ -143,6 +149,10 @@ export default function Intake() {
   const [done, setDone] = useState(false);
   const [busy, setBusy] = useState(false);
   const [submitErr, setSubmitErr] = useState<string|null>(null);
+  const [briefFile, setBriefFile] = useState<File | null>(null);
+  const [draftId, setDraftId] = useState<number | null>(null);
+  const [autosaved, setAutosaved] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const form = useForm<V>({
     resolver: zodResolver(intakeSchema),
@@ -162,14 +172,58 @@ export default function Intake() {
   const problems = form.watch("problems");
   const support = form.watch("support");
 
+  // ─── Autosave: fire when Section 1 is filled ────────────────────────────
+  const firstName = form.watch("firstName");
+  const lastName = form.watch("lastName");
+  const jobTitle = form.watch("jobTitle");
+  const email = form.watch("email");
+  const phone = form.watch("phone");
+  const preferredContact = form.watch("preferredContact");
+
+  const section1Complete =
+    firstName.trim().length > 0 &&
+    lastName.trim().length > 0 &&
+    jobTitle.trim().length > 0 &&
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+
+  useEffect(() => {
+    if (!section1Complete) return;
+    const timer = setTimeout(async () => {
+      try {
+        const resp = await fetch(`${BASE}/api/intake/draft`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ firstName, lastName, jobTitle, email, phone, preferredContact }),
+        });
+        if (resp.ok) {
+          const data = await resp.json() as { id: number };
+          setDraftId(data.id);
+          setAutosaved(true);
+          setTimeout(() => setAutosaved(false), 3000);
+        }
+      } catch { /* silent — non-blocking */ }
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [firstName, lastName, jobTitle, email, phone, preferredContact, section1Complete]);
+
+  // ─── Submit ─────────────────────────────────────────────────────────────
   const submit = async (v: V) => {
+    // Require either typed brief or uploaded file
+    if (!briefFile && v.projectBrief.trim().length < 10) {
+      form.setError("projectBrief", { message: "Please describe your project (at least 10 characters) or upload a document above" });
+      return;
+    }
+
     setBusy(true); setSubmitErr(null);
     try {
-      const r = await fetch(`${BASE}/api/intake`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ briefText: brief(v), clientName: v.orgName, industry: wo(v.industry, v.industryOther) }),
-      });
+      const formData = new FormData();
+      formData.append("briefText", brief(v));
+      formData.append("clientName", v.orgName);
+      formData.append("industry", wo(v.industry, v.industryOther));
+      if (briefFile) formData.append("briefFile", briefFile);
+      if (draftId) formData.append("draftId", String(draftId));
+
+      const r = await fetch(`${BASE}/api/intake`, { method: "POST", body: formData });
       if (!r.ok) {
         let msg = "Couldn't submit. Please check your connection and try again.";
         try { const j = await r.json(); if (j?.error) msg = j.error; } catch { /* ignore */ }
@@ -269,6 +323,12 @@ export default function Intake() {
                   )} />
                 </Field>
               </div>
+              {autosaved && (
+                <p className="text-[11px] text-[#555] flex items-center gap-1">
+                  <CheckCircle className="w-3 h-3 text-[#00FFD5]" />
+                  Contact details saved
+                </p>
+              )}
             </div>
           </Section>
 
@@ -380,16 +440,59 @@ export default function Intake() {
               </Field>
 
               <Field label="Project brief" req>
-                <div className="mt-1 space-y-1">
+                <div className="mt-1 space-y-2">
                   <Textarea
                     className="text-[13px] resize-none"
                     rows={5}
                     placeholder="Tell us about your goals, challenges, or anything that helps us understand what you need…"
                     {...form.register("projectBrief")}
                   />
-                  <div className="flex justify-between">
+                  <div className="flex justify-between items-start">
                     <Err msg={errors.projectBrief?.message} />
                     <span className="text-[11px] text-[#444] ml-auto">{form.watch("projectBrief").length} chars</span>
+                  </div>
+
+                  {/* File upload area */}
+                  <div className="border border-dashed border-[#2a2a2a] rounded-lg p-4">
+                    <p className="text-[11px] text-[#555] mb-2">
+                      Have an existing brief? Upload your RFP or project document instead of (or alongside) typing.
+                    </p>
+                    {briefFile ? (
+                      <div className="flex items-center gap-2 bg-[#111] border border-[#222] rounded px-3 py-2">
+                        <FileText className="w-4 h-4 text-[#0000FF] shrink-0" />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-[13px] text-white truncate">{briefFile.name}</p>
+                          <p className="text-[11px] text-[#555]">{formatBytes(briefFile.size)}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => { setBriefFile(null); if (fileInputRef.current) fileInputRef.current.value = ""; }}
+                          className="text-[#555] hover:text-white transition-colors shrink-0"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="flex items-center gap-2 text-[13px] text-[#666] hover:text-white transition-colors"
+                      >
+                        <UploadCloud className="w-4 h-4 shrink-0" />
+                        <span>Choose file</span>
+                        <span className="text-[#444]">· PDF, DOCX, TXT · Max 20 MB</span>
+                      </button>
+                    )}
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".pdf,.docx,.txt"
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) setBriefFile(f);
+                      }}
+                    />
                   </div>
                 </div>
               </Field>

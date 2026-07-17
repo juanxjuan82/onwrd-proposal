@@ -1,7 +1,10 @@
 import { Router } from "express";
+import multer from "multer";
+import pdfParse from "pdf-parse";
+import mammoth from "mammoth";
 import { db } from "@workspace/db";
-import { proposalsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { proposalsTable, intakeDraftsTable } from "@workspace/db";
+import { eq, and, lt } from "drizzle-orm";
 import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
 import { Resend } from "resend";
 import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
@@ -14,6 +17,16 @@ import {
   DeleteProposalParams,
   ExportToGoogleDocsParams,
 } from "@workspace/api-zod";
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ok = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain"].includes(file.mimetype)
+      || file.originalname.match(/\.(pdf|docx|txt)$/i);
+    cb(null, !!ok);
+  },
+});
 
 const router = Router();
 
@@ -650,18 +663,85 @@ Return your response as JSON with exactly these fields:
 });
 
 /**
- * Public intake endpoint — generates + saves a proposal silently (status: "new"),
- * returns only { success: true } so the draft is never exposed to the client.
+ * Autosave draft — upserts contact-details for a partially completed intake form.
+ * Keyed by email + status="draft" so repeated autosaves update the same row.
  */
-router.post("/intake", async (req, res) => {
-  const { briefText, clientName, industry } = req.body as {
-    briefText: string;
-    clientName: string;
-    industry: string;
+router.post("/intake/draft", async (req, res) => {
+  const { firstName, lastName, jobTitle, email, phone, preferredContact } = req.body as {
+    firstName?: string; lastName?: string; jobTitle?: string; email?: string;
+    phone?: string; preferredContact?: string;
   };
 
-  if (!briefText || !clientName || !industry) {
-    res.status(400).json({ error: "briefText, clientName and industry are required" });
+  if (!firstName?.trim() || !lastName?.trim() || !jobTitle?.trim() || !email?.trim()) {
+    res.status(400).json({ error: "firstName, lastName, jobTitle and email are required" });
+    return;
+  }
+
+  try {
+    const [existing] = await db
+      .select({ id: intakeDraftsTable.id })
+      .from(intakeDraftsTable)
+      .where(and(eq(intakeDraftsTable.email, email.trim()), eq(intakeDraftsTable.status, "draft")))
+      .limit(1);
+
+    if (existing) {
+      await db
+        .update(intakeDraftsTable)
+        .set({ firstName: firstName.trim(), lastName: lastName.trim(), jobTitle: jobTitle.trim(), phone: phone ?? null, preferredContact: preferredContact ?? null, updatedAt: new Date() })
+        .where(eq(intakeDraftsTable.id, existing.id));
+      res.json({ id: existing.id });
+    } else {
+      const [draft] = await db
+        .insert(intakeDraftsTable)
+        .values({ firstName: firstName.trim(), lastName: lastName.trim(), jobTitle: jobTitle.trim(), email: email.trim(), phone: phone ?? null, preferredContact: preferredContact ?? null })
+        .returning({ id: intakeDraftsTable.id });
+      res.json({ id: draft.id });
+    }
+  } catch (err) {
+    req.log.error({ err }, "Error saving intake draft");
+    res.status(500).json({ error: "Failed to save draft" });
+  }
+});
+
+/**
+ * Public intake endpoint — generates + saves a proposal silently (status: "new"),
+ * returns only { success: true } so the draft is never exposed to the client.
+ * Accepts multipart/form-data (with optional briefFile) or application/json.
+ */
+router.post("/intake", upload.single("briefFile"), async (req, res) => {
+  const briefText: string = req.body?.briefText ?? "";
+  const clientName: string = req.body?.clientName ?? "";
+  const industry: string = req.body?.industry ?? "";
+  const draftId: number | undefined = req.body?.draftId ? Number(req.body.draftId) : undefined;
+
+  // Parse uploaded file text if present
+  let fileText = "";
+  if (req.file) {
+    try {
+      const { mimetype, originalname, buffer } = req.file;
+      if (mimetype === "application/pdf" || originalname.match(/\.pdf$/i)) {
+        const result = await pdfParse(buffer);
+        fileText = result.text?.trim() ?? "";
+        if (!fileText) {
+          res.status(400).json({ error: "The uploaded PDF has no selectable text. Please copy-paste the content into the brief field instead." });
+          return;
+        }
+      } else if (mimetype.includes("wordprocessingml") || originalname.match(/\.docx$/i)) {
+        const result = await mammoth.extractRawText({ buffer });
+        fileText = result.value?.trim() ?? "";
+      } else {
+        fileText = buffer.toString("utf-8").trim();
+      }
+    } catch (err) {
+      req.log.warn({ err }, "File parsing failed — proceeding with briefText only");
+    }
+  }
+
+  // Merge briefText and fileText
+  const combinedBrief = [briefText, fileText].filter(Boolean).join("\n\n--- Uploaded Document ---\n\n");
+
+  if (!combinedBrief || !clientName || !industry) {
+    res.status(400).json({ error: "A project brief (typed or uploaded), clientName and industry are required" });
     return;
   }
 
@@ -697,7 +777,7 @@ Return ONLY the completed proposal text — no JSON wrapper, no commentary.`;
           model: AI_MODEL,
           messages: [
             { role: "system", content: intakeSystemPrompt },
-            { role: "user", content: `Here is the project brief:\n\n${briefText}` },
+            { role: "user", content: `Here is the project brief:\n\n${combinedBrief}` },
           ],
           max_tokens: 16000,
         });
@@ -721,11 +801,19 @@ Return ONLY the completed proposal text — no JSON wrapper, no commentary.`;
       .values({
         clientName,
         industry,
-        briefText,
+        briefText: combinedBrief,
         proposalContent: content,
         status: "new",
       })
       .returning();
+
+    // Mark the autosaved draft as converted so it doesn't get flagged as abandoned
+    if (draftId && !Number.isNaN(draftId)) {
+      db.update(intakeDraftsTable)
+        .set({ status: "converted", proposalId: saved.id, updatedAt: new Date() })
+        .where(eq(intakeDraftsTable.id, draftId))
+        .catch(() => { /* non-critical */ });
+    }
 
     // Respond immediately — client doesn't need to wait for export or email
     res.json({ success: true });
