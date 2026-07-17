@@ -5,7 +5,7 @@ import {
   crawlerRunsTable,
 } from "@workspace/db";
 import { eq } from "drizzle-orm";
-import { openai } from "@workspace/integrations-openai-ai-server";
+import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
 import { WorldBankAdapter } from "./world-bank.js";
 import { UNGMAdapter } from "./ungm.js";
 import { IDBAdapter } from "./idb.js";
@@ -292,7 +292,7 @@ async function scoreOpportunity(opp: TenderOpportunity): Promise<ScoringResult> 
 
   try {
     const completion = await openai.chat.completions.create({
-      model: "gemini-2.0-flash",
+      model: AI_MODEL,
       max_tokens: 600,
       messages: [
         {
