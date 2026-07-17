@@ -25,6 +25,9 @@ import {
   FileText,
   Eye,
   Pencil,
+  UploadCloud,
+  X,
+  ClipboardList,
 } from "lucide-react";
 import {
   Form,
@@ -34,6 +37,8 @@ import {
   FormLabel,
   FormMessage,
 } from "@/components/ui/form";
+
+const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
 // ─── Intake form schema ────────────────────────────────────────────────────
 const intakeSchema = z.object({
@@ -184,6 +189,13 @@ export default function NewProposal() {
   const [briefText, setBriefText] = useState("");
   const [isExporting, setIsExporting] = useState(false);
   const [previewMode, setPreviewMode] = useState(false);
+  const [mode, setMode] = useState<"form" | "paste">("form");
+  const [pasteText, setPasteText] = useState("");
+  const [pasteFile, setPasteFile] = useState<File | null>(null);
+  const [pasteFileExtracting, setPasteFileExtracting] = useState(false);
+  const [pasteFileError, setPasteFileError] = useState<string | null>(null);
+  const [pasteError, setPasteError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -250,6 +262,54 @@ export default function NewProposal() {
       if (genIntervalRef.current) clearInterval(genIntervalRef.current);
     };
   }, [parseBrief.isPending]);
+
+  const handleFileSelect = async (file: File) => {
+    setPasteFile(file);
+    setPasteFileError(null);
+    if (file.name.match(/\.txt$/i)) {
+      const text = await file.text();
+      setPasteText(text.trim());
+      return;
+    }
+    setPasteFileExtracting(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const resp = await fetch(`${BASE}/api/proposals/extract-text`, { method: "POST", body: fd });
+      const data = await resp.json() as { text?: string; error?: string };
+      if (!resp.ok) throw new Error(data.error ?? "Extraction failed");
+      setPasteText(data.text ?? "");
+    } catch (e) {
+      setPasteFileError(e instanceof Error ? e.message : "Could not read file");
+      setPasteFile(null);
+    } finally {
+      setPasteFileExtracting(false);
+    }
+  };
+
+  const handlePasteSubmit = () => {
+    if (!pasteText.trim()) {
+      setPasteError("Please paste some text or upload a document first.");
+      return;
+    }
+    setPasteError(null);
+    const brief = pasteText.trim();
+    setBriefText(brief);
+    parseBrief.mutate(
+      { data: { briefText: brief } },
+      {
+        onSuccess: (data) => {
+          form.setValue("clientName", data.clientName);
+          form.setValue("industry", data.industry);
+          form.setValue("proposalContent", data.proposalContent);
+          setStep(2);
+        },
+        onError: (error) => {
+          toast({ title: "Generation failed", description: error.error ?? "An unexpected error occurred.", variant: "destructive" });
+        },
+      },
+    );
+  };
 
   const handleIntakeSubmit = (values: IntakeValues) => {
     const brief = formatBrief(values);
@@ -404,8 +464,128 @@ export default function NewProposal() {
         </div>
       )}
 
-      {/* ── Step 1: intake form ── */}
+      {/* ── Step 1: mode toggle + content ── */}
       {step === 1 && !parseBrief.isPending && (
+        <>
+          {/* Mode toggle */}
+          <div className="flex rounded-lg border border-border overflow-hidden w-fit mb-6">
+            <button
+              type="button"
+              onClick={() => setMode("form")}
+              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${
+                mode === "form" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-accent"
+              }`}
+            >
+              <ClipboardList className="w-4 h-4" />
+              Guided Form
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("paste")}
+              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${
+                mode === "paste" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-accent"
+              }`}
+            >
+              <UploadCloud className="w-4 h-4" />
+              Paste / Upload
+            </button>
+          </div>
+
+          {/* ── Paste / Upload panel ── */}
+          {mode === "paste" && (
+            <div className="space-y-4">
+              <div className="bg-card border rounded-lg overflow-hidden">
+                <div className="bg-muted px-6 py-4 border-b">
+                  <h2 className="font-semibold text-foreground">Project Brief</h2>
+                  <p className="text-sm text-muted-foreground mt-0.5">
+                    Paste a brief, RFP, or any document — the AI will read it and generate a full proposal.
+                  </p>
+                </div>
+                <div className="p-6 space-y-4">
+                  {/* File upload zone */}
+                  <div
+                    className="border-2 border-dashed border-border rounded-lg p-6 flex flex-col items-center gap-3 cursor-pointer hover:border-primary/50 transition-colors"
+                    onClick={() => fileInputRef.current?.click()}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const f = e.dataTransfer.files[0];
+                      if (f) handleFileSelect(f);
+                    }}
+                  >
+                    {pasteFileExtracting ? (
+                      <>
+                        <Loader2 className="w-8 h-8 text-muted-foreground animate-spin" />
+                        <p className="text-sm text-muted-foreground">Reading document…</p>
+                      </>
+                    ) : pasteFile ? (
+                      <div className="flex items-center gap-3 w-full">
+                        <FileText className="w-5 h-5 text-primary shrink-0" />
+                        <span className="text-sm text-foreground flex-1 truncate">{pasteFile.name}</span>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); setPasteFile(null); if (fileInputRef.current) fileInputRef.current.value = ""; }}
+                          className="text-muted-foreground hover:text-foreground"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <UploadCloud className="w-8 h-8 text-muted-foreground" />
+                        <div className="text-center">
+                          <p className="text-sm font-medium text-foreground">Drop a file or click to browse</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">PDF, DOCX, TXT · Max 20 MB</p>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".pdf,.docx,.txt"
+                    className="hidden"
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFileSelect(f); }}
+                  />
+                  {pasteFileError && <p className="text-xs text-destructive">{pasteFileError}</p>}
+
+                  {/* Divider */}
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 border-t border-border" />
+                    <span className="text-xs text-muted-foreground">or paste text below</span>
+                    <div className="flex-1 border-t border-border" />
+                  </div>
+
+                  {/* Textarea */}
+                  <Textarea
+                    rows={14}
+                    placeholder="Paste your brief, RFP, meeting notes, or any project context here…"
+                    className="resize-y font-mono text-sm"
+                    value={pasteText}
+                    onChange={(e) => setPasteText(e.target.value)}
+                  />
+                  <div className="flex items-center justify-between">
+                    <div>
+                      {pasteError && <p className="text-xs text-destructive">{pasteError}</p>}
+                    </div>
+                    <span className="text-xs text-muted-foreground">{pasteText.length} chars</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end">
+                <Button type="button" size="lg" className="gap-2" onClick={handlePasteSubmit} disabled={parseBrief.isPending}>
+                  <FileText className="w-4 h-4" />
+                  Generate Proposal
+                </Button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* ── Step 1: guided intake form ── */}
+      {step === 1 && !parseBrief.isPending && mode === "form" && (
         <form
           onSubmit={intake.handleSubmit(handleIntakeSubmit)}
           className="space-y-6"

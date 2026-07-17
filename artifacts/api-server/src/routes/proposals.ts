@@ -581,6 +581,39 @@ router.delete("/proposals/:id", async (req, res) => {
   }
 });
 
+/**
+ * Extract plain text from an uploaded PDF, DOCX, or TXT file.
+ * Used by the New Proposal page so the user can upload a document
+ * instead of typing a brief.
+ */
+router.post("/proposals/extract-text", upload.single("file"), async (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ error: "No file uploaded." });
+    return;
+  }
+  const { mimetype, originalname, buffer } = req.file;
+  try {
+    let text = "";
+    if (mimetype === "application/pdf" || originalname.match(/\.pdf$/i)) {
+      const result = await pdfParse(buffer);
+      text = result.text?.trim() ?? "";
+      if (!text) {
+        res.status(400).json({ error: "The PDF has no selectable text — try copying the content manually." });
+        return;
+      }
+    } else if (mimetype.includes("wordprocessingml") || originalname.match(/\.docx$/i)) {
+      const result = await mammoth.extractRawText({ buffer });
+      text = result.value?.trim() ?? "";
+    } else {
+      text = buffer.toString("utf-8").trim();
+    }
+    res.json({ text });
+  } catch (err) {
+    req.log.error({ err }, "extract-text failed");
+    res.status(500).json({ error: "Could not extract text from the file." });
+  }
+});
+
 router.post("/proposals/parse-brief", async (req, res) => {
   const parsed = ParseBriefBody.safeParse(req.body);
   if (!parsed.success) {
