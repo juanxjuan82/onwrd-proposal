@@ -614,6 +614,49 @@ router.post("/proposals/extract-text", upload.single("file"), async (req, res) =
   }
 });
 
+/**
+ * Score a pasted/uploaded brief for completeness.
+ * Returns { sufficient, missing, summary } — no DB writes.
+ */
+router.post("/proposals/check-brief", async (req, res) => {
+  const text: string = typeof req.body?.text === "string" ? req.body.text.trim() : "";
+  if (!text || text.length < 30) {
+    res.json({ sufficient: false, missing: ["project description"], summary: "Too short to assess." });
+    return;
+  }
+  try {
+    const completion = await openai.chat.completions.create({
+      model: AI_MODEL,
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `You are a proposal writer's assistant. Assess whether the text contains enough information to write a professional service proposal.
+Return ONLY valid JSON with this shape:
+{
+  "sufficient": boolean,          // true if a solid proposal can be written
+  "missing": string[],            // short labels for missing key elements, e.g. ["budget", "timeline"]
+  "summary": string               // one sentence assessment (max 20 words)
+}
+Key elements to check: client/organisation name, project scope or goals, deliverables, timeline or deadline, budget or contract value, any must-have requirements. If at least 3 of these are present the brief is generally sufficient.`,
+        },
+        { role: "user", content: text.slice(0, 6000) },
+      ],
+    });
+    const raw = completion.choices[0]?.message?.content ?? "{}";
+    const parsed = JSON.parse(raw) as { sufficient?: boolean; missing?: string[]; summary?: string };
+    res.json({
+      sufficient: parsed.sufficient ?? false,
+      missing: Array.isArray(parsed.missing) ? parsed.missing : [],
+      summary: typeof parsed.summary === "string" ? parsed.summary : "",
+    });
+  } catch (err) {
+    req.log.error({ err }, "check-brief failed");
+    res.status(500).json({ error: "Could not assess the brief." });
+  }
+});
+
 router.post("/proposals/parse-brief", async (req, res) => {
   const parsed = ParseBriefBody.safeParse(req.body);
   if (!parsed.success) {

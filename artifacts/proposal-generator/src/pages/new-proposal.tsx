@@ -195,7 +195,10 @@ export default function NewProposal() {
   const [pasteFileExtracting, setPasteFileExtracting] = useState(false);
   const [pasteFileError, setPasteFileError] = useState<string | null>(null);
   const [pasteError, setPasteError] = useState<string | null>(null);
+  const [briefCheck, setBriefCheck] = useState<{ sufficient: boolean; missing: string[]; summary: string } | null>(null);
+  const [briefChecking, setBriefChecking] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const checkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -262,6 +265,36 @@ export default function NewProposal() {
       if (genIntervalRef.current) clearInterval(genIntervalRef.current);
     };
   }, [parseBrief.isPending]);
+
+  useEffect(() => {
+    if (mode !== "paste") return;
+    if (checkTimerRef.current) clearTimeout(checkTimerRef.current);
+    if (pasteText.trim().length < 30) {
+      setBriefCheck(null);
+      return;
+    }
+    checkTimerRef.current = setTimeout(async () => {
+      setBriefChecking(true);
+      try {
+        const resp = await fetch(`${BASE}/api/proposals/check-brief`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: pasteText }),
+        });
+        const data = await resp.json() as { sufficient?: boolean; missing?: string[]; summary?: string; error?: string };
+        if (resp.ok) {
+          setBriefCheck({
+            sufficient: data.sufficient ?? false,
+            missing: data.missing ?? [],
+            summary: data.summary ?? "",
+          });
+        }
+      } finally {
+        setBriefChecking(false);
+      }
+    }, 1500);
+    return () => { if (checkTimerRef.current) clearTimeout(checkTimerRef.current); };
+  }, [pasteText, mode]);
 
   const handleFileSelect = async (file: File) => {
     setPasteFile(file);
@@ -564,6 +597,40 @@ export default function NewProposal() {
                     value={pasteText}
                     onChange={(e) => setPasteText(e.target.value)}
                   />
+                  {/* Completeness check result */}
+                  {briefChecking && (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      Checking brief…
+                    </div>
+                  )}
+                  {!briefChecking && briefCheck && (
+                    <div className={`rounded-md border px-4 py-3 text-sm ${briefCheck.sufficient ? "border-emerald-600/40 bg-emerald-950/30" : "border-amber-600/40 bg-amber-950/30"}`}>
+                      <div className="flex items-start gap-2">
+                        {briefCheck.sufficient ? (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />
+                        ) : (
+                          <span className="text-amber-400 mt-0.5 shrink-0 text-base leading-none">⚠</span>
+                        )}
+                        <div className="flex-1">
+                          <p className={`font-medium ${briefCheck.sufficient ? "text-emerald-300" : "text-amber-300"}`}>
+                            {briefCheck.sufficient ? "Brief looks good" : "Brief may be thin"}
+                          </p>
+                          <p className="text-muted-foreground mt-0.5">{briefCheck.summary}</p>
+                          {!briefCheck.sufficient && briefCheck.missing.length > 0 && (
+                            <div className="flex flex-wrap gap-1.5 mt-2">
+                              {briefCheck.missing.map((m) => (
+                                <span key={m} className="rounded-full bg-amber-900/50 text-amber-300 border border-amber-700/40 px-2 py-0.5 text-xs capitalize">
+                                  {m}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="flex items-center justify-between">
                     <div>
                       {pasteError && <p className="text-xs text-destructive">{pasteError}</p>}
