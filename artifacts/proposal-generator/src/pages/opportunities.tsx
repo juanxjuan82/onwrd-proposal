@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -7,56 +7,29 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ChevronRight, Plus, Target, CheckCircle2, XCircle, Clock, AlertCircle } from "lucide-react";
+import {
+  Plus, Target, CheckCircle2, XCircle, Clock, AlertCircle,
+  Globe, Upload, AlertTriangle, RefreshCw, ExternalLink, Loader2,
+  ChevronRight, Pencil,
+} from "lucide-react";
 import { format } from "date-fns";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
-function fitBadge(level: string | undefined, score: number | undefined) {
-  if (!level) return null;
-  const cfg: Record<string, { label: string; className: string }> = {
-    strong: { label: `Strong Fit (${score})`, className: "bg-green-900/30 text-green-400 border-green-900" },
-    moderate: { label: `Moderate (${score})`, className: "bg-yellow-900/30 text-yellow-400 border-yellow-900" },
-    weak: { label: `Weak (${score})`, className: "bg-orange-900/30 text-orange-400 border-orange-900" },
-    no_bid: { label: "No Bid", className: "bg-red-900/30 text-red-400 border-red-900" },
-  };
-  const c = cfg[level] ?? { label: level, className: "bg-muted text-muted-foreground" };
-  return (
-    <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${c.className}`}>
-      {c.label}
-    </span>
-  );
-}
-
-function statusIcon(status: string) {
-  if (status === "no_bid") return <XCircle className="w-4 h-4 text-red-400" />;
-  if (status === "exported_to_drive" || status === "approved_for_export") return <CheckCircle2 className="w-4 h-4 text-green-400" />;
-  if (status === "proposal_drafting" || status === "needs_onwrd_input") return <Clock className="w-4 h-4 text-yellow-400" />;
-  if (status === "ready_for_review") return <AlertCircle className="w-4 h-4 text-blue-400" />;
-  return <Target className="w-4 h-4 text-muted-foreground" />;
-}
-
-function statusLabel(status: string) {
-  const labels: Record<string, string> = {
-    opportunity_found: "Found",
-    requirements_extracted: "Requirements Extracted",
-    screened: "Screened",
-    no_bid: "No Bid",
-    proposal_drafting: "Drafting",
-    needs_onwrd_input: "Needs Input",
-    ready_for_review: "Ready for Review",
-    approved_for_export: "Approved",
-    exported_to_drive: "Exported",
-  };
-  return labels[status] ?? status;
+// ── Types ───────────────────────────────────────────────────────────────────
+interface BidScore {
+  id: number;
+  fitScore: number;
+  fitLevel: string;
+  reasoning: string;
+  flags: string;
+  completenessScore: number;
+  missingFields: string;
 }
 
 interface Opportunity {
@@ -68,9 +41,86 @@ interface Opportunity {
   recommendationScore: number;
   deadline?: string | null;
   valueAmount?: string | null;
+  sourceUrl?: string | null;
+  contactInfo?: string | null;
+  description: string;
+  rawText?: string | null;
   createdAt: string;
+  updatedAt: string;
+  bidScore: BidScore | null;
 }
 
+// ── Helpers ─────────────────────────────────────────────────────────────────
+function fitColor(level: string) {
+  if (level === "strong") return "text-emerald-400";
+  if (level === "moderate") return "text-yellow-400";
+  if (level === "weak") return "text-orange-400";
+  return "text-red-400";
+}
+
+function completenessColor(score: number) {
+  if (score >= 70) return "text-emerald-400";
+  if (score >= 40) return "text-amber-400";
+  return "text-red-400";
+}
+
+function fitBg(level: string) {
+  if (level === "strong") return "border-emerald-900/50 bg-emerald-950/20";
+  if (level === "moderate") return "border-yellow-900/50 bg-yellow-950/20";
+  if (level === "weak") return "border-orange-900/50 bg-orange-950/20";
+  return "border-red-900/50 bg-red-950/20";
+}
+
+function statusIcon(status: string) {
+  if (status === "no_bid") return <XCircle className="w-3.5 h-3.5 text-red-400" />;
+  if (status === "exported_to_drive" || status === "approved_for_export")
+    return <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />;
+  if (status === "proposal_drafting" || status === "needs_onwrd_input")
+    return <Clock className="w-3.5 h-3.5 text-yellow-400" />;
+  if (status === "ready_for_review")
+    return <AlertCircle className="w-3.5 h-3.5 text-blue-400" />;
+  return <Target className="w-3.5 h-3.5 text-muted-foreground" />;
+}
+
+function statusLabel(status: string) {
+  const labels: Record<string, string> = {
+    opportunity_found: "Found",
+    analysing: "Analysing…",
+    requirements_extracted: "Requirements Extracted",
+    screened: "Screened",
+    analysis_failed: "Analysis Failed",
+    no_bid: "No Bid",
+    proposal_drafting: "Drafting",
+    needs_onwrd_input: "Needs Input",
+    ready_for_review: "Ready for Review",
+    approved_for_export: "Approved",
+    exported_to_drive: "Exported",
+  };
+  return labels[status] ?? status;
+}
+
+function sourceLabel(opp: Opportunity) {
+  return opp.sourceUrl ? "Scraper" : "Manual";
+}
+
+function SourceBadge({ opp }: { opp: Opportunity }) {
+  const isCrawled = Boolean(opp.sourceUrl);
+  return (
+    <span
+      title={isCrawled ? `Source: ${opp.sourceUrl}` : "Manually uploaded"}
+      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+        isCrawled
+          ? "border-blue-900/50 bg-blue-950/30 text-blue-400"
+          : "border-violet-900/50 bg-violet-950/30 text-violet-400"
+      }`}
+    >
+      {isCrawled ? <Globe className="w-2.5 h-2.5" /> : <Upload className="w-2.5 h-2.5" />}
+      {sourceLabel(opp)}
+    </span>
+  );
+}
+
+// ── Hooks ───────────────────────────────────────────────────────────────────
 function useOpportunities() {
   return useQuery<Opportunity[]>({
     queryKey: ["opportunities"],
@@ -79,6 +129,44 @@ function useOpportunities() {
       if (!r.ok) throw new Error("Failed to load opportunities");
       return r.json();
     },
+    refetchInterval: 8000,
+  });
+}
+
+function useUpdateOpportunity(id: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: Partial<{
+      title: string; agency: string; description: string; category: string;
+      valueAmount: string; deadline: string; rawText: string; contactInfo: string; sourceUrl: string; status: string;
+    }>) => {
+      const r = await fetch(`${BASE}/api/opportunities/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        throw new Error((e as { error?: string }).error ?? "Failed to update");
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["opportunities"] });
+      qc.invalidateQueries({ queryKey: ["opportunity", id] });
+    },
+  });
+}
+
+function useRescoreOpportunity(id: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const r = await fetch(`${BASE}/api/opportunities/${id}/score`, { method: "POST" });
+      if (!r.ok) throw new Error("Re-score failed");
+      return r.json();
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["opportunities"] }),
   });
 }
 
@@ -86,13 +174,8 @@ function useCreateOpportunity() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (body: {
-      title: string;
-      agency: string;
-      description: string;
-      category?: string;
-      deadline?: string;
-      valueAmount?: string;
-      rawText?: string;
+      title: string; agency: string; description: string;
+      category?: string; deadline?: string; valueAmount?: string; rawText?: string;
     }) => {
       const r = await fetch(`${BASE}/api/opportunities`, {
         method: "POST",
@@ -109,21 +192,329 @@ function useCreateOpportunity() {
   });
 }
 
-export default function Opportunities() {
+// ── Score display ────────────────────────────────────────────────────────────
+function ScoreColumn({ opp }: { opp: Opportunity }) {
+  const bs = opp.bidScore;
+  if (!bs && opp.status === "analysing") {
+    return (
+      <div className="flex flex-col items-center gap-1 min-w-[100px]">
+        <Loader2 className="w-5 h-5 text-muted-foreground animate-spin" />
+        <span className="text-[10px] text-muted-foreground">Analysing…</span>
+      </div>
+    );
+  }
+  if (!bs) return (
+    <div className="min-w-[100px] text-center">
+      <span className="text-xs text-muted-foreground">Not scored</span>
+    </div>
+  );
+
+  const missing: string[] = JSON.parse(bs.missingFields || "[]");
+
+  return (
+    <div className="flex flex-col gap-1.5 min-w-[120px] items-end">
+      <div className="flex items-center gap-3">
+        <div className="text-center">
+          <div className={`text-xl font-bold leading-none ${fitColor(bs.fitLevel)}`}>{bs.fitScore}</div>
+          <div className="text-[9px] text-muted-foreground uppercase tracking-wide mt-0.5">Fit</div>
+        </div>
+        <div className="text-center">
+          <div className={`text-xl font-bold leading-none flex items-center gap-0.5 ${completenessColor(bs.completenessScore)}`}>
+            {bs.completenessScore < 70 && <AlertTriangle className="w-3 h-3" />}
+            {bs.completenessScore}
+          </div>
+          <div className="text-[9px] text-muted-foreground uppercase tracking-wide mt-0.5">Brief</div>
+        </div>
+      </div>
+      {missing.length > 0 && (
+        <div className="flex flex-wrap gap-1 justify-end max-w-[160px]">
+          {missing.slice(0, 3).map((m, i) => (
+            <span key={i} className="rounded-full bg-amber-900/40 text-amber-300 border border-amber-700/40 px-1.5 py-0.5 text-[9px]">
+              {m}
+            </span>
+          ))}
+          {missing.length > 3 && (
+            <span className="rounded-full bg-muted text-muted-foreground px-1.5 py-0.5 text-[9px]">
+              +{missing.length - 3}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Enrich Drawer ────────────────────────────────────────────────────────────
+function EnrichDrawer({
+  opp,
+  open,
+  onClose,
+}: {
+  opp: Opportunity;
+  open: boolean;
+  onClose: () => void;
+}) {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
-  const { data: opportunities, isLoading } = useOpportunities();
-  const createOpportunity = useCreateOpportunity();
-  const [showCreate, setShowCreate] = useState(false);
+  const update = useUpdateOpportunity(opp.id);
+  const rescore = useRescoreOpportunity(opp.id);
 
   const [form, setForm] = useState({
-    title: "",
-    agency: "",
-    description: "",
-    category: "Marketing",
-    deadline: "",
-    valueAmount: "",
-    rawText: "",
+    title: opp.title,
+    agency: opp.agency,
+    category: opp.category,
+    description: opp.description,
+    valueAmount: opp.valueAmount ?? "",
+    deadline: opp.deadline ? opp.deadline.slice(0, 10) : "",
+    contactInfo: opp.contactInfo ?? "",
+    rawText: opp.rawText ?? "",
+  });
+
+  useEffect(() => {
+    setForm({
+      title: opp.title,
+      agency: opp.agency,
+      category: opp.category,
+      description: opp.description,
+      valueAmount: opp.valueAmount ?? "",
+      deadline: opp.deadline ? opp.deadline.slice(0, 10) : "",
+      contactInfo: opp.contactInfo ?? "",
+      rawText: opp.rawText ?? "",
+    });
+  }, [opp.id]);
+
+  const bs = opp.bidScore;
+  const missing: string[] = bs ? JSON.parse(bs.missingFields || "[]") : [];
+
+  const handleSave = async () => {
+    try {
+      await update.mutateAsync({
+        title: form.title,
+        agency: form.agency,
+        category: form.category,
+        description: form.description,
+        valueAmount: form.valueAmount,
+        deadline: form.deadline,
+        contactInfo: form.contactInfo,
+        rawText: form.rawText,
+      });
+      toast({ title: "Saved", description: "Opportunity updated successfully." });
+    } catch (err) {
+      toast({ title: "Save failed", description: (err as Error).message, variant: "destructive" });
+    }
+  };
+
+  const handleRescore = async () => {
+    try {
+      await rescore.mutateAsync();
+      toast({ title: "Re-scored", description: "Bid analysis updated." });
+    } catch {
+      toast({ title: "Re-score failed", variant: "destructive" });
+    }
+  };
+
+  return (
+    <Sheet open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
+      <SheetContent side="right" className="w-full sm:max-w-xl flex flex-col gap-0 p-0 overflow-hidden">
+        {/* Header */}
+        <SheetHeader className="px-6 py-4 border-b bg-card shrink-0">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <SourceBadge opp={opp} />
+                <span className={`inline-flex items-center gap-1 text-xs ${
+                  opp.status === "no_bid" ? "text-red-400" : opp.status === "screened" ? "text-emerald-400" : "text-muted-foreground"
+                }`}>
+                  {statusIcon(opp.status)}
+                  {statusLabel(opp.status)}
+                </span>
+              </div>
+              <SheetTitle className="text-base font-semibold text-foreground leading-snug">
+                {opp.title}
+              </SheetTitle>
+              <SheetDescription className="text-xs text-muted-foreground mt-0.5">
+                {opp.agency} · {opp.category}
+              </SheetDescription>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              className="shrink-0 text-xs gap-1.5"
+              onClick={() => { onClose(); setLocation(`/opportunities/${opp.id}`); }}
+            >
+              <ExternalLink className="w-3 h-3" />
+              Full Detail
+            </Button>
+          </div>
+        </SheetHeader>
+
+        <div className="flex-1 overflow-y-auto">
+          {/* Score summary */}
+          {bs && (
+            <div className={`mx-6 mt-4 rounded-lg border p-4 ${fitBg(bs.fitLevel)}`}>
+              <div className="flex items-center gap-6 mb-2">
+                <div className="text-center">
+                  <div className={`text-3xl font-bold ${fitColor(bs.fitLevel)}`}>{bs.fitScore}</div>
+                  <div className="text-[10px] text-muted-foreground uppercase tracking-wide">Fit</div>
+                </div>
+                <div className="text-center">
+                  <div className={`text-3xl font-bold flex items-center gap-1 ${completenessColor(bs.completenessScore)}`}>
+                    {bs.completenessScore < 70 && <AlertTriangle className="w-4 h-4" />}
+                    {bs.completenessScore}
+                  </div>
+                  <div className="text-[10px] text-muted-foreground uppercase tracking-wide">Brief</div>
+                </div>
+                <p className="flex-1 text-xs text-muted-foreground leading-relaxed">{bs.reasoning}</p>
+              </div>
+              {missing.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 pt-2 border-t border-current/20">
+                  {missing.map((m, i) => (
+                    <span key={i} className="rounded-full bg-amber-900/40 text-amber-300 border border-amber-700/40 px-2 py-0.5 text-xs">
+                      {m}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Enrich / edit section */}
+          <div className="px-6 py-4 space-y-4">
+            <div className="flex items-center gap-2">
+              <Pencil className="w-3.5 h-3.5 text-muted-foreground" />
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Enrich this Brief</h3>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label className="text-xs">Title</Label>
+                <Input className="text-sm h-8" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Issuing Agency</Label>
+                <Input className="text-sm h-8" value={form.agency} onChange={(e) => setForm({ ...form, agency: e.target.value })} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Category</Label>
+                <Input className="text-sm h-8" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Estimated Value</Label>
+                <Input className="text-sm h-8" placeholder="BSD $150,000" value={form.valueAmount} onChange={(e) => setForm({ ...form, valueAmount: e.target.value })} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Submission Deadline</Label>
+                <Input type="date" className="text-sm h-8" value={form.deadline} onChange={(e) => setForm({ ...form, deadline: e.target.value })} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Contact Info</Label>
+                <Input className="text-sm h-8" placeholder="Name, email, or phone" value={form.contactInfo} onChange={(e) => setForm({ ...form, contactInfo: e.target.value })} />
+              </div>
+            </div>
+
+            <div className="space-y-1">
+              <Label className="text-xs">Description</Label>
+              <Textarea rows={3} className="text-sm resize-none" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
+            </div>
+
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <Label className="text-xs">Full RFP / Raw Document Text</Label>
+                <span className="text-[10px] text-muted-foreground">{form.rawText.length} chars</span>
+              </div>
+              <Textarea
+                rows={8}
+                className="text-xs font-mono resize-y"
+                placeholder="Paste or type additional context — budget details, notes from a client call, or the full RFP text…"
+                value={form.rawText}
+                onChange={(e) => setForm({ ...form, rawText: e.target.value })}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Footer actions */}
+        <div className="px-6 py-4 border-t bg-card shrink-0 flex items-center justify-between gap-3">
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5 text-xs"
+            onClick={handleRescore}
+            disabled={rescore.isPending || update.isPending}
+          >
+            {rescore.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+            Re-score
+          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" className="text-xs" onClick={onClose}>Cancel</Button>
+            <Button size="sm" className="text-xs gap-1.5" onClick={handleSave} disabled={update.isPending || rescore.isPending}>
+              {update.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}
+              Save Changes
+            </Button>
+          </div>
+        </div>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+// ── Opportunity Card ─────────────────────────────────────────────────────────
+function OpportunityCard({ opp, onReview }: { opp: Opportunity; onReview: () => void }) {
+  return (
+    <div className="group bg-card border rounded-lg hover:border-primary/40 transition-colors">
+      <button className="w-full text-left px-5 py-4" onClick={onReview}>
+        <div className="flex items-start gap-4">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+              <SourceBadge opp={opp} />
+              <span className={`inline-flex items-center gap-1 text-xs ${
+                opp.status === "no_bid" ? "text-red-400"
+                  : opp.status === "screened" || opp.status === "ready_for_review" ? "text-emerald-400"
+                  : opp.status === "analysing" ? "text-blue-400"
+                  : "text-muted-foreground"
+              }`}>
+                {statusIcon(opp.status)}
+                {statusLabel(opp.status)}
+              </span>
+              {opp.status === "analysing" && (
+                <Loader2 className="w-3 h-3 text-blue-400 animate-spin" />
+              )}
+            </div>
+            <h2 className="text-sm font-medium text-foreground group-hover:text-primary transition-colors leading-snug mb-1">
+              {opp.title}
+            </h2>
+            <p className="text-xs text-muted-foreground">
+              {opp.agency} · {opp.category}
+              {opp.deadline ? ` · Due ${format(new Date(opp.deadline), "MMM d, yyyy")}` : ""}
+              {opp.valueAmount ? ` · ${opp.valueAmount}` : ""}
+            </p>
+          </div>
+
+          <div className="flex items-center gap-3 shrink-0">
+            <ScoreColumn opp={opp} />
+            <ChevronRight className="w-4 h-4 text-muted-foreground group-hover:text-primary transition-colors" />
+          </div>
+        </div>
+      </button>
+    </div>
+  );
+}
+
+// ── Create dialog (kept for quick add) ──────────────────────────────────────
+function CreateDialog({
+  open,
+  onClose,
+  onCreate,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onCreate: (id: number) => void;
+}) {
+  const { toast } = useToast();
+  const createOpp = useCreateOpportunity();
+  const [form, setForm] = useState({
+    title: "", agency: "", description: "", category: "Marketing",
+    deadline: "", valueAmount: "", rawText: "",
   });
 
   const handleCreate = async () => {
@@ -132,30 +523,84 @@ export default function Opportunities() {
       return;
     }
     try {
-      const created = await createOpportunity.mutateAsync({
-        title: form.title,
-        agency: form.agency,
-        description: form.description,
-        category: form.category || undefined,
-        deadline: form.deadline || undefined,
-        valueAmount: form.valueAmount || undefined,
-        rawText: form.rawText || undefined,
+      const created = await createOpp.mutateAsync({
+        title: form.title, agency: form.agency, description: form.description,
+        category: form.category || undefined, deadline: form.deadline || undefined,
+        valueAmount: form.valueAmount || undefined, rawText: form.rawText || undefined,
       });
-      toast({ title: "Opportunity created", description: "Use the detail page to extract requirements and score it." });
-      setShowCreate(false);
+      toast({ title: "Opportunity created", description: "AI analysis is running in the background." });
+      onClose();
       setForm({ title: "", agency: "", description: "", category: "Marketing", deadline: "", valueAmount: "", rawText: "" });
-      setLocation(`/opportunities/${created.id}`);
+      onCreate(created.id);
     } catch (err) {
       toast({ title: "Create failed", description: (err as Error).message, variant: "destructive" });
     }
   };
 
   return (
+    <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader><DialogTitle>Add Opportunity</DialogTitle></DialogHeader>
+        <div className="space-y-4 py-2">
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1">
+              <Label>Title *</Label>
+              <Input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="RFP: Digital Marketing Services" />
+            </div>
+            <div className="space-y-1">
+              <Label>Issuing Agency / Client *</Label>
+              <Input value={form.agency} onChange={(e) => setForm({ ...form, agency: e.target.value })} placeholder="Ministry of Tourism" />
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1">
+              <Label>Category</Label>
+              <Input value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="Marketing" />
+            </div>
+            <div className="space-y-1">
+              <Label>Estimated Value</Label>
+              <Input value={form.valueAmount} onChange={(e) => setForm({ ...form, valueAmount: e.target.value })} placeholder="BSD $150,000" />
+            </div>
+          </div>
+          <div className="space-y-1">
+            <Label>Submission Deadline</Label>
+            <Input type="date" value={form.deadline} onChange={(e) => setForm({ ...form, deadline: e.target.value })} />
+          </div>
+          <div className="space-y-1">
+            <Label>Brief Description *</Label>
+            <Textarea rows={3} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Short summary of the opportunity…" />
+          </div>
+          <div className="space-y-1">
+            <Label>Full RFP Text (optional)</Label>
+            <Textarea rows={4} value={form.rawText} onChange={(e) => setForm({ ...form, rawText: e.target.value })} placeholder="Paste the full tender document text for richer AI analysis…" />
+          </div>
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button onClick={handleCreate} disabled={createOpp.isPending}>
+            {createOpp.isPending ? "Creating…" : "Create & Analyse"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ── Main page ────────────────────────────────────────────────────────────────
+export default function Opportunities() {
+  const { toast } = useToast();
+  const { data: opportunities, isLoading } = useOpportunities();
+  const [showCreate, setShowCreate] = useState(false);
+  const [selected, setSelected] = useState<Opportunity | null>(null);
+
+  const sorted = opportunities ?? [];
+
+  return (
     <div className="p-8 max-w-6xl mx-auto">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 gap-4">
         <div>
-          <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">Opportunities</h1>
-          <p className="text-muted-foreground">RFP and tender pipeline — from discovery to proposal.</p>
+          <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">Review Desk</h1>
+          <p className="text-muted-foreground">Incoming leads — score, enrich, and decide before bidding.</p>
         </div>
         <Button onClick={() => setShowCreate(true)}>
           <Plus className="w-4 h-4 mr-2" />
@@ -163,104 +608,58 @@ export default function Opportunities() {
         </Button>
       </div>
 
+      {/* Legend */}
+      <div className="flex items-center gap-4 text-xs text-muted-foreground mb-4">
+        <span className="flex items-center gap-1.5"><Globe className="w-3 h-3 text-blue-400" />Scraper</span>
+        <span className="flex items-center gap-1.5"><Upload className="w-3 h-3 text-violet-400" />Manual</span>
+        <span className="flex items-center gap-1.5 ml-4"><AlertTriangle className="w-3 h-3 text-amber-400" />Brief &lt; 70</span>
+        <span className="ml-auto text-xs">{sorted.length} total</span>
+      </div>
+
       {isLoading ? (
-        <div className="space-y-4">
-          {[1, 2, 3].map((i) => <Skeleton key={i} className="h-24 w-full rounded-lg" />)}
+        <div className="space-y-3">
+          {[1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-20 w-full rounded-lg" />)}
         </div>
-      ) : !opportunities?.length ? (
+      ) : !sorted.length ? (
         <div className="text-center py-16 px-4 border border-dashed rounded-lg bg-card/50">
           <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center mx-auto mb-4">
             <Target className="w-6 h-6 text-primary" />
           </div>
           <h3 className="text-lg font-medium text-foreground mb-2">No opportunities yet</h3>
           <p className="text-muted-foreground mb-6 max-w-sm mx-auto">
-            Add an RFP or tender opportunity to start the bid/no-bid workflow.
+            Add an RFP or tender to start the bid/no-bid workflow.
           </p>
           <Button variant="outline" onClick={() => setShowCreate(true)}>Add Opportunity</Button>
         </div>
       ) : (
-        <div className="grid gap-4">
-          {opportunities.map((opp) => (
-            <button
+        <div className="space-y-2">
+          {sorted.map((opp) => (
+            <OpportunityCard
               key={opp.id}
-              onClick={() => setLocation(`/opportunities/${opp.id}`)}
-              className="w-full text-left group"
-            >
-              <div className="p-6 border bg-card rounded-lg hover:border-primary/50 transition-colors flex items-center justify-between">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-3 mb-1 flex-wrap">
-                    {statusIcon(opp.status)}
-                    <h2 className="text-base font-medium text-foreground group-hover:text-primary transition-colors truncate">
-                      {opp.title}
-                    </h2>
-                    {opp.recommendationScore > 0 && fitBadge(
-                      opp.recommendationScore >= 75 ? "strong" : opp.recommendationScore >= 50 ? "moderate" : opp.recommendationScore >= 25 ? "weak" : "no_bid",
-                      opp.recommendationScore
-                    )}
-                    <Badge variant="secondary" className="text-xs font-normal shrink-0">
-                      {statusLabel(opp.status)}
-                    </Badge>
-                  </div>
-                  <p className="text-sm text-muted-foreground truncate">
-                    {opp.agency} · {opp.category}
-                    {opp.deadline ? ` · Due ${format(new Date(opp.deadline), "MMM d, yyyy")}` : ""}
-                    {opp.valueAmount ? ` · ${opp.valueAmount}` : ""}
-                  </p>
-                </div>
-                <ChevronRight className="w-5 h-5 text-muted-foreground group-hover:text-primary transition-colors flex-shrink-0 ml-4" />
-              </div>
-            </button>
+              opp={opp}
+              onReview={() => setSelected(opp)}
+            />
           ))}
         </div>
       )}
 
-      <Dialog open={showCreate} onOpenChange={setShowCreate}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>Add Opportunity</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1">
-                <Label>Title *</Label>
-                <Input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="RFP: Digital Marketing Services" />
-              </div>
-              <div className="space-y-1">
-                <Label>Issuing Agency / Client *</Label>
-                <Input value={form.agency} onChange={(e) => setForm({ ...form, agency: e.target.value })} placeholder="Ministry of Tourism" />
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-1">
-                <Label>Category</Label>
-                <Input value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="Marketing" />
-              </div>
-              <div className="space-y-1">
-                <Label>Estimated Value</Label>
-                <Input value={form.valueAmount} onChange={(e) => setForm({ ...form, valueAmount: e.target.value })} placeholder="BSD $150,000" />
-              </div>
-            </div>
-            <div className="space-y-1">
-              <Label>Submission Deadline</Label>
-              <Input type="date" value={form.deadline} onChange={(e) => setForm({ ...form, deadline: e.target.value })} />
-            </div>
-            <div className="space-y-1">
-              <Label>Brief Description *</Label>
-              <Textarea rows={3} value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} placeholder="Paste a short summary of the opportunity..." />
-            </div>
-            <div className="space-y-1">
-              <Label>Full RFP Text (optional — paste the entire RFP document)</Label>
-              <Textarea rows={5} value={form.rawText} onChange={(e) => setForm({ ...form, rawText: e.target.value })} placeholder="Paste the full tender/RFP text here for better requirement extraction..." />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setShowCreate(false)}>Cancel</Button>
-            <Button onClick={handleCreate} disabled={createOpportunity.isPending}>
-              {createOpportunity.isPending ? "Creating…" : "Create Opportunity"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <CreateDialog
+        open={showCreate}
+        onClose={() => setShowCreate(false)}
+        onCreate={(id) => {
+          const opp = opportunities?.find((o) => o.id === id);
+          if (opp) setSelected(opp);
+        }}
+      />
+
+      {selected && (
+        <EnrichDrawer
+          key={selected.id}
+          opp={selected}
+          open={Boolean(selected)}
+          onClose={() => setSelected(null)}
+        />
+      )}
     </div>
   );
 }

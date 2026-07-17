@@ -297,14 +297,25 @@ async function autoAnalyzeOpportunity(tenderId: number) {
   }
 }
 
-// ── List opportunities ─────────────────────────────────────────────────────
+// ── List opportunities (with latest bid score per tender) ───────────────────
 router.get("/opportunities", async (req, res) => {
   try {
-    const opportunities = await db
+    const tenders = await db
       .select()
       .from(tendersTable)
       .orderBy(desc(tendersTable.recommendationScore), desc(tendersTable.createdAt));
-    res.json(opportunities);
+
+    const allScores = await db
+      .select()
+      .from(bidScoresTable)
+      .orderBy(desc(bidScoresTable.createdAt));
+
+    const scoreMap = new Map<number, typeof allScores[0]>();
+    for (const s of allScores) {
+      if (!scoreMap.has(s.tenderId)) scoreMap.set(s.tenderId, s);
+    }
+
+    res.json(tenders.map((t) => ({ ...t, bidScore: scoreMap.get(t.id) ?? null })));
   } catch (err) {
     req.log.error({ err }, "Error listing opportunities");
     res.status(500).json({ error: "Failed to list opportunities" });
@@ -399,7 +410,7 @@ router.get("/opportunities/:id", async (req, res) => {
   }
 });
 
-// ── Update opportunity status ──────────────────────────────────────────────
+// ── Update opportunity (status + all enrichable fields) ────────────────────
 router.put("/opportunities/:id", async (req, res) => {
   const id = Number(req.params.id);
   if (isNaN(id)) {
@@ -407,19 +418,27 @@ router.put("/opportunities/:id", async (req, res) => {
     return;
   }
 
-  const { status, title, agency, description } = req.body as {
-    status?: string;
-    title?: string;
-    agency?: string;
-    description?: string;
+  const {
+    status, title, agency, description,
+    category, valueAmount, deadline, rawText, contactInfo, sourceUrl,
+  } = req.body as {
+    status?: string; title?: string; agency?: string; description?: string;
+    category?: string; valueAmount?: string; deadline?: string;
+    rawText?: string; contactInfo?: string; sourceUrl?: string;
   };
 
   try {
     const updateData: Record<string, unknown> = { updatedAt: new Date() };
-    if (status) updateData.status = status;
-    if (title) updateData.title = title;
-    if (agency) updateData.agency = agency;
-    if (description) updateData.description = description;
+    if (status !== undefined) updateData.status = status;
+    if (title !== undefined) updateData.title = title;
+    if (agency !== undefined) updateData.agency = agency;
+    if (description !== undefined) updateData.description = description;
+    if (category !== undefined) updateData.category = category;
+    if (valueAmount !== undefined) updateData.valueAmount = valueAmount || null;
+    if (deadline !== undefined) updateData.deadline = deadline ? new Date(deadline) : null;
+    if (rawText !== undefined) updateData.rawText = rawText || null;
+    if (contactInfo !== undefined) updateData.contactInfo = contactInfo || null;
+    if (sourceUrl !== undefined) updateData.sourceUrl = sourceUrl || null;
 
     const [updated] = await db
       .update(tendersTable)
