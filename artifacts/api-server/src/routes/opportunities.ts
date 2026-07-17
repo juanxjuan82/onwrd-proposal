@@ -728,6 +728,34 @@ router.post("/tenders/manual", (req, res, next) => {
         return;
       }
     } else if (bodyUrl) {
+      // SSRF protection: validate protocol and block private/internal IP ranges
+      let parsed: URL;
+      try {
+        parsed = new URL(bodyUrl);
+      } catch {
+        res.status(400).json({ error: "Invalid URL — must be a valid http:// or https:// address." });
+        return;
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        res.status(400).json({ error: "Only http and https URLs are supported." });
+        return;
+      }
+      const hostname = parsed.hostname.toLowerCase();
+      const blocked =
+        hostname === "localhost" ||
+        hostname === "0.0.0.0" ||
+        /^127\./.test(hostname) ||
+        /^10\./.test(hostname) ||
+        /^192\.168\./.test(hostname) ||
+        /^172\.(1[6-9]|2[0-9]|3[01])\./.test(hostname) ||
+        /^169\.254\./.test(hostname) ||
+        hostname === "::1" ||
+        hostname.endsWith(".local") ||
+        hostname.endsWith(".internal");
+      if (blocked) {
+        res.status(400).json({ error: "That URL resolves to a private or internal address and cannot be fetched." });
+        return;
+      }
       sourceUrl = bodyUrl;
       let html = "";
       try {

@@ -21,27 +21,33 @@ type Mode = "file" | "url";
 type AnalysisStatus =
   | "opportunity_found"
   | "analysing"
-  | "strategy_ready"
+  | "requirements_extracted"
+  | "screened"
   | "no_bid"
   | "analysis_failed"
   | string;
+
+interface BidScore {
+  fitScore: number;
+  fitLevel: string;
+  reasoning?: string;
+}
 
 interface ImportResult {
   id: number;
   title: string;
   status: AnalysisStatus;
-  fitScore?: number | null;
-  fitLevel?: string | null;
-  recommendationScore?: number | null;
+  bidScore?: BidScore | null;
 }
 
-const TERMINAL: AnalysisStatus[] = ["strategy_ready", "no_bid", "analysis_failed"];
+const TERMINAL: AnalysisStatus[] = ["screened", "no_bid", "analysis_failed"];
 
 function statusLabel(status: AnalysisStatus): string {
   switch (status) {
     case "opportunity_found": return "Queued for analysis…";
-    case "analysing": return "Analysing — extracting requirements and scoring…";
-    case "strategy_ready": return "Analysis complete";
+    case "analysing": return "Extracting requirements…";
+    case "requirements_extracted": return "Scoring fit and bid potential…";
+    case "screened": return "Analysis complete";
     case "no_bid": return "Analysis complete — not a fit";
     case "analysis_failed": return "Analysis failed";
     default: return status;
@@ -280,7 +286,11 @@ export default function SettingsImport() {
             <div
               className="bg-[#0000FF] h-1 rounded-full transition-all duration-700"
               style={{
-                width: result.status === "opportunity_found" ? "20%" : result.status === "analysing" ? "65%" : "100%",
+                width:
+                  result.status === "opportunity_found" ? "15%"
+                  : result.status === "analysing" ? "40%"
+                  : result.status === "requirements_extracted" ? "70%"
+                  : "100%",
               }}
             />
           </div>
@@ -304,16 +314,14 @@ export default function SettingsImport() {
             </div>
           </div>
 
-          {(result.fitLevel || result.fitScore != null) && (
+          {result.bidScore && (
             <div className="flex items-center gap-3 pt-1">
-              {result.fitLevel && (
-                <Badge className={`text-xs font-semibold uppercase tracking-wide px-2.5 py-0.5 ${fitBadgeColor(result.fitLevel)}`}>
-                  {result.fitLevel === "no_bid" ? "No Bid" : result.fitLevel}
-                </Badge>
-              )}
-              {result.fitScore != null && result.fitLevel !== "no_bid" && (
+              <Badge className={`text-xs font-semibold uppercase tracking-wide px-2.5 py-0.5 ${fitBadgeColor(result.bidScore.fitLevel)}`}>
+                {result.bidScore.fitLevel === "no_bid" ? "No Bid" : result.bidScore.fitLevel}
+              </Badge>
+              {result.bidScore.fitLevel !== "no_bid" && (
                 <span className="text-[#888] text-sm">
-                  Fit score: <span className="text-white font-semibold">{result.fitScore}</span>
+                  Fit score: <span className="text-white font-semibold">{result.bidScore.fitScore}</span>
                   <span className="text-[#555]">/100</span>
                 </span>
               )}
