@@ -1,0 +1,82 @@
+Refactor Google Docs export into a single, intuitive, team-friendly workflow using a configured Google Drive or Shared Drive destination.
+
+Before changing anything, inspect all existing Google Docs creation, export, automatic intake export, sharing, and proposal-link behavior. Consolidate these paths rather than adding another export implementation.
+
+Objectives:
+
+1. Configure the destination once
+
+Under Settings → Google Workspace, allow an authorized user to:
+
+* Connect or reconnect their Google account
+* Select a default Google Drive or Shared Drive folder
+* See the selected drive and folder name
+* Change or disconnect the destination
+* Verify that the connected account can create and edit files there
+
+Use the Google Drive Picker if it is already supported or can be added cleanly. Store the folder ID and, for Shared Drives, the drive ID.
+
+The integration must support Shared Drives, including the appropriate `supportsAllDrives` behavior and creation of files using the selected folder as the parent.
+
+2. Use one canonical Google Doc per proposal
+
+* The first Export to Google Docs action creates the document directly inside the configured destination.
+* Store the Google document ID, URL, destination folder, export timestamp, and sync status on the proposal.
+* Later exports must update the same Google Doc rather than creating duplicates.
+* Add concurrency and idempotency protection so double-clicking Export cannot create multiple documents.
+* Existing proposals with a valid Google Doc URL should be migrated or handled without breaking their links.
+
+3. Make the proposal page the only normal export entry point
+
+* Do not automatically create a Google Doc when an opportunity is approved, a proposal is created, or a public intake is submitted.
+* Those paths should create the in-app proposal and direct the user to its proposal workspace.
+* Export should happen through an explicit action on the proposal page.
+* Remove or consolidate any other export entry points that create competing documents.
+
+4. Improve the export UI
+
+Before first export, show:
+
+* Export to Google Docs
+* The configured destination
+* A link to change the destination in Settings
+
+After first export, show:
+
+* Open Google Doc
+* Sync Latest Changes
+* Last synced date and time
+* A “Changes not yet exported” indicator when the in-app proposal has changed since the last successful sync
+
+Use clear loading, success, permission-error, disconnected-account, and retry states.
+
+5. Use inherited team permissions
+
+* When exporting to a Shared Drive or shared folder, allow the document to inherit that location’s permissions.
+* Remove the current default behavior that shares every document with “anyone with the link.”
+* Do not silently make exported proposals public.
+* External/client sharing should be a separate, explicit action with a clear viewer/commenter choice.
+* If external sharing is restricted by the Workspace administrator, show an understandable error without affecting the document itself.
+
+6. Preserve document quality and avoid AI usage
+
+* Preserve the existing proposal document structure and formatting.
+* Google export and synchronization must use the existing proposal data and must not invoke an AI model.
+* Exporting should not consume AI tokens.
+* Keep AI generation separate from document export.
+
+7. Verification
+
+Add or update tests covering:
+
+* Creating the first document in the configured folder
+* Shared Drive support
+* Updating the existing document on subsequent syncs
+* Preventing duplicate documents from concurrent clicks
+* Inherited permissions without public link sharing
+* Missing destination and insufficient-permission states
+* Dirty/unsynced state after proposal edits
+* Public intake and proposal creation no longer automatically creating documents
+* Backward compatibility for existing Google Doc links
+
+Run the relevant test suite and report the affected files, database or OAuth changes, required Google API scopes, and any Google Workspace administrator configuration that may be needed.
