@@ -433,6 +433,15 @@ export default function ProposalDetail() {
     enabled: !isNaN(id),
   });
 
+  const { data: driveConfig } = useQuery<{ folderId: string | null; folderName: string | null }>({
+    queryKey: ["drive-config"],
+    queryFn: async () => {
+      const r = await fetch(`${BASE}/api/settings/google-drive`);
+      if (!r.ok) return { folderId: null, folderName: null };
+      return r.json();
+    },
+  });
+
   const hasSections = sections && sections.length > 0;
 
   const form = useForm<ProposalFormValues>({
@@ -503,14 +512,18 @@ export default function ProposalDetail() {
         });
       },
       onError: (error) => {
-        const is409 = (error as { status?: number }).status === 409;
-        toast({
-          title: is409 ? "Export already in progress" : "Export failed",
-          description: is409
-            ? "Another export is already running for this proposal. Please wait and try again."
-            : error.error || "Could not export to Google Docs. Make sure your Google account is connected in Settings.",
-          variant: "destructive"
-        });
+        const status = (error as { status?: number }).status;
+        const title =
+          status === 409 ? "Export already in progress" :
+          status === 400 ? "Configuration required" :
+          status === 401 ? "Google account disconnected" :
+          "Export failed";
+        const description =
+          status === 409 ? "Another export is already running for this proposal. Wait and try again." :
+          status === 400 ? (error.error || "No Google Drive folder configured. Set a destination in Settings → Google Docs.") :
+          status === 401 ? "Your Google account is not connected. Reconnect it in Settings → Google Docs." :
+          error.error || "Could not export to Google Docs. Make sure your Google account is connected in Settings.";
+        toast({ title, description, variant: "destructive" });
       }
     });
   };
@@ -778,7 +791,35 @@ export default function ProposalDetail() {
 
           {activeTab === "content" && (
             <div className="pt-4 space-y-3">
-              {/* Sync status panel — shown after the proposal has been exported */}
+              {/* ── Pre-export destination panel (before first export) ────────── */}
+              {!proposal.googleFileId && (
+                <div className="flex flex-wrap items-center gap-3 text-sm bg-card border rounded-lg px-4 py-3">
+                  {driveConfig?.folderId ? (
+                    <>
+                      <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" />
+                      <span className="text-muted-foreground">
+                        Destination:{" "}
+                        <span className="text-foreground font-medium">
+                          {driveConfig.folderName ?? driveConfig.folderId}
+                        </span>
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <AlertTriangle className="w-4 h-4 text-orange-400 shrink-0" />
+                      <span className="text-orange-400 font-medium">No destination folder configured</span>
+                    </>
+                  )}
+                  <a
+                    href="/settings-google"
+                    className="ml-auto text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                  >
+                    Change in Settings
+                  </a>
+                </div>
+              )}
+
+              {/* ── Post-export sync status panel ────────────────────────────── */}
               {proposal.googleFileId && (
                 <div className="flex flex-wrap items-center gap-3 text-sm bg-card border rounded-lg px-4 py-3">
                   {proposal.syncStatus === "error" && (
@@ -812,6 +853,7 @@ export default function ProposalDetail() {
                   )}
                 </div>
               )}
+
               <div className="flex justify-end gap-4">
                 <Button
                   type="submit"
@@ -840,10 +882,11 @@ export default function ProposalDetail() {
                 ) : (
                   <Button
                     type="button"
-                    disabled={updateProposal.isPending || exportToDocs.isPending}
+                    disabled={updateProposal.isPending || exportToDocs.isPending || !driveConfig?.folderId}
                     onClick={handleExport}
-                    className="bg-[#0000FF] hover:bg-[#0000FF] text-white border border-[#0000FF]"
+                    className="bg-[#0000FF] hover:bg-[#0000FF] text-white border border-[#0000FF] disabled:opacity-50"
                     data-testid="button-export"
+                    title={!driveConfig?.folderId ? "Configure a destination folder in Settings → Google Docs first" : undefined}
                   >
                     {exportToDocs.isPending ? (
                       <Loader2 className="w-4 h-4 mr-2 animate-spin" />

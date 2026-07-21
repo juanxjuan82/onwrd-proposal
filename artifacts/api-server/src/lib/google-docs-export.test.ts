@@ -112,10 +112,15 @@ describe("export auth guard", () => {
 // ─── Concurrency guard (409) ──────────────────────────────────────────────────
 //
 // The endpoint returns 409 when syncStatus is already 'syncing'.
-// After the atomic UPDATE ... WHERE sync_status != 'syncing', if 0 rows
-// were affected the endpoint ALSO returns 409.
+// After the atomic UPDATE ... WHERE sync_status IS DISTINCT FROM 'syncing',
+// if 0 rows were affected the endpoint ALSO returns 409.
 //
-// We model both checks as pure predicates matching the route implementation.
+// CRITICAL NULL semantics:
+//   Postgres: NULL != 'syncing'           → NULL  (the row is NOT matched)
+//   Postgres: NULL IS DISTINCT FROM 'syncing' → TRUE (the row IS matched)
+//
+// A naive ne() predicate blocks every first-time export because proposals start
+// with syncStatus = NULL. The route uses IS DISTINCT FROM to handle this.
 
 function isSyncing(proposal: { syncStatus?: string | null }): boolean {
   return proposal.syncStatus === "syncing";
@@ -123,6 +128,14 @@ function isSyncing(proposal: { syncStatus?: string | null }): boolean {
 
 function atomicLockSucceeded(rowsAffected: number): boolean {
   return rowsAffected > 0;
+}
+
+/**
+ * Models IS DISTINCT FROM 'syncing'.
+ * JavaScript null/undefined are both !== 'syncing', matching Postgres behaviour.
+ */
+function isDistinctFromSyncing(value: string | null | undefined): boolean {
+  return value !== "syncing";
 }
 
 describe("concurrency guard / 409 behaviour", () => {
@@ -148,6 +161,27 @@ describe("concurrency guard / 409 behaviour", () => {
 
   it("proceeds when atomic lock UPDATE affects 1 row", () => {
     assert.equal(atomicLockSucceeded(1), true);
+  });
+
+  // NULL-safe IS DISTINCT FROM predicate — the key correctness property
+  it("IS DISTINCT FROM: NULL is treated as distinct from 'syncing' (first export must succeed)", () => {
+    assert.equal(isDistinctFromSyncing(null), true);
+  });
+
+  it("IS DISTINCT FROM: undefined is treated as distinct from 'syncing'", () => {
+    assert.equal(isDistinctFromSyncing(undefined), true);
+  });
+
+  it("IS DISTINCT FROM: 'synced' is distinct from 'syncing'", () => {
+    assert.equal(isDistinctFromSyncing("synced"), true);
+  });
+
+  it("IS DISTINCT FROM: 'error' is distinct from 'syncing'", () => {
+    assert.equal(isDistinctFromSyncing("error"), true);
+  });
+
+  it("IS DISTINCT FROM: 'syncing' is NOT distinct from itself — lock is held", () => {
+    assert.equal(isDistinctFromSyncing("syncing"), false);
   });
 });
 
@@ -196,6 +230,43 @@ describe("backward compat: extract fileId from legacy googleDocUrl", () => {
     const proposal = { googleFileId: null, googleDocUrl: "https://docs.google.com/document/d/LEGACY_ID/edit" };
     const effectiveFileId = proposal.googleFileId ?? extractFileIdFromUrl(proposal.googleDocUrl);
     assert.equal(effectiveFileId, "LEGACY_ID");
+  });
+});
+
+// ─── Folder config enforcement ───────────────────────────────────────────────
+//
+// First-time exports (no effectiveFileId) require a configured Drive folder.
+// The endpoint returns 400 and releases the sync lock if no folder is set.
+// Sync operations (effectiveFileId is set) do NOT require folder config.
+
+function firstExportRequiresFolderConfig(
+  effectiveFileId: string | null | undefined,
+  driveConfig: { folderId?: string | null } | undefined,
+): boolean {
+  if (effectiveFileId) return false; // sync path — folder not required
+  return !driveConfig?.folderId;     // create path — must have folder
+}
+
+describe("folder config enforcement for first-time exports", () => {
+  it("returns true (error needed) when no effectiveFileId and no folder configured", () => {
+    assert.equal(firstExportRequiresFolderConfig(null, undefined), true);
+  });
+
+  it("returns true when driveConfig has null folderId", () => {
+    assert.equal(firstExportRequiresFolderConfig(null, { folderId: null }), true);
+  });
+
+  it("returns false when effectiveFileId is set — sync path skips folder check", () => {
+    assert.equal(firstExportRequiresFolderConfig("EXISTING_ID", undefined), false);
+  });
+
+  it("returns false when folder IS configured — create path proceeds", () => {
+    assert.equal(firstExportRequiresFolderConfig(null, { folderId: "folder123" }), false);
+  });
+
+  it("sync of legacy proposal (effectiveFileId from URL) skips folder check", () => {
+    const effectiveFileId = "LEGACY_ID"; // extracted from googleDocUrl
+    assert.equal(firstExportRequiresFolderConfig(effectiveFileId, undefined), false);
   });
 });
 

@@ -6,7 +6,7 @@ import {
   proposalsTable,
   googleExportsTable,
 } from "@workspace/db";
-import { eq, and, ne } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
 import { createGoogleDoc, appendContentWithLogo, clearAndReplaceContent, moveDocToFolder } from "../lib/google-docs.js";
 import { googleDriveConfigTable } from "@workspace/db";
@@ -304,13 +304,16 @@ router.post("/proposals/:id/export", async (req, res) => {
     return;
   }
 
-  // ── 3. Atomic lock: UPDATE ... WHERE sync_status != 'syncing' ─────────────
-  //    If another request slipped in between steps 1 and 3, the WHERE clause
-  //    will match 0 rows and we return 409 without proceeding.
+  // ── 3. Atomic lock: UPDATE ... WHERE sync_status IS DISTINCT FROM 'syncing' ─
+  //    Using IS DISTINCT FROM is critical: in Postgres, NULL != 'syncing' is
+  //    NULL (not TRUE), so a plain ne() predicate would skip NULL rows and
+  //    return 0 rows on the first-ever export of any proposal.
+  //    IS DISTINCT FROM treats NULL as a distinct value from 'syncing', so
+  //    the WHERE clause matches for both NULL and any non-'syncing' value.
   const [locked] = await db
     .update(proposalsTable)
     .set({ syncStatus: "syncing" })
-    .where(and(eq(proposalsTable.id, proposalId), ne(proposalsTable.syncStatus, "syncing")))
+    .where(and(eq(proposalsTable.id, proposalId), sql`sync_status IS DISTINCT FROM 'syncing'`))
     .returning({ id: proposalsTable.id });
 
   if (!locked) {
@@ -364,20 +367,32 @@ router.post("/proposals/:id/export", async (req, res) => {
       await clearAndReplaceContent(documentId, contentToExport, accessToken);
       isUpdate = true;
     } else {
-      // ── Create: new doc in the configured folder ────────────────────────
+      // ── Create: new doc — requires a configured destination folder ───────
+      if (!driveConfig?.folderId) {
+        // Release the lock before returning so retries are not blocked
+        await db
+          .update(proposalsTable)
+          .set({ syncStatus: null })
+          .where(eq(proposalsTable.id, proposalId))
+          .catch(() => {});
+        res.status(400).json({
+          error:
+            "No Google Drive folder configured. Set a destination folder in Settings → Google Docs before exporting.",
+        });
+        return;
+      }
+
       const docTitle = `ONWRD Proposal — ${proposal.clientName}`;
       const doc = await createGoogleDoc(docTitle, accessToken);
       documentId = doc.documentId;
       docUrl = `https://docs.google.com/document/d/${documentId}/edit`;
 
-      if (driveConfig?.folderId) {
-        await moveDocToFolder(
-          documentId,
-          driveConfig.folderId,
-          driveConfig.driveId,
-          accessToken,
-        );
-      }
+      await moveDocToFolder(
+        documentId,
+        driveConfig.folderId,
+        driveConfig.driveId,
+        accessToken,
+      );
 
       await appendContentWithLogo(documentId, contentToExport, accessToken);
       isUpdate = false;
