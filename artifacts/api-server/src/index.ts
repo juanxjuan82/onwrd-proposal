@@ -1,6 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { startScheduler } from "./crawlers/scheduler.js";
+import { recoverStaleAnalysisJobs } from "./lib/analysis-recovery.js";
 
 const rawPort = process.env["PORT"];
 
@@ -23,5 +24,6 @@ app.listen(port, (err) => {
   }
 
   logger.info({ port }, "Server listening");
+  void recoverStaleAnalysisJobs();
   void startScheduler();
 });

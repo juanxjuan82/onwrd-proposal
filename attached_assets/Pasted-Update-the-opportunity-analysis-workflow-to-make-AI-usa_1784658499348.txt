@@ -1,0 +1,128 @@
+Update the opportunity analysis workflow to make AI usage bounded, transparent, cancellable, and recoverable.
+
+## Backend requirements
+
+1. Keep requirements extraction as a single AI request, not an iterative agent loop.
+
+2. Limit the tender text submitted for extraction to approximately 12,000 tokens. Preserve the beginning and end of the document so submission instructions and appendices are not automatically lost.
+
+3. Reduce requirement-extraction output from 4,000 to 1,500 tokens.
+
+4. Instruct the model to return:
+
+   - No more than 40 distinct requirements.
+   - No duplicate requirements.
+   - No requirement longer than 250 characters.
+   - Valid structured JSON matching the existing requirement categories.
+
+5. Add a 90-second timeout to every OpenAI request.
+
+6. Retry temporary network or rate-limit errors no more than once. Never retry `insufficient_quota`, authentication failures, cancellations, or invalid requests.
+
+7. Prevent more than one active analysis run for the same opportunity.
+
+8. Give every analysis run a unique `analysisRunId` and persist:
+
+   - Current step.
+   - Overall status.
+   - Start and completion timestamps.
+   - Cancellation timestamp.
+   - Failed step.
+   - Provider error code and safe error message.
+   - AI provider and model.
+   - Input, output, and total tokens.
+   - Completed steps.
+
+9. Use explicit analysis statuses:
+
+   - `requirements_extracting`
+   - `bid_scoring`
+   - `strategy_generating`
+   - `screened`
+   - `no_bid`
+   - `analysis_failed`
+   - `analysis_cancelled`
+
+10. If an analysis remains active for more than five minutes, mark it as `analysis_failed`. Recover stale jobs abandoned by a restart, crash, or deployment.
+
+11. Preserve existing requirements, scores, and strategies if a re-analysis or re-extraction fails.
+
+## Cancellation and resumption
+
+12. Create:
+
+   `POST /api/opportunities/:id/cancel-analysis`
+
+   Require the active `analysisRunId` to avoid cancelling the wrong run.
+
+13. Maintain a server-side `AbortController` for each active analysis run.
+
+14. Cancelling must:
+
+   - Abort the currently active OpenAI HTTP request.
+   - Prevent subsequent analysis steps from starting.
+   - Set the status to `analysis_cancelled`.
+   - Record `cancelledAt` and the interrupted step.
+   - Preserve all successfully completed outputs.
+   - Return the current completed status if the run finished before cancellation was processed.
+
+15. Add a **Resume analysis** action that continues from the first incomplete step rather than repeating completed AI calls.
+
+16. Cancellation cannot reverse tokens already processed, but it must stop remaining generation and prevent later pipeline steps.
+
+## Frontend requirements
+
+17. Replace the generic analysis spinner with the actual current step:
+
+   - Extracting requirements
+   - Scoring bid fit
+   - Generating strategy
+
+18. Display:
+
+   - Elapsed time.
+   - Completed steps.
+   - Current step.
+   - A concise failure or cancellation message.
+   - Token usage after each completed step, where available.
+
+19. Show a **Cancel analysis** button while any AI step is active.
+
+20. After clicking Cancel:
+
+   - Immediately change the button to **Cancelling…**
+   - Disable repeated clicks.
+   - Confirm when cancellation succeeds.
+   - Stop polling once the run is confirmed cancelled.
+
+21. Stop indefinite polling after five minutes and show the analysis as failed with appropriate **Retry** or **Resume analysis** actions.
+
+22. Prevent duplicate extraction or analysis requests from repeated clicks.
+
+23. Make automatic analysis optional for manually uploaded opportunities. Support this safer workflow:
+
+   **Upload → review extracted text → Analyze → cancel/resume if necessary**
+
+## Verification
+
+Add automated tests covering:
+
+- Successful requirements extraction.
+- Maximum input and output limits.
+- Maximum 40 requirements.
+- Oversized documents.
+- 90-second timeout.
+- `insufficient_quota`.
+- Temporary rate-limit retry.
+- Duplicate analysis attempts.
+- Cancellation during each pipeline step.
+- Simultaneous cancellation and completion.
+- Duplicate cancellation.
+- Preservation of completed outputs.
+- Resume from the first incomplete step.
+- Server restart or deployment during analysis.
+- Stale-job recovery.
+- Failed re-extraction preserving existing requirements.
+- Frontend polling termination.
+
+Do not display or log API keys, complete tender documents, or sensitive document contents. Preserve the existing successful opportunity-analysis and proposal-generation behavior outside this scope.

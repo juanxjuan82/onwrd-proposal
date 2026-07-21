@@ -23,6 +23,14 @@ export const tendersTable = pgTable("tenders", {
   }),
   googleDocId: text("google_doc_id"),
   googleDocUrl: text("google_doc_url"),
+  // ── Analysis telemetry ────────────────────────────────────────────────────
+  analysisStartedAt: timestamp("analysis_started_at"),
+  analysisCompletedAt: timestamp("analysis_completed_at"),
+  failedStep: text("failed_step"),
+  failedErrorCode: text("failed_error_code"),
+  aiInputTokens: integer("ai_input_tokens"),
+  aiOutputTokens: integer("ai_output_tokens"),
+  aiModelUsed: text("ai_model_used"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });

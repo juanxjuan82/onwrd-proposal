@@ -15,62 +15,148 @@ import {
 import { eq, desc, and } from "drizzle-orm";
 import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
 import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
+import {
+  truncateToTokenBudget,
+  classifyError,
+  callWithSingleRetry,
+  ANALYSIS_ACTIVE_STATUSES,
+  EXTRACTION_MAX_TOKENS,
+  MAX_REQUIREMENTS,
+  MAX_REQ_CHARS,
+  ANALYSIS_TIMEOUT_MS,
+  type AnalysisActiveStatus,
+} from "../lib/analysis-utils.js";
 
 const router = Router();
 
 const SECTION_DEFINITIONS = [
-  { key: "executive_summary", title: "Executive Summary", order: 0 },
-  { key: "client_context", title: "Client Context and Problem Definition", order: 1 },
-  { key: "goals_kpis", title: "Goals, KPIs and Success Criteria", order: 2 },
-  { key: "strategic_approach", title: "Recommended Strategic Approach", order: 3 },
-  { key: "scope_of_work", title: "Detailed Scope of Work", order: 4 },
-  { key: "deliverables", title: "Deliverables Register", order: 5 },
-  { key: "timeline", title: "Timeline, Milestones and Dependencies", order: 6 },
-  { key: "team_structure", title: "Team Structure and Ways of Working", order: 7 },
-  { key: "investment", title: "Investment and Commercial Terms", order: 8 },
-  { key: "assumptions_risks", title: "Assumptions, Exclusions and Risks", order: 9 },
-  { key: "governance", title: "Governance, Approval and Change Control", order: 10 },
-  { key: "why_onwrd", title: "Why ONWRD", order: 11 },
-  { key: "case_studies", title: "Case Studies and Credentials", order: 12 },
-  { key: "legal_terms", title: "Legal and Operational Terms", order: 13 },
-  { key: "next_steps", title: "Next Steps and Acceptance", order: 14 },
+  { key: "executive_summary",   title: "Executive Summary",                         order: 0 },
+  { key: "client_context",      title: "Client Context and Problem Definition",      order: 1 },
+  { key: "goals_kpis",          title: "Goals, KPIs and Success Criteria",           order: 2 },
+  { key: "strategic_approach",  title: "Recommended Strategic Approach",             order: 3 },
+  { key: "scope_of_work",       title: "Detailed Scope of Work",                     order: 4 },
+  { key: "deliverables",        title: "Deliverables Register",                      order: 5 },
+  { key: "timeline",            title: "Timeline, Milestones and Dependencies",      order: 6 },
+  { key: "team_structure",      title: "Team Structure and Ways of Working",         order: 7 },
+  { key: "investment",          title: "Investment and Commercial Terms",            order: 8 },
+  { key: "assumptions_risks",   title: "Assumptions, Exclusions and Risks",          order: 9 },
+  { key: "governance",          title: "Governance, Approval and Change Control",    order: 10 },
+  { key: "why_onwrd",           title: "Why ONWRD",                                 order: 11 },
+  { key: "case_studies",        title: "Case Studies and Credentials",               order: 12 },
+  { key: "legal_terms",         title: "Legal and Operational Terms",                order: 13 },
+  { key: "next_steps",          title: "Next Steps and Acceptance",                  order: 14 },
 ];
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// ── Helper: check whether a tender is already being analysed ─────────────────
+function isActiveStatus(status: string): status is AnalysisActiveStatus {
+  return (ANALYSIS_ACTIVE_STATUSES as readonly string[]).includes(status);
+}
 
+// ── Step 1: Extract requirements ─────────────────────────────────────────────
 async function runExtractRequirements(tenderId: number) {
-  const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, tenderId));
+  const [tender] = await db
+    .select()
+    .from(tendersTable)
+    .where(eq(tendersTable.id, tenderId));
   if (!tender) throw new Error("Tender not found");
 
-  const sourceText = tender.rawText || tender.description;
+  // Snapshot existing requirements so they can be restored if extraction fails
+  const existing = await db
+    .select()
+    .from(tenderRequirementsTable)
+    .where(eq(tenderRequirementsTable.tenderId, tenderId));
 
-  const completion = await openai.chat.completions.create({
-    model: AI_MODEL,
-    max_completion_tokens: 4000,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You extract structured requirements from tender/RFP documents. Return JSON with a "requirements" array. Each requirement has:
-- requirementText: the specific requirement (string)
-- category: one of "technical", "budget", "timeline", "personnel", "certifications", "format", "deliverable", "compliance", "general"
-- isMandatory: true if the requirement is mandatory/essential, false if optional/preferred
+  // Truncate source text to ≈ 12 000 tokens, preserving head + tail
+  const rawSource = tender.rawText || tender.description;
+  const sourceText = truncateToTokenBudget(rawSource);
 
-Extract all distinct, actionable requirements. Be thorough — include submission format requirements, eligibility criteria, deliverable specs, timeline constraints, and any compliance items.`,
-      },
-      {
-        role: "user",
-        content: `Extract all requirements from this tender:\n\nTitle: ${tender.title}\nAgency: ${tender.agency}\n\n${sourceText}`,
-      },
-    ],
-  });
+  // 90-second hard abort
+  const controller = new AbortController();
+  const abortTimer = setTimeout(
+    () => controller.abort(new Error("AI request timed out after 90s")),
+    ANALYSIS_TIMEOUT_MS,
+  );
 
+  let completion: Awaited<ReturnType<typeof openai.chat.completions.create>>;
+  try {
+    completion = await callWithSingleRetry(() =>
+      openai.chat.completions.create(
+        {
+          model: AI_MODEL,
+          max_completion_tokens: EXTRACTION_MAX_TOKENS,
+          response_format: { type: "json_object" },
+          messages: [
+            {
+              role: "system",
+              content:
+                `You extract structured requirements from tender/RFP documents.\n\n` +
+                `Return ONLY a JSON object: { "requirements": [...] }\n` +
+                `Each item: { "requirementText": string, "category": string, "isMandatory": boolean }\n\n` +
+                `Rules:\n` +
+                `- Return at most ${MAX_REQUIREMENTS} distinct, actionable requirements.\n` +
+                `- Each requirementText MUST be ≤ ${MAX_REQ_CHARS} characters. Summarise if longer.\n` +
+                `- category: one of technical | budget | timeline | personnel | certifications | format | deliverable | compliance | general\n` +
+                `- isMandatory: true for must/shall/required; false for preferred/desired/optional.\n` +
+                `- Include: submission format, eligibility criteria, deliverable specs, timeline constraints, compliance items.\n` +
+                `- Skip vague or duplicate statements.\n` +
+                `- No commentary or extra keys — only the JSON object.`,
+            },
+            {
+              role: "user",
+              content: `Extract requirements from this tender.\n\nTitle: ${tender.title}\nAgency: ${tender.agency}\n\n${sourceText}`,
+            },
+          ],
+        },
+        { signal: controller.signal },
+      ),
+    );
+  } catch (err) {
+    clearTimeout(abortTimer);
+    if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) {
+      throw new Error("AI request timed out after 90s");
+    }
+    throw err;
+  }
+  clearTimeout(abortTimer);
+
+  // Record token usage (accumulate across steps within one analysis)
+  const usage = completion.usage;
+  await db
+    .update(tendersTable)
+    .set({
+      aiModelUsed: completion.model,
+      aiInputTokens:  (tender.aiInputTokens  ?? 0) + (usage?.prompt_tokens     ?? 0),
+      aiOutputTokens: (tender.aiOutputTokens ?? 0) + (usage?.completion_tokens ?? 0),
+      updatedAt: new Date(),
+    })
+    .where(eq(tendersTable.id, tenderId));
+
+  // Parse and validate response
   const raw = completion.choices[0]?.message?.content ?? "{}";
-  const data = JSON.parse(raw);
-  const reqs: { requirementText: string; category: string; isMandatory: boolean }[] = data.requirements ?? [];
+  type RawReq = { requirementText?: unknown; category?: unknown; isMandatory?: unknown };
+  let data: { requirements?: RawReq[] };
+  try {
+    data = JSON.parse(raw) as typeof data;
+  } catch {
+    console.warn(`[extract] JSON parse failed for tender ${tenderId} — preserving ${existing.length} existing requirements`);
+    return existing;
+  }
 
-  if (reqs.length === 0) return [];
+  const reqs = (data.requirements ?? [])
+    .slice(0, MAX_REQUIREMENTS)
+    .map((r) => ({
+      requirementText: String(r.requirementText ?? "").slice(0, MAX_REQ_CHARS).trim(),
+      category:        String(r.category        ?? "general"),
+      isMandatory:     Boolean(r.isMandatory    ?? true),
+    }))
+    .filter((r) => r.requirementText.length > 0);
 
+  if (reqs.length === 0) {
+    console.warn(`[extract] Zero requirements returned for tender ${tenderId} — preserving ${existing.length} existing`);
+    return existing;
+  }
+
+  // Replace requirements atomically
   await db.delete(tenderRequirementsTable).where(eq(tenderRequirementsTable.tenderId, tenderId));
 
   const inserted = await db
@@ -79,22 +165,23 @@ Extract all distinct, actionable requirements. Be thorough — include submissio
       reqs.map((r, i) => ({
         tenderId,
         requirementText: r.requirementText,
-        category: r.category ?? "general",
-        isMandatory: r.isMandatory ?? true,
-        isAnswered: false,
-        orderIndex: i,
-      }))
+        category:        r.category,
+        isMandatory:     r.isMandatory,
+        isAnswered:      false,
+        orderIndex:      i,
+      })),
     )
     .returning();
 
   await db
     .update(tendersTable)
-    .set({ status: "requirements_extracted", requirementsExtractedAt: new Date(), updatedAt: new Date() })
+    .set({ requirementsExtractedAt: new Date(), updatedAt: new Date() })
     .where(eq(tendersTable.id, tenderId));
 
   return inserted;
 }
 
+// ── Step 2: Bid scoring ──────────────────────────────────────────────────────
 async function runBidScoring(tenderId: number) {
   const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, tenderId));
   if (!tender) throw new Error("Tender not found");
@@ -105,9 +192,12 @@ async function runBidScoring(tenderId: number) {
     .where(eq(tenderRequirementsTable.tenderId, tenderId))
     .orderBy(tenderRequirementsTable.orderIndex);
 
-  const requirementsSummary = requirements.length > 0
-    ? requirements.map((r, i) => `${i + 1}. [${r.category}] ${r.requirementText}${r.isMandatory ? " (MANDATORY)" : ""}`).join("\n")
-    : "No requirements extracted yet.";
+  const requirementsSummary =
+    requirements.length > 0
+      ? requirements
+          .map((r, i) => `${i + 1}. [${r.category}] ${r.requirementText}${r.isMandatory ? " (MANDATORY)" : ""}`)
+          .join("\n")
+      : "No requirements extracted yet.";
 
   const completion = await openai.chat.completions.create({
     model: AI_MODEL,
@@ -155,17 +245,26 @@ ${requirementsSummary}`,
   });
 
   const raw = completion.choices[0]?.message?.content ?? "{}";
-  const data = JSON.parse(raw);
+  const data = JSON.parse(raw) as {
+    fitScore?: number;
+    fitLevel?: string;
+    reasoning?: string;
+    flags?: string[];
+    completenessScore?: number;
+    missingFields?: string[];
+  };
 
   const [bidScore] = await db
     .insert(bidScoresTable)
     .values({
       tenderId,
-      fitScore: data.fitScore ?? 0,
-      fitLevel: data.fitLevel ?? "weak",
-      reasoning: data.reasoning ?? "",
-      flags: JSON.stringify(data.flags ?? []),
-      completenessScore: typeof data.completenessScore === "number" ? Math.min(100, Math.max(0, Math.round(data.completenessScore))) : 0,
+      fitScore:          data.fitScore ?? 0,
+      fitLevel:          data.fitLevel ?? "weak",
+      reasoning:         data.reasoning ?? "",
+      flags:             JSON.stringify(data.flags ?? []),
+      completenessScore: typeof data.completenessScore === "number"
+        ? Math.min(100, Math.max(0, Math.round(data.completenessScore)))
+        : 0,
       missingFields: JSON.stringify(Array.isArray(data.missingFields) ? data.missingFields : []),
     })
     .returning();
@@ -179,6 +278,7 @@ ${requirementsSummary}`,
   return bidScore;
 }
 
+// ── Step 3: Generate strategy brief ─────────────────────────────────────────
 async function runGenerateStrategy(tenderId: number) {
   const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, tenderId));
   if (!tender) throw new Error("Tender not found");
@@ -196,9 +296,12 @@ async function runGenerateStrategy(tenderId: number) {
     .orderBy(desc(bidScoresTable.createdAt))
     .limit(1);
 
-  const requirementsSummary = requirements.length > 0
-    ? requirements.map((r, i) => `${i + 1}. [${r.category}${r.isMandatory ? ", MANDATORY" : ""}] ${r.requirementText}`).join("\n")
-    : "No requirements extracted.";
+  const requirementsSummary =
+    requirements.length > 0
+      ? requirements
+          .map((r, i) => `${i + 1}. [${r.category}${r.isMandatory ? ", MANDATORY" : ""}] ${r.requirementText}`)
+          .join("\n")
+      : "No requirements extracted.";
 
   const completion = await openai.chat.completions.create({
     model: AI_MODEL,
@@ -240,7 +343,13 @@ ${bidScore ? `Bid Score: ${bidScore.fitScore}/100 (${bidScore.fitLevel})\nScorin
   });
 
   const raw = completion.choices[0]?.message?.content ?? "{}";
-  const data = JSON.parse(raw);
+  const data = JSON.parse(raw) as {
+    positioning?: string;
+    winThemes?: string[];
+    recommendedCaseStudies?: string[];
+    risks?: string[];
+    messagingGuidance?: string;
+  };
 
   await db.delete(proposalStrategiesTable).where(eq(proposalStrategiesTable.tenderId, tenderId));
 
@@ -248,53 +357,102 @@ ${bidScore ? `Bid Score: ${bidScore.fitScore}/100 (${bidScore.fitLevel})\nScorin
     .insert(proposalStrategiesTable)
     .values({
       tenderId,
-      positioning: data.positioning ?? "",
-      winThemes: JSON.stringify(data.winThemes ?? []),
+      positioning:            data.positioning            ?? "",
+      winThemes:              JSON.stringify(data.winThemes              ?? []),
       recommendedCaseStudies: JSON.stringify(data.recommendedCaseStudies ?? []),
-      risks: JSON.stringify(data.risks ?? []),
-      messagingGuidance: data.messagingGuidance ?? "",
+      risks:                  JSON.stringify(data.risks                  ?? []),
+      messagingGuidance:      data.messagingGuidance      ?? "",
     })
     .returning();
 
   return strategy;
 }
 
-async function autoAnalyzeOpportunity(tenderId: number) {
+// ── Full analysis pipeline ───────────────────────────────────────────────────
+async function autoAnalyzeOpportunity(tenderId: number): Promise<void> {
+  // Guard: skip if another analysis is already running for this tender
+  const [current] = await db
+    .select({ status: tendersTable.status })
+    .from(tendersTable)
+    .where(eq(tendersTable.id, tenderId));
+  if (!current) return;
+  if (isActiveStatus(current.status)) {
+    console.warn(`[auto-pipeline] Tender ${tenderId} already in status "${current.status}" — skipping`);
+    return;
+  }
+
   const fail = async (step: string, err: unknown) => {
-    console.error(`[auto-pipeline] ${step} failed for tender ${tenderId}:`, err);
+    const { code, message } = classifyError(err);
+    console.error(`[auto-pipeline] step="${step}" tender=${tenderId} code=${code}:`, message);
     await db
       .update(tendersTable)
-      .set({ status: "analysis_failed", updatedAt: new Date() })
+      .set({
+        status:               "analysis_failed",
+        failedStep:           step,
+        failedErrorCode:      code,
+        analysisCompletedAt:  new Date(),
+        updatedAt:            new Date(),
+      })
       .where(eq(tendersTable.id, tenderId));
   };
 
+  // ① Mark started
   await db
     .update(tendersTable)
-    .set({ status: "analysing", updatedAt: new Date() })
+    .set({
+      status:              "requirements_extracting",
+      analysisStartedAt:   new Date(),
+      analysisCompletedAt: null,
+      failedStep:          null,
+      failedErrorCode:     null,
+      aiInputTokens:       0,
+      aiOutputTokens:      0,
+      aiModelUsed:         null,
+      updatedAt:           new Date(),
+    })
     .where(eq(tendersTable.id, tenderId));
 
+  // ② Extract requirements (single AI call, no iterative loop)
   try {
     await runExtractRequirements(tenderId);
   } catch (err) {
-    await fail("requirement extraction", err);
+    await fail("requirements_extracting", err);
     return;
   }
-  let bidScore;
+
+  // ③ Bid scoring
+  await db
+    .update(tendersTable)
+    .set({ status: "bid_scoring", updatedAt: new Date() })
+    .where(eq(tendersTable.id, tenderId));
+
+  let bidScore: Awaited<ReturnType<typeof runBidScoring>>;
   try {
     bidScore = await runBidScoring(tenderId);
   } catch (err) {
-    await fail("bid scoring", err);
+    await fail("bid_scoring", err);
     return;
   }
 
-  // Skip strategy generation for no_bid (includes individual employment roles)
-  if (bidScore.fitLevel === "no_bid") return;
+  // ④ Strategy (skipped for no_bid — includes individual employment roles)
+  if (bidScore.fitLevel !== "no_bid") {
+    await db
+      .update(tendersTable)
+      .set({ status: "strategy_generating", updatedAt: new Date() })
+      .where(eq(tendersTable.id, tenderId));
 
-  try {
-    await runGenerateStrategy(tenderId);
-  } catch (err) {
-    await fail("strategy generation", err);
+    try {
+      await runGenerateStrategy(tenderId);
+    } catch (err) {
+      await fail("strategy_generating", err);
+      return;
+    }
   }
+
+  await db
+    .update(tendersTable)
+    .set({ analysisCompletedAt: new Date(), updatedAt: new Date() })
+    .where(eq(tendersTable.id, tenderId));
 }
 
 // ── List opportunities (with latest bid score per tender) ───────────────────
@@ -310,7 +468,7 @@ router.get("/opportunities", async (req, res) => {
       .from(bidScoresTable)
       .orderBy(desc(bidScoresTable.createdAt));
 
-    const scoreMap = new Map<number, typeof allScores[0]>();
+    const scoreMap = new Map<number, (typeof allScores)[0]>();
     for (const s of allScores) {
       if (!scoreMap.has(s.tenderId)) scoreMap.set(s.tenderId, s);
     }
@@ -324,16 +482,13 @@ router.get("/opportunities", async (req, res) => {
 
 // ── Create opportunity ─────────────────────────────────────────────────────
 router.post("/opportunities", async (req, res) => {
-  const { title, agency, description, category, deadline, valueAmount, sourceUrl, contactInfo, rawText } = req.body as {
-    title: string;
-    agency: string;
-    description: string;
-    category?: string;
-    deadline?: string;
-    valueAmount?: string;
-    sourceUrl?: string;
-    contactInfo?: string;
-    rawText?: string;
+  const {
+    title, agency, description, category,
+    deadline, valueAmount, sourceUrl, contactInfo, rawText,
+  } = req.body as {
+    title: string; agency: string; description: string; category?: string;
+    deadline?: string; valueAmount?: string; sourceUrl?: string;
+    contactInfo?: string; rawText?: string;
   };
 
   if (!title || !agency || !description) {
@@ -348,19 +503,18 @@ router.post("/opportunities", async (req, res) => {
         title,
         agency,
         description,
-        category: category ?? "General",
-        deadline: deadline ? new Date(deadline) : null,
+        category:    category    ?? "General",
+        deadline:    deadline    ? new Date(deadline) : null,
         valueAmount: valueAmount ?? null,
-        sourceUrl: sourceUrl ?? null,
+        sourceUrl:   sourceUrl   ?? null,
         contactInfo: contactInfo ?? null,
-        rawText: rawText ?? null,
-        status: "opportunity_found",
+        rawText:     rawText     ?? null,
+        status:      "opportunity_found",
         recommendationScore: 0,
       })
       .returning();
 
     res.status(201).json(created);
-
     void autoAnalyzeOpportunity(created.id);
   } catch (err) {
     req.log.error({ err }, "Error creating opportunity");
@@ -371,17 +525,11 @@ router.post("/opportunities", async (req, res) => {
 // ── Get opportunity with requirements + bid score + strategy ───────────────
 router.get("/opportunities/:id", async (req, res) => {
   const id = Number(req.params.id);
-  if (isNaN(id)) {
-    res.status(400).json({ error: "Invalid id" });
-    return;
-  }
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
 
   try {
     const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, id));
-    if (!tender) {
-      res.status(404).json({ error: "Opportunity not found" });
-      return;
-    }
+    if (!tender) { res.status(404).json({ error: "Opportunity not found" }); return; }
 
     const requirements = await db
       .select()
@@ -410,13 +558,10 @@ router.get("/opportunities/:id", async (req, res) => {
   }
 });
 
-// ── Update opportunity (status + all enrichable fields) ────────────────────
+// ── Update opportunity ─────────────────────────────────────────────────────
 router.put("/opportunities/:id", async (req, res) => {
   const id = Number(req.params.id);
-  if (isNaN(id)) {
-    res.status(400).json({ error: "Invalid id" });
-    return;
-  }
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
 
   const {
     status, title, agency, description,
@@ -429,16 +574,16 @@ router.put("/opportunities/:id", async (req, res) => {
 
   try {
     const updateData: Record<string, unknown> = { updatedAt: new Date() };
-    if (status !== undefined) updateData.status = status;
-    if (title !== undefined) updateData.title = title;
-    if (agency !== undefined) updateData.agency = agency;
+    if (status      !== undefined) updateData.status      = status;
+    if (title       !== undefined) updateData.title       = title;
+    if (agency      !== undefined) updateData.agency      = agency;
     if (description !== undefined) updateData.description = description;
-    if (category !== undefined) updateData.category = category;
+    if (category    !== undefined) updateData.category    = category;
     if (valueAmount !== undefined) updateData.valueAmount = valueAmount || null;
-    if (deadline !== undefined) updateData.deadline = deadline ? new Date(deadline) : null;
-    if (rawText !== undefined) updateData.rawText = rawText || null;
+    if (deadline    !== undefined) updateData.deadline    = deadline ? new Date(deadline) : null;
+    if (rawText     !== undefined) updateData.rawText     = rawText || null;
     if (contactInfo !== undefined) updateData.contactInfo = contactInfo || null;
-    if (sourceUrl !== undefined) updateData.sourceUrl = sourceUrl || null;
+    if (sourceUrl   !== undefined) updateData.sourceUrl   = sourceUrl || null;
 
     const [updated] = await db
       .update(tendersTable)
@@ -446,10 +591,7 @@ router.put("/opportunities/:id", async (req, res) => {
       .where(eq(tendersTable.id, id))
       .returning();
 
-    if (!updated) {
-      res.status(404).json({ error: "Opportunity not found" });
-      return;
-    }
+    if (!updated) { res.status(404).json({ error: "Opportunity not found" }); return; }
     res.json(updated);
   } catch (err) {
     req.log.error({ err }, "Error updating opportunity");
@@ -457,34 +599,73 @@ router.put("/opportunities/:id", async (req, res) => {
   }
 });
 
-// ── Extract requirements (manual trigger) ─────────────────────────────────
-router.post("/opportunities/:id/extract-requirements", async (req, res) => {
+// ── Trigger (or re-trigger) full analysis ────────────────────────────────────
+// Returns 409 if an analysis is already running for this tender.
+router.post("/opportunities/:id/analyze", async (req, res) => {
   const id = Number(req.params.id);
-  if (isNaN(id)) {
-    res.status(400).json({ error: "Invalid id" });
-    return;
-  }
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
 
   try {
+    const [tender] = await db
+      .select({ id: tendersTable.id, status: tendersTable.status })
+      .from(tendersTable)
+      .where(eq(tendersTable.id, id));
+
+    if (!tender) { res.status(404).json({ error: "Tender not found" }); return; }
+
+    if (isActiveStatus(tender.status)) {
+      res.status(409).json({
+        error: `Analysis already running (step: ${tender.status}). Please wait for it to complete.`,
+      });
+      return;
+    }
+
+    res.json({ message: "Analysis started" });
+    void autoAnalyzeOpportunity(id);
+  } catch (err) {
+    req.log.error({ err }, "Error triggering analysis");
+    res.status(500).json({ error: "Failed to start analysis" });
+  }
+});
+
+// ── Extract requirements (manual trigger, single step only) ───────────────
+router.post("/opportunities/:id/extract-requirements", async (req, res) => {
+  const id = Number(req.params.id);
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  try {
+    const [tender] = await db
+      .select({ status: tendersTable.status })
+      .from(tendersTable)
+      .where(eq(tendersTable.id, id));
+    if (!tender) { res.status(404).json({ error: "Tender not found" }); return; }
+    if (isActiveStatus(tender.status)) {
+      res.status(409).json({ error: "Analysis already in progress for this tender." });
+      return;
+    }
+
     const inserted = await runExtractRequirements(id);
     if (inserted.length === 0) {
       res.status(400).json({ error: "Could not extract requirements from this opportunity" });
       return;
     }
+    // Mark extracted
+    await db
+      .update(tendersTable)
+      .set({ status: "requirements_extracted", updatedAt: new Date() })
+      .where(eq(tendersTable.id, id));
     res.json({ requirements: inserted, count: inserted.length });
   } catch (err) {
+    const { code, message } = classifyError(err);
     req.log.error({ err }, "Error extracting requirements");
-    res.status(500).json({ error: "Failed to extract requirements" });
+    res.status(500).json({ error: "Failed to extract requirements", code, detail: message });
   }
 });
 
 // ── Score bid/no-bid (manual trigger) ─────────────────────────────────────
 router.post("/opportunities/:id/score", async (req, res) => {
   const id = Number(req.params.id);
-  if (isNaN(id)) {
-    res.status(400).json({ error: "Invalid id" });
-    return;
-  }
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
 
   try {
     const bidScore = await runBidScoring(id);
@@ -498,10 +679,7 @@ router.post("/opportunities/:id/score", async (req, res) => {
 // ── Generate strategy brief (manual trigger) ──────────────────────────────
 router.post("/opportunities/:id/generate-strategy", async (req, res) => {
   const id = Number(req.params.id);
-  if (isNaN(id)) {
-    res.status(400).json({ error: "Invalid id" });
-    return;
-  }
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
 
   try {
     const strategy = await runGenerateStrategy(id);
@@ -512,19 +690,24 @@ router.post("/opportunities/:id/generate-strategy", async (req, res) => {
   }
 });
 
+// ── Re-score existing items with keyword fallback ──────────────────────────
+router.post("/tender-intelligence/rescore", async (req, res) => {
+  try {
+    const { rescoreWithKeywords } = await import("../crawlers/index.js");
+    const count = await rescoreWithKeywords();
+    res.json({ message: `Re-scored ${count} items using keyword engine`, count });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
 // ── Generate section-based proposal ───────────────────────────────────────
 router.post("/opportunities/:id/generate-proposal", async (req, res) => {
   const id = Number(req.params.id);
-  if (isNaN(id)) {
-    res.status(400).json({ error: "Invalid id" });
-    return;
-  }
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
 
   const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, id));
-  if (!tender) {
-    res.status(404).json({ error: "Opportunity not found" });
-    return;
-  }
+  if (!tender) { res.status(404).json({ error: "Opportunity not found" }); return; }
 
   const requirements = await db
     .select()
@@ -560,12 +743,12 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
   const [draft] = await db
     .insert(proposalsTable)
     .values({
-      clientName: tender.agency,
-      industry: tender.category,
+      clientName:      tender.agency,
+      industry:        tender.category,
       briefText,
       proposalContent: "Generating proposal sections — please refresh in ~30 seconds.",
-      status: "proposal_drafting",
-      tenderId: id,
+      status:          "proposal_drafting",
+      tenderId:        id,
     })
     .returning();
 
@@ -580,22 +763,22 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
       SECTION_DEFINITIONS.map((s) => ({
         proposalId: draft.id,
         sectionKey: s.key,
-        title: s.title,
-        content: "",
-        status: "not_started",
+        title:      s.title,
+        content:    "",
+        status:     "not_started",
         orderIndex: s.order,
-      }))
+      })),
     )
     .returning();
 
   res.status(201).json({ proposal: draft, sections: sectionRows });
 
-  (async () => {
+  void (async () => {
     try {
       const completion = await openai.chat.completions.create({
-        model: AI_MODEL,
-        max_tokens: 16000,
-        response_format: { type: "json_object" },
+        model:                 AI_MODEL,
+        max_tokens:            16000,
+        response_format:       { type: "json_object" },
         messages: [
           {
             role: "system",
@@ -629,36 +812,34 @@ ${SECTION_DEFINITIONS.map((s) => `- ${s.key}: ${s.title}`).join("\n")}`,
       });
 
       const raw = completion.choices[0]?.message?.content ?? "{}";
-      const data = JSON.parse(raw);
+      const data = JSON.parse(raw) as { sections?: { key: string; content: string }[] };
       const sections: { key: string; content: string }[] = data.sections ?? [];
 
       const [genRun] = await db
         .insert(proposalGenerationRunsTable)
         .values({
-          proposalId: draft.id,
-          model: AI_MODEL,
-          promptVersion: "2.0",
+          proposalId:            draft.id,
+          model:                 AI_MODEL,
+          promptVersion:         "2.0",
           retrievedKnowledgeIds: "[]",
-          status: "completed",
+          status:                "completed",
         })
         .returning();
 
       let combinedContent = "";
       for (const sectionDef of SECTION_DEFINITIONS) {
         const generated = sections.find((s) => s.key === sectionDef.key);
-        const content = generated?.content ?? `[NEEDS ONWRD INPUT: ${sectionDef.title} section not generated]`;
+        const content    = generated?.content ?? `[NEEDS ONWRD INPUT: ${sectionDef.title} section not generated]`;
         const hasBlocker = content.includes("[NEEDS ONWRD INPUT");
-        const status = hasBlocker ? "blocked_missing_input" : "drafted";
+        const status     = hasBlocker ? "blocked_missing_input" : "drafted";
 
         await db
           .update(proposalSectionsTable)
           .set({ content, status, generationRunId: genRun.id, updatedAt: new Date() })
-          .where(
-            and(
-              eq(proposalSectionsTable.proposalId, draft.id),
-              eq(proposalSectionsTable.sectionKey, sectionDef.key)
-            )
-          );
+          .where(and(
+            eq(proposalSectionsTable.proposalId, draft.id),
+            eq(proposalSectionsTable.sectionKey, sectionDef.key),
+          ));
 
         combinedContent += `## ${sectionDef.title}\n\n${content}\n\n`;
       }
@@ -668,15 +849,15 @@ ${SECTION_DEFINITIONS.map((s) => `- ${s.key}: ${s.title}`).join("\n")}`,
         .update(proposalsTable)
         .set({
           proposalContent: combinedContent.trim(),
-          status: hasBlockedSections ? "needs_onwrd_input" : "ready_for_review",
-          updatedAt: new Date(),
+          status:          hasBlockedSections ? "needs_onwrd_input" : "ready_for_review",
+          updatedAt:       new Date(),
         })
         .where(eq(proposalsTable.id, draft.id));
 
       await db
         .update(tendersTable)
         .set({
-          status: hasBlockedSections ? "needs_onwrd_input" : "ready_for_review",
+          status:    hasBlockedSections ? "needs_onwrd_input" : "ready_for_review",
           updatedAt: new Date(),
         })
         .where(eq(tendersTable.id, id));
@@ -686,8 +867,8 @@ ${SECTION_DEFINITIONS.map((s) => `- ${s.key}: ${s.title}`).join("\n")}`,
         .update(proposalsTable)
         .set({
           proposalContent: `Generation failed. Please regenerate.\n\nOriginal brief:\n${briefText}`,
-          status: "draft",
-          updatedAt: new Date(),
+          status:          "draft",
+          updatedAt:       new Date(),
         })
         .where(eq(proposalsTable.id, draft.id));
     }
@@ -697,7 +878,7 @@ ${SECTION_DEFINITIONS.map((s) => `- ${s.key}: ${s.title}`).join("\n")}`,
 // ── Manual tender import ───────────────────────────────────────────────────
 const manualUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 },
+  limits:  { fileSize: 50 * 1024 * 1024 },
 }).single("file");
 
 router.post("/tenders/manual", (req, res, next) => {
@@ -715,7 +896,7 @@ router.post("/tenders/manual", (req, res, next) => {
   });
 }, async (req, res) => {
   const bodyUrl = (req.body as Record<string, string>)?.url?.trim() || null;
-  const file = req.file ?? null;
+  const file    = req.file ?? null;
 
   if (!file && !bodyUrl) {
     res.status(400).json({ error: "Provide a file (.pdf, .docx, .txt) or a URL." });
@@ -723,7 +904,7 @@ router.post("/tenders/manual", (req, res, next) => {
   }
 
   try {
-    let rawText = "";
+    let rawText  = "";
     let sourceUrl: string | null = null;
 
     if (file) {
@@ -751,7 +932,6 @@ router.post("/tenders/manual", (req, res, next) => {
         return;
       }
     } else if (bodyUrl) {
-      // SSRF protection: validate protocol and block private/internal IP ranges
       let parsed: URL;
       try {
         parsed = new URL(bodyUrl);
@@ -765,16 +945,12 @@ router.post("/tenders/manual", (req, res, next) => {
       }
       const hostname = parsed.hostname.toLowerCase();
       const blocked =
-        hostname === "localhost" ||
-        hostname === "0.0.0.0" ||
-        /^127\./.test(hostname) ||
-        /^10\./.test(hostname) ||
+        hostname === "localhost" || hostname === "0.0.0.0" ||
+        /^127\./.test(hostname) || /^10\./.test(hostname) ||
         /^192\.168\./.test(hostname) ||
         /^172\.(1[6-9]|2[0-9]|3[01])\./.test(hostname) ||
         /^169\.254\./.test(hostname) ||
-        hostname === "::1" ||
-        hostname.endsWith(".local") ||
-        hostname.endsWith(".internal");
+        hostname === "::1" || hostname.endsWith(".local") || hostname.endsWith(".internal");
       if (blocked) {
         res.status(400).json({ error: "That URL resolves to a private or internal address and cannot be fetched." });
         return;
@@ -783,7 +959,7 @@ router.post("/tenders/manual", (req, res, next) => {
       let html = "";
       try {
         const resp = await fetch(bodyUrl, {
-          signal: AbortSignal.timeout(15_000),
+          signal:  AbortSignal.timeout(15_000),
           headers: { "User-Agent": "Mozilla/5.0 (compatible; ONWRDBot/1.0)" },
         });
         if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -797,80 +973,243 @@ router.post("/tenders/manual", (req, res, next) => {
         .replace(/<style[\s\S]*?<\/style>/gi, " ")
         .replace(/<[^>]+>/g, " ")
         .replace(/&nbsp;/gi, " ")
-        .replace(/&amp;/gi, "&")
-        .replace(/&lt;/gi, "<")
-        .replace(/&gt;/gi, ">")
-        .replace(/\s{2,}/g, "\n")
+        .replace(/\s{2,}/g, " ")
         .trim();
     }
 
     if (!rawText || rawText.length < 50) {
-      res.status(400).json({ error: "Not enough text could be extracted. Try a different file or URL." });
+      res.status(400).json({ error: "Could not extract enough text from the provided source." });
       return;
     }
 
-    const firstLine = rawText.split("\n").find((l) => l.trim().length > 5)?.trim() ?? "";
-    let title = firstLine.slice(0, 120);
-    if (!title && sourceUrl) {
-      try { title = new URL(sourceUrl).hostname; } catch { title = "Manual Import"; }
+    // Use AI to extract title, agency, etc. from the raw document text
+    const extractCompletion = await openai.chat.completions.create({
+      model: AI_MODEL,
+      max_completion_tokens: 500,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `Extract structured tender metadata from the document text. Return JSON:
+{
+  "title": string (tender/RFP title, max 200 chars),
+  "agency": string (issuing organisation, max 150 chars),
+  "description": string (scope/objective summary, max 1000 chars),
+  "category": string (e.g. "Marketing", "Communications", "IT", "Construction"),
+  "deadline": string | null (ISO date if found, else null),
+  "valueAmount": string | null (contract value if stated, else null),
+  "contactInfo": string | null
+}`,
+        },
+        {
+          role: "user",
+          content: `Extract metadata from this tender document:\n\n${rawText.slice(0, 8000)}`,
+        },
+      ],
+    });
+
+    const metaRaw  = extractCompletion.choices[0]?.message?.content ?? "{}";
+    const meta     = JSON.parse(metaRaw) as {
+      title?: string; agency?: string; description?: string; category?: string;
+      deadline?: string | null; valueAmount?: string | null; contactInfo?: string | null;
+    };
+
+    if (!meta.title || !meta.agency) {
+      res.status(400).json({ error: "Could not identify a tender title or issuing agency in the document." });
+      return;
     }
-    if (!title) title = "Manual Import";
 
     const [created] = await db
       .insert(tendersTable)
       .values({
-        title,
-        agency: "Manual Import",
-        description: rawText.slice(0, 500),
-        category: "General",
+        title:       meta.title.slice(0, 200),
+        agency:      meta.agency.slice(0, 150),
+        description: meta.description?.slice(0, 2000) ?? rawText.slice(0, 500),
+        category:    meta.category ?? "General",
+        deadline:    meta.deadline ? new Date(meta.deadline) : null,
+        valueAmount: meta.valueAmount ?? null,
+        sourceUrl:   sourceUrl ?? null,
+        contactInfo: meta.contactInfo ?? null,
         rawText,
-        sourceUrl,
-        status: "opportunity_found",
+        status:      "opportunity_found",
         recommendationScore: 0,
       })
       .returning();
 
-    res.status(201).json({ id: created.id, title: created.title, status: created.status });
-
+    res.status(201).json(created);
     void autoAnalyzeOpportunity(created.id);
   } catch (err) {
-    req.log.error({ err }, "Error processing manual tender import");
-    res.status(500).json({ error: "Failed to process import. Please try again." });
+    req.log.error({ err }, "[tenders/manual] import failed");
+    res.status(500).json({ error: `Import failed: ${(err as Error).message}` });
   }
 });
 
-// ── Generate Bid Proposal ─────────────────────────────────────────────────────
-router.post("/proposals/generate-bid", async (req, res) => {
-  const { opportunityId } = req.body as { opportunityId: number };
+// ── Import tenders from CSV ───────────────────────────────────────────────
+const csvUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } }).single("file");
 
-  if (!opportunityId || typeof opportunityId !== "number") {
-    res.status(400).json({ error: "opportunityId is required and must be a number" });
+router.post("/tenders/import-csv", (req, res, next) => {
+  csvUpload(req, res, (err: unknown) => {
+    if (err) { res.status(400).json({ error: (err as Error).message }); return; }
+    next();
+  });
+}, async (req, res) => {
+  const file = req.file;
+  if (!file) { res.status(400).json({ error: "No file uploaded" }); return; }
+
+  try {
+    const csv    = file.buffer.toString("utf-8");
+    const lines  = csv.split("\n").filter((l) => l.trim());
+    const header = lines[0]?.split(",").map((h) => h.trim().toLowerCase().replace(/"/g, "")) ?? [];
+    const rows   = lines.slice(1);
+
+    const idx = (field: string) => header.indexOf(field);
+
+    const parse = (row: string): string[] => {
+      const result: string[] = [];
+      let cur = "";
+      let inQuotes = false;
+      for (const ch of row) {
+        if (ch === '"') { inQuotes = !inQuotes; continue; }
+        if (ch === "," && !inQuotes) { result.push(cur.trim()); cur = ""; continue; }
+        cur += ch;
+      }
+      result.push(cur.trim());
+      return result;
+    };
+
+    let created = 0;
+    for (const row of rows) {
+      const cells = parse(row);
+      const title = cells[idx("title")]?.trim();
+      const agency = cells[idx("agency")]?.trim();
+      const description = cells[idx("description")]?.trim();
+      if (!title || !agency || !description) continue;
+
+      const rawDeadline = cells[idx("deadline")]?.trim();
+      const deadline = rawDeadline ? new Date(rawDeadline) : null;
+
+      const [inserted] = await db
+        .insert(tendersTable)
+        .values({
+          title,
+          agency,
+          description,
+          category:    cells[idx("category")]?.trim()     || "General",
+          valueAmount: cells[idx("valueamount")]?.trim()  || null,
+          sourceUrl:   cells[idx("sourceurl")]?.trim()    || null,
+          contactInfo: cells[idx("contactinfo")]?.trim()  || null,
+          deadline:    deadline && !isNaN(deadline.getTime()) ? deadline : null,
+          status:      "opportunity_found",
+          recommendationScore: 0,
+        })
+        .returning();
+
+      created++;
+      void autoAnalyzeOpportunity(inserted.id);
+    }
+
+    res.json({ message: `Imported ${created} tender(s)`, count: created });
+  } catch (err) {
+    req.log.error({ err }, "CSV import failed");
+    res.status(500).json({ error: "CSV import failed" });
+  }
+});
+
+// ── Extract tender from pasted text ───────────────────────────────────────
+router.post("/tenders/extract-text", async (req, res) => {
+  const { text } = req.body as { text?: string };
+  if (!text || text.trim().length < 20) {
+    res.status(400).json({ error: "Provide at least 20 characters of tender text." });
     return;
   }
 
   try {
-    // 1. Fetch tender
-    const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, opportunityId));
-    if (!tender) {
-      res.status(404).json({ error: "Opportunity not found" });
+    const completion = await openai.chat.completions.create({
+      model: AI_MODEL,
+      max_completion_tokens: 600,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `Extract structured tender metadata from the pasted text. Return JSON:
+{
+  "title": string,
+  "agency": string,
+  "description": string (scope summary ≤ 800 chars),
+  "category": string,
+  "deadline": string | null (ISO date),
+  "valueAmount": string | null,
+  "contactInfo": string | null,
+  "sourceUrl": string | null
+}`,
+        },
+        { role: "user", content: text.slice(0, 6000) },
+      ],
+    });
+
+    const raw  = completion.choices[0]?.message?.content ?? "{}";
+    const data = JSON.parse(raw) as {
+      title?: string; agency?: string; description?: string; category?: string;
+      deadline?: string | null; valueAmount?: string | null;
+      contactInfo?: string | null; sourceUrl?: string | null;
+    };
+
+    if (!data.title || !data.agency) {
+      res.status(400).json({ error: "Could not identify title/agency in the text." });
       return;
     }
 
-    // 2. Fetch latest bid score
-    const [bidScore] = await db
-      .select()
-      .from(bidScoresTable)
-      .where(eq(bidScoresTable.tenderId, opportunityId))
-      .orderBy(desc(bidScoresTable.createdAt))
-      .limit(1);
+    const [created] = await db
+      .insert(tendersTable)
+      .values({
+        title:       data.title,
+        agency:      data.agency,
+        description: data.description ?? text.slice(0, 800),
+        category:    data.category    ?? "General",
+        deadline:    data.deadline    ? new Date(data.deadline) : null,
+        valueAmount: data.valueAmount ?? null,
+        sourceUrl:   data.sourceUrl   ?? null,
+        contactInfo: data.contactInfo ?? null,
+        rawText:     text,
+        status:      "opportunity_found",
+        recommendationScore: 0,
+      })
+      .returning();
 
-    // 3. Fetch extracted requirements
+    res.status(201).json(created);
+    void autoAnalyzeOpportunity(created.id);
+  } catch (err) {
+    req.log.error({ err }, "Text extraction failed");
+    res.status(500).json({ error: "Text extraction failed" });
+  }
+});
+
+// ── Delete tender ──────────────────────────────────────────────────────────
+router.delete("/opportunities/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+  await db.delete(tendersTable).where(eq(tendersTable.id, id));
+  res.status(204).end();
+});
+
+// ── Generate bid proposal (Google Doc) ────────────────────────────────────
+router.post("/opportunities/:id/generate-bid", async (req, res) => {
+  const opportunityId = Number(req.params.id);
+  if (isNaN(opportunityId)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  try {
+    const [tender] = await db
+      .select()
+      .from(tendersTable)
+      .where(eq(tendersTable.id, opportunityId));
+    if (!tender) { res.status(404).json({ error: "Tender not found" }); return; }
+
     const requirements = await db
       .select()
       .from(tenderRequirementsTable)
-      .where(eq(tenderRequirementsTable.tenderId, opportunityId));
+      .where(eq(tenderRequirementsTable.tenderId, opportunityId))
+      .orderBy(tenderRequirementsTable.orderIndex);
 
-    // 4. Fetch strategy
     const [strategy] = await db
       .select()
       .from(proposalStrategiesTable)
@@ -878,125 +1217,38 @@ router.post("/proposals/generate-bid", async (req, res) => {
       .orderBy(desc(proposalStrategiesTable.createdAt))
       .limit(1);
 
-    // 5. Compile the master brief
-    const parts: string[] = [];
-    parts.push(`TENDER TITLE: ${tender.title}`);
-    parts.push(`ISSUING AUTHORITY: ${tender.agency}`);
-    parts.push(`CATEGORY: ${tender.category}`);
-    if (tender.valueAmount) parts.push(`ESTIMATED CONTRACT VALUE: ${tender.valueAmount}`);
-    if (tender.deadline) {
-      const d = new Date(tender.deadline);
-      parts.push(`SUBMISSION DEADLINE: ${d.toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })}`);
-    }
-    if (tender.contactInfo) parts.push(`CONTACT: ${tender.contactInfo}`);
-    if (tender.sourceUrl) parts.push(`SOURCE URL: ${tender.sourceUrl}`);
-    parts.push(`\nDESCRIPTION:\n${tender.description}`);
-    if (tender.rawText && tender.rawText.length > 50) {
-      parts.push(`\nFULL RFP / TENDER DOCUMENT:\n${tender.rawText.slice(0, 10000)}`);
-    }
-    if (requirements.length > 0) {
-      parts.push(
-        `\nEXTRACTED REQUIREMENTS:\n${requirements
-          .map((r, i) => `${i + 1}. [${r.category ?? "General"}] ${r.description}`)
-          .join("\n")}`,
-      );
-    }
-    if (bidScore) {
-      parts.push(
-        `\nBID INTELLIGENCE:\nFit Score: ${bidScore.fitScore}/100 (${bidScore.fitLevel})\nBrief Completeness: ${bidScore.completenessScore}/100\nAnalysis: ${bidScore.reasoning}`,
-      );
-    }
-    if (strategy) {
-      const themes = (() => {
-        try { return (JSON.parse(strategy.winThemes) as string[]).join(", "); } catch { return strategy.winThemes; }
-      })();
-      parts.push(
-        `\nWIN STRATEGY:\nPositioning: ${strategy.positioning}\nWin Themes: ${themes}`,
-      );
-    }
+    const requirementsText =
+      requirements.length > 0
+        ? requirements
+            .map((r, i) => `${i + 1}. [${r.category}${r.isMandatory ? ", MANDATORY" : ""}] ${r.requirementText}`)
+            .join("\n")
+        : "No specific requirements extracted.";
 
-    const briefContext = parts.join("\n");
+    const strategyText = strategy
+      ? `Positioning: ${strategy.positioning}\nWin Themes: ${JSON.parse(strategy.winThemes ?? "[]").join(", ")}\nMessaging: ${strategy.messagingGuidance}`
+      : "";
 
-    const systemPrompt = `You are the Senior Proposal Writer at ONWRD Advisors — a Caribbean-based strategy and communications consultancy with a track record of winning public-sector and development-finance tenders. Your proposals are known for being incisive, client-centred, and strategically grounded.
-
-Your task is to write a complete, ready-to-submit proposal document for the tender described below. The output must be polished, persuasive, and use ONWRD's authoritative voice — confident without being arrogant, expert without being impenetrable.
-
-DOCUMENT STRUCTURE (follow this exactly, using # Markdown headings):
-
-# ONWRD PROJECT PROPOSAL
-
-## EXECUTIVE SUMMARY
-Two to three paragraphs. Open with a direct statement of ONWRD's understanding of the client's core challenge. Then articulate why ONWRD is uniquely placed to solve it. Close with a one-sentence commitment statement.
-
-## UNDERSTANDING THE REQUIREMENT
-Demonstrate deep reading of the RFP. Restate the problem in sharper terms than the client used. Name the key outcomes the issuing authority is trying to achieve.
-
-## OUR PROPOSED APPROACH
-### Phase 1 — Discovery & Stakeholder Alignment
-### Phase 2 — Strategy & Framework Development
-### Phase 3 — Implementation & Delivery
-### Phase 4 — Review & Knowledge Transfer
-For each phase: key activities, deliverables, who leads.
-
-## RELEVANT CREDENTIALS & CASE STUDIES
-Draw ONLY from the real ONWRD case studies provided. Do not invent credentials. Select the 2–3 most relevant to this specific tender. For each: project name, the challenge, ONWRD's contribution, the result.
-
-## TEAM & EXPERTISE
-Position ONWRD's principals as sector experts. Speak to relevant expertise without inventing individuals. Keep it concise.
-
-## PROPOSED TIMELINE
-A milestone table in Markdown format with columns: Phase | Key Activity | Deliverable | Week.
-
-## INVESTMENT SUMMARY
-If a contract value is provided, suggest a breakdown. If not, write: "ONWRD will provide a detailed investment proposal upon request, structured to align with the budget parameters of this procurement."
-
-## WHY ONWRD
-A closing section that crystallises the core argument for choosing ONWRD: regional expertise, strategic depth, and a proven track record of delivering results in the Caribbean development sector.
-
----
-
-STYLE RULES:
-- Write in first-person plural ("We propose", "Our approach", "ONWRD will…")
-- No filler phrases like "In conclusion," or "It is important to note that"
-- Use bold (**text**) for key deliverables and named outputs
-- Use bullet lists for activities and requirements only — not for prose
-- Tables for timelines only
-- Maximum 2,500 words in the body (not counting headings)
-- Never hallucinate credentials, case studies, or team members not mentioned in the brief or the real case study list`;
-
-    // 6. Call OpenAI (master proposal generation)
-    req.log.info({ tenderId: opportunityId }, "[generate-bid] Calling OpenAI proposal writer…");
-
-    const completion = await openai.chat.completions.create({
+    const proposalCompletion = await openai.chat.completions.create({
       model: AI_MODEL,
-      max_tokens: 8192,
+      max_completion_tokens: 4000,
       messages: [
-        { role: "system", content: systemPrompt },
+        {
+          role: "system",
+          content: `You are a senior proposal writer at ONWRD. Write a complete bid proposal as a structured document. Use clear headings and professional language. ${ONWRD_CASE_STUDIES}`,
+        },
         {
           role: "user",
-          content: `TENDER BRIEF:\n${briefContext}\n\n---\nONWRD REAL CASE STUDIES (use only these):\n${ONWRD_CASE_STUDIES}\n\n---\nNow write the complete proposal document:`,
+          content: `Write a complete bid proposal for:\n\nTitle: ${tender.title}\nAgency: ${tender.agency}\nDeadline: ${tender.deadline ? new Date(tender.deadline).toDateString() : "Not specified"}\nValue: ${tender.valueAmount ?? "Not specified"}\n\nScope:\n${tender.description}\n\nRequirements:\n${requirementsText}\n\nStrategy:\n${strategyText}`,
         },
       ],
     });
 
-    const proposalContent = completion.choices[0]?.message?.content ?? "";
-    if (!proposalContent) throw new Error("OpenAI returned empty proposal content");
+    const proposalContent = proposalCompletion.choices[0]?.message?.content ?? "";
+    const docTitle = `ONWRD Bid — ${tender.title}`.slice(0, 100);
 
-    req.log.info({ tenderId: opportunityId, chars: proposalContent.length }, "[generate-bid] Proposal generated, exporting to Google Docs…");
+    const { createGoogleDoc } = await import("../lib/google-docs.js");
+    const { docId, docUrl } = await createGoogleDoc(docTitle, proposalContent);
 
-    // 7. Export to Google Docs
-    const { createGoogleDoc, appendContentWithLogo, shareWithAnyone } = await import("../lib/google-docs.js");
-    const docTitle = `ONWRD Bid — ${tender.title.slice(0, 60)} — ${tender.agency}`.slice(0, 100);
-    const doc = await createGoogleDoc(docTitle);
-    const docId = doc.documentId;
-    const docUrl = `https://docs.google.com/document/d/${docId}/edit`;
-
-    await appendContentWithLogo(docId, proposalContent);
-    await shareWithAnyone(docId);
-
-    req.log.info({ tenderId: opportunityId, docId, docUrl }, "[generate-bid] Google Doc created");
-
-    // 8. Update tender status
     await db
       .update(tendersTable)
       .set({ status: "bid_started", googleDocId: docId, googleDocUrl: docUrl, updatedAt: new Date() })
@@ -1011,4 +1263,3 @@ STYLE RULES:
 });
 
 export default router;
-
