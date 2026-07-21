@@ -1,0 +1,84 @@
+Refactor the opportunity-to-proposal workflow to make it simpler, deterministic where possible, and protected against unnecessary AI/API usage.
+
+Before making changes, inspect the existing opportunity, proposal, source, import, scoring, recommendation, and requirement-extraction flows. Reuse the current architecture and components where practical.
+
+Objectives:
+
+1. Simplify navigation
+
+* Keep Opportunities and Proposals as the primary work areas.
+* Move Sources into Settings.
+* Remove Import as a standalone tab. Place an Import RFP button on the New Proposal page instead.
+* Remove the redundant Add Opportunity button from the Opportunities page. A user who already has an RFP should begin through New Proposal → Import RFP.
+* Do not remove underlying functionality or data solely because its navigation entry is being removed.
+
+2. Create a continuous opportunity-to-proposal flow
+
+* The Opportunities page should represent opportunities that still require a decision or action.
+* When the user selects Start Analysis or approves a recommended opportunity, immediately create or open its canonical proposal workspace.
+* Mark the source opportunity as analyzing/converted and remove it from the active opportunity queue.
+* Redirect the user directly to the resulting proposal workspace so they never have to hunt for it under another tab.
+* Show previously converted opportunities only through a History or Converted filter.
+* Prevent more than one proposal from being created from the same opportunity.
+* If the proposal already exists, open it instead of showing a duplicate-extraction warning.
+
+3. Replace AI scoring and recommendations with deterministic logic
+
+Qualification scoring and pursue/pass recommendations should not require an LLM.
+
+Build an explainable rules-based score using available structured data, including where applicable:
+
+* Geography and eligibility
+* Service/category match
+* Included and excluded keywords
+* Deadline status and time remaining
+* Budget fit
+* Organization capabilities or preferences
+* Mandatory requirements
+* Source reliability or completeness
+
+Keep weights and recommendation thresholds centralized and configurable. Return both the score and plain-language reasons such as “Strong service match,” “Deadline is under seven days,” or “Required geography does not match.”
+
+Crawling, importing, scoring, and pursue/pass recommendations must not invoke an AI model. Reserve AI for work that genuinely requires interpreting unstructured RFP content, such as extracting requirements or drafting proposal content.
+
+4. Bound requirement extraction
+
+Requirement extraction must be a finite background job rather than an open-ended loop.
+
+Add:
+
+* A maximum input size/page or character limit
+* A defined timeout
+* A maximum number of extraction passes/model calls
+* Only one active extraction job per proposal
+* Idempotency protection against double-clicks and duplicate requests
+* Visible progress states such as Preparing, Reading, Extracting, Saving, Completed, Failed, and Cancelled
+* A Cancel Analysis button while extraction is running
+* Backend cancellation or cooperative cancellation checks so Cancel stops additional API calls and processing
+* An explicit Retry action after failure or cancellation
+* Cleanup of timers, polling, and job state when the user leaves the page
+
+Cancelling must preserve the proposal and any safely completed work. It should not delete the proposal or return the opportunity to the active queue automatically.
+
+5. UX requirements
+
+* After title approval, keep the user inside the resulting proposal workspace.
+* Clearly distinguish the deterministic opportunity score from AI-powered requirement extraction.
+* Explain before extraction that it may use AI/API credits.
+* Disable duplicate Start Analysis actions while a job is running.
+* Do not rely on warning messages as the primary duplicate-prevention mechanism.
+
+6. Verification
+
+Add or update tests covering:
+
+* Deterministic scoring without an AI call
+* One opportunity creating only one proposal
+* Starting analysis removes the opportunity from the active queue
+* Existing proposals being reopened rather than duplicated
+* Extraction timeout and usage limits
+* Cancellation stopping further processing/model calls
+* Retry after cancellation or failure
+* Updated navigation and redirects
+
+Run the relevant test suite and report the affected files, any database migration, and confirmation that scoring/importing/crawling no longer trigger AI calls.

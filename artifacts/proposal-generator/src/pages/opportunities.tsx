@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  Plus, Target, CheckCircle2, XCircle, Clock, AlertCircle,
+  Target, CheckCircle2, XCircle, Clock, AlertCircle,
   Globe, Upload, AlertTriangle, RefreshCw, ExternalLink, Loader2,
   ChevronRight, Pencil, Zap, FileText,
 } from "lucide-react";
@@ -196,18 +196,14 @@ function useCreateOpportunity() {
   });
 }
 
-function useGenerateBid() {
+function useStartBid(id: number) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (opportunityId: number): Promise<{ docId: string; docUrl: string; title: string }> => {
-      const r = await fetch(`${BASE}/api/proposals/generate-bid`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ opportunityId }),
-      });
+    mutationFn: async (): Promise<{ proposalId: number; tenderId: number; existing: boolean }> => {
+      const r = await fetch(`${BASE}/api/opportunities/${id}/start-bid`, { method: "POST" });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));
-        throw new Error((e as { error?: string }).error ?? "Bid generation failed");
+        throw new Error((e as { error?: string }).error ?? "Failed to start bid");
       }
       return r.json();
     },
@@ -281,21 +277,19 @@ function EnrichDrawer({
   const { toast } = useToast();
   const update = useUpdateOpportunity(opp.id);
   const rescore = useRescoreOpportunity(opp.id);
-  const generateBid = useGenerateBid();
-  const [bidDocUrl, setBidDocUrl] = useState<string | null>(opp.googleDocUrl ?? null);
+  const startBid = useStartBid(opp.id);
 
   const handleStartBid = async () => {
     try {
-      toast({ title: "Generating bid proposal…", description: "This takes about 20–30 seconds. Hang tight." });
-      const result = await generateBid.mutateAsync(opp.id);
-      setBidDocUrl(result.docUrl);
+      const result = await startBid.mutateAsync();
       toast({
-        title: "Bid proposal ready!",
-        description: "Your Google Doc has been created and shared.",
+        title: result.existing ? "Proposal already exists" : "Bid workspace created",
+        description: "Opening the tender analysis page…",
       });
-      window.open(result.docUrl, "_blank", "noopener,noreferrer");
+      onClose();
+      setLocation(`/tenders/${opp.id}`);
     } catch (err) {
-      toast({ title: "Bid generation failed", description: (err as Error).message, variant: "destructive" });
+      toast({ title: "Failed to start bid", description: (err as Error).message, variant: "destructive" });
     }
   };
 
@@ -475,32 +469,17 @@ function EnrichDrawer({
 
         {/* Footer actions */}
         <div className="px-6 py-4 border-t bg-card shrink-0 space-y-3">
-          {/* Start Bid button + doc link */}
-          <div className="flex items-center gap-2">
-            {bidDocUrl ? (
-              <a
-                href={bidDocUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex-1 inline-flex items-center justify-center gap-2 rounded-md border border-emerald-700/50 bg-emerald-950/30 text-emerald-400 text-xs px-3 py-2 hover:bg-emerald-900/40 transition-colors"
-              >
-                <FileText className="w-3.5 h-3.5" />
-                Open Bid Doc in Google Docs
-                <ExternalLink className="w-3 h-3 opacity-60" />
-              </a>
-            ) : (
-              <Button
-                className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white gap-2 text-sm"
-                onClick={handleStartBid}
-                disabled={generateBid.isPending}
-              >
-                {generateBid.isPending
-                  ? <><Loader2 className="w-4 h-4 animate-spin" /> Generating Bid…</>
-                  : <><Zap className="w-4 h-4" /> Start Bid</>
-                }
-              </Button>
-            )}
-          </div>
+          {/* Pursue CTA */}
+          <Button
+            className="w-full bg-emerald-600 hover:bg-emerald-500 text-white gap-2 text-sm"
+            onClick={handleStartBid}
+            disabled={startBid.isPending}
+          >
+            {startBid.isPending
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> Opening workspace…</>
+              : <><Zap className="w-4 h-4" /> Pursue this Opportunity</>
+            }
+          </Button>
 
           {/* Secondary actions */}
           <div className="flex items-center justify-between gap-3">
@@ -509,14 +488,14 @@ function EnrichDrawer({
               size="sm"
               className="gap-1.5 text-xs"
               onClick={handleRescore}
-              disabled={rescore.isPending || update.isPending || generateBid.isPending}
+              disabled={rescore.isPending || update.isPending || startBid.isPending}
             >
               {rescore.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
               Re-score
             </Button>
             <div className="flex items-center gap-2">
               <Button variant="ghost" size="sm" className="text-xs" onClick={onClose}>Cancel</Button>
-              <Button size="sm" className="text-xs gap-1.5" onClick={handleSave} disabled={update.isPending || rescore.isPending || generateBid.isPending}>
+              <Button size="sm" className="text-xs gap-1.5" onClick={handleSave} disabled={update.isPending || rescore.isPending || startBid.isPending}>
                 {update.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}
                 Save Changes
               </Button>
@@ -671,24 +650,31 @@ function CreateDialog({
 
 // ── Main page ────────────────────────────────────────────────────────────────
 export default function Opportunities() {
-  const { toast } = useToast();
   const { data: opportunities, isLoading } = useOpportunities();
-  const [showCreate, setShowCreate] = useState(false);
+  const [showConverted, setShowConverted] = useState(false);
   const [selected, setSelected] = useState<Opportunity | null>(null);
 
-  const sorted = opportunities ?? [];
+  const all       = opportunities ?? [];
+  const converted = all.filter((o) => o.status === "bid_started");
+  const active    = showConverted ? all : all.filter((o) => o.status !== "bid_started");
 
   return (
     <div className="p-8 max-w-6xl mx-auto">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 gap-4">
         <div>
           <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">Review Desk</h1>
-          <p className="text-muted-foreground">Incoming leads — score, enrich, and decide before bidding.</p>
+          <p className="text-muted-foreground">Score, enrich, and decide — then pursue or pass.</p>
         </div>
-        <Button onClick={() => setShowCreate(true)}>
-          <Plus className="w-4 h-4 mr-2" />
-          Add Opportunity
-        </Button>
+        {converted.length > 0 && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="text-xs gap-1.5"
+            onClick={() => setShowConverted((v) => !v)}
+          >
+            {showConverted ? "Hide converted" : `Show converted (${converted.length})`}
+          </Button>
+        )}
       </div>
 
       {/* Legend */}
@@ -696,27 +682,35 @@ export default function Opportunities() {
         <span className="flex items-center gap-1.5"><Globe className="w-3 h-3 text-blue-400" />Scraper</span>
         <span className="flex items-center gap-1.5"><Upload className="w-3 h-3 text-violet-400" />Manual</span>
         <span className="flex items-center gap-1.5 ml-4"><AlertTriangle className="w-3 h-3 text-amber-400" />Brief &lt; 70</span>
-        <span className="ml-auto text-xs">{sorted.length} total</span>
+        <span className="ml-auto text-xs">{active.length} shown · {all.length} total</span>
       </div>
 
       {isLoading ? (
         <div className="space-y-3">
           {[1, 2, 3, 4].map((i) => <Skeleton key={i} className="h-20 w-full rounded-lg" />)}
         </div>
-      ) : !sorted.length ? (
+      ) : !active.length ? (
         <div className="text-center py-16 px-4 border border-dashed rounded-lg bg-card/50">
           <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center mx-auto mb-4">
             <Target className="w-6 h-6 text-primary" />
           </div>
-          <h3 className="text-lg font-medium text-foreground mb-2">No opportunities yet</h3>
+          <h3 className="text-lg font-medium text-foreground mb-2">
+            {all.length > 0 ? "All opportunities have been converted" : "No opportunities yet"}
+          </h3>
           <p className="text-muted-foreground mb-6 max-w-sm mx-auto">
-            Add an RFP or tender to start the bid/no-bid workflow.
+            {all.length > 0
+              ? "Opportunities you've pursued are in their proposal workspaces."
+              : "Import an RFP or connect a tender source to begin scoring."}
           </p>
-          <Button variant="outline" onClick={() => setShowCreate(true)}>Add Opportunity</Button>
+          {all.length > 0 && (
+            <Button variant="outline" size="sm" onClick={() => setShowConverted(true)}>
+              Show converted
+            </Button>
+          )}
         </div>
       ) : (
         <div className="space-y-2">
-          {sorted.map((opp) => (
+          {active.map((opp) => (
             <OpportunityCard
               key={opp.id}
               opp={opp}
@@ -725,15 +719,6 @@ export default function Opportunities() {
           ))}
         </div>
       )}
-
-      <CreateDialog
-        open={showCreate}
-        onClose={() => setShowCreate(false)}
-        onCreate={(id) => {
-          const opp = opportunities?.find((o) => o.id === id);
-          if (opp) setSelected(opp);
-        }}
-      />
 
       {selected && (
         <EnrichDrawer

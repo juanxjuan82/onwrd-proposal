@@ -15,6 +15,7 @@ import {
 import { eq, desc, and, inArray } from "drizzle-orm";
 import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
 import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
+import { scoreTender } from "../lib/scoring-rules.js";
 import {
   truncateToTokenBudget,
   classifyError,
@@ -62,6 +63,44 @@ const SECTION_DEFINITIONS = [
 // ── Helper: check whether a tender is already being analysed ─────────────────
 function isActiveStatus(status: string): status is AnalysisActiveStatus {
   return (ANALYSIS_ACTIVE_STATUSES as readonly string[]).includes(status);
+}
+
+// ── Deterministic scoring — no AI call ───────────────────────────────────────
+// Applied immediately on tender create/update and as the pipeline bid_scoring step.
+async function applyDeterministicScore(tenderId: number) {
+  const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, tenderId));
+  if (!tender) throw new Error("Tender not found");
+
+  const result = scoreTender({
+    title:       tender.title,
+    agency:      tender.agency,
+    category:    tender.category,
+    description: tender.description,
+    deadline:    tender.deadline ?? null,
+    valueAmount: tender.valueAmount ?? null,
+    rawText:     tender.rawText ?? null,
+    contactInfo: tender.contactInfo ?? null,
+  });
+
+  const [bidScore] = await db
+    .insert(bidScoresTable)
+    .values({
+      tenderId,
+      fitScore:          result.fitScore,
+      fitLevel:          result.fitLevel,
+      reasoning:         result.reasoning,
+      flags:             JSON.stringify(result.flags),
+      completenessScore: result.completenessScore,
+      missingFields:     JSON.stringify(result.missingFields),
+    })
+    .returning();
+
+  await db.update(tendersTable).set({
+    recommendationScore: result.fitScore,
+    updatedAt:           new Date(),
+  }).where(eq(tendersTable.id, tenderId));
+
+  return bidScore;
 }
 
 // ── Step 1: Extract requirements ─────────────────────────────────────────────
@@ -193,117 +232,11 @@ async function runExtractRequirements(tenderId: number, cancelSignal?: AbortSign
   return inserted;
 }
 
-// ── Step 2: Bid scoring ──────────────────────────────────────────────────────
-async function runBidScoring(tenderId: number, cancelSignal?: AbortSignal) {
-  const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, tenderId));
-  if (!tender) throw new Error("Tender not found");
-
-  const requirements = await db
-    .select()
-    .from(tenderRequirementsTable)
-    .where(eq(tenderRequirementsTable.tenderId, tenderId))
-    .orderBy(tenderRequirementsTable.orderIndex);
-
-  const requirementsSummary =
-    requirements.length > 0
-      ? requirements
-          .map((r, i) => `${i + 1}. [${r.category}] ${r.requirementText}${r.isMandatory ? " (MANDATORY)" : ""}`)
-          .join("\n")
-      : "No requirements extracted yet.";
-
-  const timeoutSignal = AbortSignal.timeout(ANALYSIS_TIMEOUT_MS);
-  const signal = cancelSignal
-    ? AbortSignal.any([cancelSignal, timeoutSignal])
-    : timeoutSignal;
-
-  let completion: Awaited<ReturnType<typeof openai.chat.completions.create>>;
-  try {
-    completion = await openai.chat.completions.create({
-      model: AI_MODEL,
-      max_completion_tokens: 2000,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `You are a senior business development advisor at ONWRD, a full-service marketing and strategy agency in the Bahamas. You evaluate whether ONWRD should bid on a tender opportunity.
-
-ONWRD's strengths: marketing strategy, brand identity, digital marketing, content development, website design, campaign management, social media, communications strategy. ONWRD works across the Caribbean region, particularly the Bahamas. ONWRD is a mid-size boutique agency — not suitable for very large infrastructure or construction tenders.
-
-CRITICAL FILTER — INDIVIDUAL ROLES:
-If the posting is recruiting an individual person for employment (e.g. "Marketing Manager wanted", "we are hiring a Communications Officer", job ads, staff vacancies), it is NOT an opportunity for an agency. Score it fitScore: 0, fitLevel: "no_bid", and include the flag "Individual employment role — not an RFP for agency services". Do not evaluate it further.
-
-Only score opportunities where an organisation is procuring services from a company/agency (RFPs, tenders, requests for proposals, consultancy contracts, service contracts, etc.).
-
-Evaluate the tender and return JSON with:
-- fitScore: integer 0-100 (how well ONWRD fits this opportunity)
-- fitLevel: "strong" (75-100), "moderate" (50-74), "weak" (25-49), or "no_bid" (0-24)
-- reasoning: 2-3 sentence explanation of the score
-- flags: array of strings, each a specific concern or positive factor (e.g. "Requires ISO certification ONWRD doesn't hold", "Directly in ONWRD's core discipline", "Deadline is only 7 days away")
-- completenessScore: integer 0-100 measuring how much useful information is present to write a strong proposal (100 = clear objectives, full scope, explicit requirements, budget and timeline stated; 0 = vague or near-empty posting)
-- missingFields: array of short strings naming critical gaps that would strengthen a proposal response (e.g. "Budget not specified", "Timeline vague", "Evaluation criteria unclear", "Contact details absent"). Empty array if the tender is complete.
-
-${ONWRD_CASE_STUDIES}`,
-        },
-        {
-          role: "user",
-          content: `Evaluate this tender for ONWRD:
-
-Title: ${tender.title}
-Agency: ${tender.agency}
-Category: ${tender.category}
-Value: ${tender.valueAmount ?? "Not specified"}
-Deadline: ${tender.deadline ? new Date(tender.deadline).toDateString() : "Not specified"}
-
-Description:
-${tender.description}
-
-Requirements:
-${requirementsSummary}`,
-        },
-      ],
-    }, { signal });
-  } catch (err) {
-    if (cancelSignal?.aborted) {
-      const e = new Error("Analysis cancelled by user"); e.name = "CancelledError"; throw e;
-    }
-    if (timeoutSignal.aborted || (err instanceof Error && err.name === "AbortError")) {
-      throw new Error("AI request timed out after 90s");
-    }
-    throw err;
-  }
-
-  const raw = completion.choices[0]?.message?.content ?? "{}";
-  const data = JSON.parse(raw) as {
-    fitScore?: number;
-    fitLevel?: string;
-    reasoning?: string;
-    flags?: string[];
-    completenessScore?: number;
-    missingFields?: string[];
-  };
-
-  const [bidScore] = await db
-    .insert(bidScoresTable)
-    .values({
-      tenderId,
-      fitScore:          data.fitScore ?? 0,
-      fitLevel:          data.fitLevel ?? "weak",
-      reasoning:         data.reasoning ?? "",
-      flags:             JSON.stringify(data.flags ?? []),
-      completenessScore: typeof data.completenessScore === "number"
-        ? Math.min(100, Math.max(0, Math.round(data.completenessScore)))
-        : 0,
-      missingFields: JSON.stringify(Array.isArray(data.missingFields) ? data.missingFields : []),
-    })
-    .returning();
-
-  // Update recommendation score — pipeline handles the status transition
-  await db
-    .update(tendersTable)
-    .set({ recommendationScore: data.fitScore ?? 0, updatedAt: new Date() })
-    .where(eq(tendersTable.id, tenderId));
-
-  return bidScore;
+// ── Step 2: Bid scoring (deterministic — no AI call) ─────────────────────────
+// Instant rules-based evaluation; cancelSignal is accepted for pipeline
+// compatibility but not used (scoring is synchronous, < 5 ms).
+async function runBidScoring(tenderId: number, _cancelSignal?: AbortSignal) {
+  return applyDeterministicScore(tenderId);
 }
 
 // ── Step 3: Generate strategy brief ─────────────────────────────────────────
@@ -622,8 +555,13 @@ router.post("/opportunities", async (req, res) => {
       })
       .returning();
 
+    // Auto-score immediately — deterministic rules, no AI call
+    try {
+      await applyDeterministicScore(created.id);
+    } catch (scoreErr) {
+      req.log.warn({ err: scoreErr }, "Auto-score after create failed — retry via /score");
+    }
     res.status(201).json(created);
-    void autoAnalyzeOpportunity(created.id);
   } catch (err) {
     req.log.error({ err }, "Error creating opportunity");
     res.status(500).json({ error: "Failed to create opportunity" });
@@ -700,10 +638,89 @@ router.put("/opportunities/:id", async (req, res) => {
       .returning();
 
     if (!updated) { res.status(404).json({ error: "Opportunity not found" }); return; }
+
+    // Re-score with updated metadata (deterministic, instant)
+    try {
+      await applyDeterministicScore(id);
+    } catch (scoreErr) {
+      req.log.warn({ err: scoreErr }, "Auto-score after update failed");
+    }
     res.json(updated);
   } catch (err) {
     req.log.error({ err }, "Error updating opportunity");
     res.status(500).json({ error: "Failed to update opportunity" });
+  }
+});
+
+// ── Start bid: find-or-create proposal, mark tender as bid_started ────────────
+router.post("/opportunities/:id/start-bid", async (req, res) => {
+  const id = Number(req.params.id);
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  try {
+    const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, id));
+    if (!tender) { res.status(404).json({ error: "Tender not found" }); return; }
+
+    // If tender already has a linked proposal, return it
+    if (tender.proposalId) {
+      const [existing] = await db
+        .select({ id: proposalsTable.id })
+        .from(proposalsTable)
+        .where(eq(proposalsTable.id, tender.proposalId));
+      if (existing) {
+        res.json({ proposalId: existing.id, tenderId: id, existing: true });
+        return;
+      }
+    }
+
+    // Belt-and-suspenders: check proposals table by tenderId (unique constraint)
+    const [existingByTender] = await db
+      .select({ id: proposalsTable.id })
+      .from(proposalsTable)
+      .where(eq(proposalsTable.tenderId, id));
+    if (existingByTender) {
+      await db.update(tendersTable).set({
+        proposalId: existingByTender.id,
+        status:     tender.status === "bid_started" ? tender.status : "bid_started",
+        updatedAt:  new Date(),
+      }).where(eq(tendersTable.id, id));
+      res.json({ proposalId: existingByTender.id, tenderId: id, existing: true });
+      return;
+    }
+
+    // Create a new proposal from the tender's details
+    const briefParts: string[] = [
+      `Title: ${tender.title}`,
+      `Client: ${tender.agency}`,
+      `Category: ${tender.category}`,
+    ];
+    if (tender.deadline)    briefParts.push(`Deadline: ${new Date(tender.deadline).toDateString()}`);
+    if (tender.valueAmount) briefParts.push(`Value: ${tender.valueAmount}`);
+    briefParts.push("", tender.description);
+    if (tender.rawText)     briefParts.push(`\nFull RFP:\n${tender.rawText}`);
+
+    const [proposal] = await db
+      .insert(proposalsTable)
+      .values({
+        clientName:      tender.agency,
+        industry:        tender.category,
+        status:          "draft",
+        briefText:       briefParts.join("\n"),
+        proposalContent: "",
+        tenderId:        id,
+      })
+      .returning();
+
+    await db.update(tendersTable).set({
+      status:     "bid_started",
+      proposalId: proposal.id,
+      updatedAt:  new Date(),
+    }).where(eq(tendersTable.id, id));
+
+    res.json({ proposalId: proposal.id, tenderId: id, existing: false });
+  } catch (err) {
+    req.log.error({ err }, "Error starting bid");
+    res.status(500).json({ error: "Failed to start bid" });
   }
 });
 

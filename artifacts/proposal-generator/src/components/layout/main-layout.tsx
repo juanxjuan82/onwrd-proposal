@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Link, useLocation } from "wouter";
 import {
   Plus, LayoutDashboard, Briefcase, Target, BookOpen,
-  Settings, Inbox, UploadCloud, HelpCircle, X,
+  Settings, Inbox, HelpCircle, X, FileText,
 } from "lucide-react";
 
 const NAV_ITEMS = [
@@ -10,29 +10,29 @@ const NAV_ITEMS = [
     href: "/",
     exact: true,
     icon: LayoutDashboard,
-    label: "Dashboard",
-    help: "Overview of all proposals, recent activity, and pipeline status.",
+    label: "Proposals",
+    help: "All active proposals — draft, in progress, and exported.",
   },
   {
     href: "/new",
     exact: true,
     icon: Plus,
     label: "New Proposal",
-    help: "Manually start a proposal by pasting or typing a project brief.",
+    help: "Start a proposal from a brief, or import an RFP document.",
   },
   {
     href: "/opportunities",
     exact: false,
     icon: Target,
     label: "Opportunities",
-    help: "AI-scored tenders ready for bidding, with fit levels and strategy briefs.",
+    help: "Incoming tenders to score and decide: pursue or pass.",
   },
   {
     href: "/tenders",
     exact: false,
     icon: Briefcase,
     label: "Tenders",
-    help: "Full pipeline of every discovered tender — from raw find through analysis.",
+    help: "Full pipeline of every discovered tender — raw finds through analysis.",
   },
   {
     href: "/inbox",
@@ -46,29 +46,21 @@ const NAV_ITEMS = [
     exact: false,
     icon: BookOpen,
     label: "Knowledge",
-    help: "Company documents and context the AI uses to shape proposals.",
-  },
-  {
-    href: "/settings/sources",
-    exact: false,
-    icon: Target,
-    label: "Sources",
-    help: "Configure which websites the crawler monitors for new tenders.",
-  },
-  {
-    href: "/settings/import",
-    exact: false,
-    icon: UploadCloud,
-    label: "Import",
-    help: "Manually feed a PDF, DOCX, or URL straight into the analysis pipeline.",
+    help: "Company documents the AI uses to shape proposals.",
   },
   {
     href: "/settings",
-    exact: true,
+    exact: false,
     icon: Settings,
     label: "Settings",
-    help: "Connect your Google account and manage integrations.",
+    help: "Google Docs integration, crawler sources, and document import.",
   },
+];
+
+const SETTINGS_SUB_ITEMS = [
+  { href: "/settings",         exact: true,  label: "Google Docs" },
+  { href: "/settings/sources", exact: false, label: "Sources" },
+  { href: "/settings/import",  exact: false, label: "Import RFP" },
 ];
 
 export function MainLayout({ children }: { children: React.ReactNode }) {
@@ -81,6 +73,8 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
     try { localStorage.setItem("onwrd_show_help", showHelp ? "true" : "false"); } catch { /* ignore */ }
   }, [showHelp]);
 
+  const inSettings = location.startsWith("/settings");
+
   const isActive = (href: string, exact: boolean) =>
     exact ? location === href : location.startsWith(href);
 
@@ -89,6 +83,13 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
       active
         ? "text-white border-l-[3px] border-[#0000FF] bg-transparent"
         : "text-[#999999] border-l-[3px] border-transparent hover:text-white"
+    }`;
+
+  const subNavClass = (active: boolean) =>
+    `pl-8 pr-4 py-1.5 text-xs font-medium transition-colors block border-l-[3px] ${
+      active
+        ? "text-white border-[#0000FF]"
+        : "text-[#555] border-transparent hover:text-[#999]"
     }`;
 
   return (
@@ -109,17 +110,34 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
             {NAV_ITEMS.map(({ href, exact, icon: Icon, label, help }) => {
               const active = isActive(href, exact);
               return (
-                <Link key={href} href={href} className={navClass(active)}>
-                  <div className="flex items-center gap-3">
-                    <Icon className="w-5 h-5 flex-shrink-0" />
-                    <span>{label}</span>
-                  </div>
-                  {showHelp && (
-                    <p className="mt-0.5 ml-8 text-[11px] font-normal leading-snug text-[#555] whitespace-normal">
-                      {help}
-                    </p>
+                <div key={href}>
+                  <Link href={href} className={navClass(active)}>
+                    <div className="flex items-center gap-3">
+                      <Icon className="w-5 h-5 flex-shrink-0" />
+                      <span>{label}</span>
+                    </div>
+                    {showHelp && (
+                      <p className="mt-0.5 ml-8 text-[11px] font-normal leading-snug text-[#555] whitespace-normal">
+                        {help}
+                      </p>
+                    )}
+                  </Link>
+
+                  {/* Settings sub-items — shown when in /settings section */}
+                  {href === "/settings" && inSettings && (
+                    <div className="mb-1">
+                      {SETTINGS_SUB_ITEMS.map((sub) => (
+                        <Link
+                          key={sub.href}
+                          href={sub.href}
+                          className={subNavClass(isActive(sub.href, sub.exact))}
+                        >
+                          {sub.label}
+                        </Link>
+                      ))}
+                    </div>
                   )}
-                </Link>
+                </div>
               );
             })}
           </nav>

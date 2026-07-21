@@ -1,3 +1,6 @@
 - [Crawler quota design](crawler-quota-design.md) — circuit breaker + keyword-first gating pattern for AI scoring in the crawl pipeline
 - [Analysis pipeline design](analysis-pipeline.md) — extraction is a single AI call (not a loop); step statuses, 45k-char truncation, 90s abort, quota-never-retry pattern
-- [Test runner choice](test-runner.md) — vitest blocked by package firewall; use node:test + tsx (already in workspace catalog)
+- [Test runner choice](test-runner.md) — vitest blocked by package firewall; use node:test + tsx (already in workspace catalog); test script in package.json lists files explicitly
+- [drizzle-kit push blocked](drizzle-kit-push.md) — drizzle-kit push hangs on interactive prompt; use direct SQL for schema changes
+- [Scoring architecture](scoring-architecture.md) — bid scoring is deterministic (scoring-rules.ts), not AI; applyDeterministicScore() is the single entry point used by both API routes and the pipeline step
+- [Pre-existing TS errors](preexisting-ts-errors.md) — sections.ts and tenders.ts have implicit-any + unbuilt .d.ts errors predating this work; pnpm typecheck exit 2 is not a regression

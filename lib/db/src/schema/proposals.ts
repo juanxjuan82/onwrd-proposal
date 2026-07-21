@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, unique } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -15,7 +15,9 @@ export const proposalsTable = pgTable("proposals", {
   tenderId: integer("tender_id"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+}, (t) => [
+  unique("proposals_tender_id_unique").on(t.tenderId),
+]);
 
 export const insertProposalSchema = createInsertSchema(proposalsTable).omit({
   id: true,
