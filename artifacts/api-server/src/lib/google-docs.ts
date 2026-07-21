@@ -554,19 +554,24 @@ export async function moveDocToFolder(
   if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
 
   const params = new URLSearchParams({ addParents: folderId, fields: "id,parents" });
-  if (driveId) params.set("supportsAllDrives", "true");
+  // Always include supportsAllDrives so the call works for both personal Drive
+  // and Shared Drives without requiring the caller to know the Drive type.
+  params.set("supportsAllDrives", "true");
+  if (driveId) {
+    params.set("driveId", driveId);
+    params.set("includeItemsFromAllDrives", "true");
+  }
 
-  try {
-    const res = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${fileId}?${params.toString()}`,
-      { method: "PATCH", headers },
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?${params.toString()}`,
+    { method: "PATCH", headers },
+  );
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(
+      `Failed to move document into the configured folder (HTTP ${res.status}). ` +
+      `Check that the folder ID is correct and you have Editor access. Details: ${text}`,
     );
-    if (!res.ok) {
-      const text = await res.text();
-      console.error(`moveDocToFolder failed (${res.status}): ${text}`);
-    }
-  } catch (err) {
-    console.error("moveDocToFolder error:", err);
   }
 }
 

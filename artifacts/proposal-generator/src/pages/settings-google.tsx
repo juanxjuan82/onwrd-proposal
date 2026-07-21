@@ -20,6 +20,7 @@ export default function SettingsGoogle() {
   const [driveConfig, setDriveConfig] = useState<DriveConfig | null>(null);
   const [folderId, setFolderId] = useState("");
   const [folderName, setFolderName] = useState("");
+  const [driveId, setDriveId] = useState("");
   const [saving, setSaving] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [loadingConfig, setLoadingConfig] = useState(true);
@@ -32,6 +33,7 @@ export default function SettingsGoogle() {
         setDriveConfig(data);
         setFolderId(data.folderId ?? "");
         setFolderName(data.folderName ?? "");
+        setDriveId(data.driveId ?? "");
       }
     } catch {
       // ignore
@@ -54,14 +56,23 @@ export default function SettingsGoogle() {
       const res = await fetch(`${BASE}/api/settings/google-drive`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ folderId: folderId.trim(), folderName: folderName.trim() || undefined }),
+        body: JSON.stringify({
+          folderId: folderId.trim(),
+          folderName: folderName.trim() || undefined,
+          driveId: driveId.trim() || undefined,
+        }),
       });
-      if (!res.ok) throw new Error("Save failed");
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(errData.error || "Save failed");
+      }
       const data = (await res.json()) as DriveConfig;
       setDriveConfig(data);
+      setFolderName(data.folderName ?? folderName);
       toast({ title: "Drive folder saved", description: "Exports will be placed in this folder." });
-    } catch {
-      toast({ title: "Save failed", description: "Could not save the Drive configuration.", variant: "destructive" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Could not save the Drive configuration.";
+      toast({ title: "Save failed", description: msg, variant: "destructive" });
     } finally {
       setSaving(false);
     }
@@ -152,13 +163,29 @@ export default function SettingsGoogle() {
                 </div>
 
                 <div className="space-y-1.5">
-                  <Label htmlFor="folder-name">Display name <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                  <Label htmlFor="folder-name">Display name <span className="text-muted-foreground font-normal">(optional — auto-filled on save)</span></Label>
                   <Input
                     id="folder-name"
                     value={folderName}
                     onChange={(e) => setFolderName(e.target.value)}
                     placeholder="e.g. ONWRD Proposals 2026"
                   />
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label htmlFor="drive-id">Shared Drive ID <span className="text-muted-foreground font-normal">(optional — only needed for Shared Drives)</span></Label>
+                  <Input
+                    id="drive-id"
+                    value={driveId}
+                    onChange={(e) => setDriveId(e.target.value)}
+                    placeholder="Leave blank for personal Drive"
+                    className="font-mono text-xs"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    For a Shared Drive folder, copy the Drive ID from{" "}
+                    <code className="bg-muted px-1 rounded">drive.google.com/drive/u/0/folders/&lt;FOLDER_ID&gt;</code>{" "}
+                    — it is the ID shown in the URL when you navigate to the Shared Drive root, not the folder.
+                  </p>
                 </div>
 
                 <div className="flex gap-2 pt-1">
