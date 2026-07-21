@@ -134,11 +134,19 @@ export async function startScheduler(): Promise<void> {
   cron.schedule("0 6 * * *", async () => {
     console.log("[tender-cron] Starting daily crawl…");
     try {
-      const { newItems } = await runCrawler();
-      console.log(`[tender-cron] Done. ${newItems} new opportunities.`);
-      await sendDigestEmail(newItems);
+      const result = await runCrawler();
+      console.log(
+        `[tender-cron] Done. ${result.newItems} new. ` +
+        `AI calls: ${result.aiCallCount}, fallbacks: ${result.aiFallbackCount}` +
+        `${result.quotaErrorHit ? " ⚠ quota error — circuit opened" : ""}`
+      );
+      await sendDigestEmail(result.newItems);
     } catch (err) {
-      console.error("[tender-cron] Crawl failed:", err);
+      if (err instanceof Error && err.message.includes("already in progress")) {
+        console.warn("[tender-cron] Skipped — crawl already running.");
+      } else {
+        console.error("[tender-cron] Crawl failed:", err);
+      }
     }
   });
 

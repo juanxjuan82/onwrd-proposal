@@ -30,6 +30,10 @@ function getAdapter(adapterType: string): TenderSourceAdapter | null {
   }
 }
 
+// ── Constants ───────────────────────────────────────────────────────────────
+const AI_PROVIDER = "openai";
+const AI_CAP_PER_CRAWL = 20;
+
 // ── Shared scoring result type ──────────────────────────────────────────────
 interface ScoringResult {
   fitScore: number;
@@ -39,6 +43,21 @@ interface ScoringResult {
   geoRegion: string;
   bahamasAdvantageScore: number;
   confidence: string;
+}
+
+// ── Per-crawl telemetry & circuit-breaker state ─────────────────────────────
+interface CrawlTelemetry {
+  aiCallCount: number;
+  aiFallbackCount: number;
+  quotaCircuitOpen: boolean;
+  quotaErrorHit: boolean;
+}
+
+// ── In-process crawl lock (prevents overlap between scheduled & manual) ─────
+let crawlInProgress = false;
+
+export function isCrawlRunning(): boolean {
+  return crawlInProgress;
 }
 
 // ── Geography scoring ───────────────────────────────────────────────────────
@@ -96,13 +115,12 @@ function computeBahamasAdvantage(geographyScore: number, rawSectorScore: number)
   return Math.round(Math.max(0, Math.min(100, (geoFactor * 0.65 + sectorFactor * 0.35) * 100)));
 }
 
-// ── Keyword-based fallback scorer ───────────────────────────────────────────
+// ── Keyword-based scorer ─────────────────────────────────────────────────────
 function keywordScore(opp: TenderOpportunity): ScoringResult {
   const text = [
     opp.title, opp.description, opp.sector ?? "", opp.organization, opp.country ?? "",
   ].join(" ").toLowerCase();
 
-  // ── Deadline: hard filter — skip expired tenders first ───────────────────
   if (opp.deadline) {
     const deadline = opp.deadline instanceof Date ? opp.deadline : new Date(opp.deadline);
     if (deadline < new Date()) {
@@ -111,7 +129,6 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
     }
   }
 
-  // ── Stage 1: Marketing gate — must match at least one core term ──────────
   const marketingGate = [
     "marketing", "communications", "branding", "brand",
     "campaign", "public relations", "advertising", "media relations",
@@ -126,7 +143,6 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
     return { fitScore: 0, recommendation: "SKIP", reasoning: "No marketing or communications terms — not a fit for ONWRD.", geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
   }
 
-  // ── Stage 1: Hard disqualifiers ──────────────────────────────────────────
   const disqualifiers = [
     "us citizen only", "u.s. citizen only",
     "must be a resident of", "registered vendor in the state of",
@@ -138,11 +154,10 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
     return { fitScore: 0, recommendation: "SKIP", reasoning: "Hard disqualifier matched — eligibility restricted to local/US-only vendors.", geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
   }
 
-  // ── Stage 1: International remote-viability check ─────────────────────────
   const { geographyScore, geoRegion } = computeGeoScore(
     opp.country, [opp.title, opp.description, opp.sector ?? ""].join(" "),
   );
-  const isLocalRegion = geographyScore >= 75; // Bahamas or Caribbean auto-pass
+  const isLocalRegion = geographyScore >= 75;
   if (!isLocalRegion) {
     const remoteIndicators = [
       "remote", "virtual delivery", "international bidders", "international firms",
@@ -161,14 +176,12 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
     }
   }
 
-  // ── Stage 2: Component A — Geographic Alignment (max 35 pts) ─────────────
-  const geoComponent = geographyScore === 100 ? 35   // Bahamas
-    : geographyScore >= 75 ? 28                       // Caribbean
-    : geographyScore >= 60 ? 20                       // SIDS
-    : geographyScore >= 35 ? 15                       // LatAm
-    : 10;                                             // Global (passed remote check)
+  const geoComponent = geographyScore === 100 ? 35
+    : geographyScore >= 75 ? 28
+    : geographyScore >= 60 ? 20
+    : geographyScore >= 35 ? 15
+    : 10;
 
-  // ── Stage 2: Component B — Core Capabilities (max 30 pts) ────────────────
   const eliteSignals = [
     "marketing", "communications", "branding", "campaign",
     "public relations", "media relations", "media campaign", "media strategy",
@@ -231,7 +244,6 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
   for (const kw of negativeSignals) { if (text.includes(kw)) rawCap -= 6; }
   const capComponent = Math.max(0, Math.min(30, rawCap));
 
-  // ── Stage 2: Component C — Industry Vertical (max 20 pts) ────────────────
   const industryTiers: Array<{ terms: string[]; pts: number }> = [
     { terms: ["financial services", "banking", "insurance", "fintech", "investment"], pts: 20 },
     { terms: ["tourism", "hospitality", "hotel", "resort", "travel", "visitor economy", "destination"], pts: 20 },
@@ -240,20 +252,17 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
     { terms: ["multilateral", "idb", "world bank", "undp", "unicef", "cdb", "development bank"], pts: 16 },
     { terms: ["health", "education", "environment", "climate", "energy transition"], pts: 10 },
   ];
-  let industryComponent = 5; // baseline
+  let industryComponent = 5;
   for (const tier of industryTiers) {
     if (tier.terms.some((kw) => text.includes(kw))) { industryComponent = tier.pts; break; }
   }
 
-  // ── Stage 2: Component D — Scale & Feasibility (max 15 pts) ──────────────
   const scaleIndicators = ["timeline", "milestones", "deliverables", "budget", "proposal template", "scope of work", "terms of reference", "rfp", "request for proposal"];
   const scaleMatches = scaleIndicators.filter((kw) => text.includes(kw)).length;
   const scaleComponent = Math.min(15, Math.round((scaleMatches / scaleIndicators.length) * 15));
 
-  // ── Final score ───────────────────────────────────────────────────────────
   const baseScore = geoComponent + capComponent + industryComponent + scaleComponent;
 
-  // Urgency boost: +5 if deadline is set and within 14 days
   const urgencyBoost = (() => {
     if (!opp.deadline) return 0;
     const daysLeft = (opp.deadline.getTime() - Date.now()) / (1000 * 60 * 60 * 24);
@@ -262,8 +271,6 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
 
   const fitScore = Math.min(100, baseScore + urgencyBoost);
   const bahamasAdvantageScore = computeBahamasAdvantage(geographyScore, Math.round((capComponent / 30) * 100));
-
-  // Thresholds: PURSUE ≥60, CONSIDER 40–59, SKIP <40
   const recommendation = fitScore >= 60 ? "PURSUE" : fitScore >= 40 ? "CONSIDER" : "SKIP";
 
   const hasGeoSignal = geographyScore >= 75;
@@ -282,22 +289,36 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
   return { fitScore, recommendation, reasoning, geographyScore, geoRegion, bahamasAdvantageScore, confidence };
 }
 
-// ── AI scoring with keyword fallback ───────────────────────────────────────
-async function scoreOpportunity(opp: TenderOpportunity): Promise<ScoringResult> {
-  // Run keyword filter first — if it SKIPs at Stage 1, no point calling AI
-  const keyResult = keywordScore(opp);
-  if (keyResult.fitScore === 0 && keyResult.recommendation === "SKIP") {
-    return keyResult;
-  }
+// ── Boilerplate detection ────────────────────────────────────────────────────
+// Synthetic descriptions generated by adapters (not real opportunity content)
+// should not trigger AI scoring — the AI learns nothing useful from them.
+function isBoilerplateDescription(desc: string): boolean {
+  const t = desc.trim();
+  // Too short to contain meaningful scope information
+  if (t.length < 120) return true;
+  // Common adapter-generated stub patterns
+  const stubPatterns = [
+    /^(procurement notice|consulting services?|individual consultant|expression of interest|request for (proposals?|quotations?)|rfp|notice of (procurement|intent))\s*[:.]?\s*$/i,
+    /^\[?(no description available|n\/a|tbd|to be determined|see attached|see document)\]?\.?$/i,
+    /^(opportunity|tender|contract)\s+(ref(erence)?|no\.?|number|id)[:\s]\s*[\w-]+\s*$/i,
+  ];
+  return stubPatterns.some((p) => p.test(t));
+}
 
-  try {
-    const completion = await openai.chat.completions.create({
-      model: AI_MODEL,
-      max_tokens: 600,
-      messages: [
-        {
-          role: "system",
-          content: `You evaluate procurement opportunities for ONWRD, a Bahamas-based full-service marketing and communications agency.
+// ── Error classifiers ────────────────────────────────────────────────────────
+function isQuotaError(err: unknown): boolean {
+  const msg = String(err instanceof Error ? err.message : err);
+  return msg.includes("insufficient_quota") || msg.includes("exceeded your current quota");
+}
+
+function isTemporaryRateLimitError(err: unknown): boolean {
+  const msg = String(err instanceof Error ? err.message : err);
+  return (msg.includes("rate_limit") || msg.includes("rate limit") || msg.includes("too many requests"))
+    && !isQuotaError(err);
+}
+
+// ── AI scorer system prompt ──────────────────────────────────────────────────
+const SCORER_SYSTEM_PROMPT = `You evaluate procurement opportunities for ONWRD, a Bahamas-based full-service marketing and communications agency.
 
 ONWRD specialises in: marketing campaigns, branding, communications strategy, digital marketing, social media, tourism promotion, community engagement, public awareness campaigns, stakeholder engagement, creative production, and development-sector communications.
 
@@ -332,33 +353,103 @@ Return ONLY valid JSON:
   "confidence": "HIGH" | "MEDIUM" | "LOW"
 }
 
-PURSUE ≥60, CONSIDER 40-59, SKIP <40.`,
-        },
-        {
-          role: "user",
-          content: `Title: ${opp.title}\nOrganization: ${opp.organization}\nCountry: ${opp.country ?? ""}\nSector: ${opp.sector ?? ""}\nDescription: ${opp.description.slice(0, 500)}`,
-        },
-      ],
-      response_format: { type: "json_object" },
-    });
+PURSUE ≥60, CONSIDER 40-59, SKIP <40.`;
 
-    const raw = JSON.parse(completion.choices[0]?.message?.content ?? "{}");
-    return {
-      fitScore: Number(raw.fitScore ?? 0),
-      recommendation: String(raw.recommendation ?? "SKIP"),
-      reasoning: String(raw.reasoning ?? ""),
-      geographyScore: Number(raw.geographyScore ?? 20),
-      geoRegion: String(raw.geoRegion ?? "global"),
-      bahamasAdvantageScore: Number(raw.bahamasAdvantageScore ?? 0),
-      confidence: String(raw.confidence ?? "LOW"),
-    };
-  } catch (err) {
-    console.warn("[scoring] OpenAI unavailable, using keyword fallback:", err instanceof Error ? err.message : String(err));
-    return keywordScore(opp);
-  }
+// ── Core AI call (single attempt — retries handled by scoreOpportunity) ──────
+async function callAIScorer(opp: TenderOpportunity): Promise<ScoringResult> {
+  const completion = await openai.chat.completions.create({
+    model: AI_MODEL,
+    max_tokens: 600,
+    messages: [
+      { role: "system", content: SCORER_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: `Title: ${opp.title}\nOrganization: ${opp.organization}\nCountry: ${opp.country ?? ""}\nSector: ${opp.sector ?? ""}\nDescription: ${opp.description.slice(0, 500)}`,
+      },
+    ],
+    response_format: { type: "json_object" },
+  });
+
+  const raw = JSON.parse(completion.choices[0]?.message?.content ?? "{}");
+  return {
+    fitScore: Number(raw.fitScore ?? 0),
+    recommendation: String(raw.recommendation ?? "SKIP"),
+    reasoning: String(raw.reasoning ?? ""),
+    geographyScore: Number(raw.geographyScore ?? 20),
+    geoRegion: String(raw.geoRegion ?? "global"),
+    bahamasAdvantageScore: Number(raw.bahamasAdvantageScore ?? 0),
+    confidence: String(raw.confidence ?? "LOW"),
+  };
 }
 
-// ── Rescore all existing items ──────────────────────────────────────────────
+// ── Score opportunity with circuit-breaker and selective retry ───────────────
+//
+// Rules:
+//  1. Keyword scores first — SKIP immediately without any AI call.
+//  2. Boilerplate descriptions are not sent to AI (keyword result returned as-is).
+//  3. Circuit open (quota exhausted) or cap reached → keyword result returned.
+//  4. Temporary rate-limit → retry up to 2 times with backoff.
+//  5. Quota error → open circuit, no retry, keyword fallback for rest of crawl.
+//  6. Any other error → keyword fallback, circuit stays closed.
+async function scoreOpportunity(
+  opp: TenderOpportunity,
+  telemetry: CrawlTelemetry,
+): Promise<ScoringResult> {
+  // Step 1: Keyword scoring (always runs first, zero cost)
+  const keyResult = keywordScore(opp);
+
+  // Step 2: Hard SKIP — keyword engine is confident, no AI needed
+  if (keyResult.recommendation === "SKIP") return keyResult;
+
+  // Step 3: Boilerplate guard — synthetic descriptions don't help the AI
+  if (isBoilerplateDescription(opp.description)) {
+    telemetry.aiFallbackCount++;
+    return {
+      ...keyResult,
+      reasoning: keyResult.reasoning + " (keyword-only: description too short or synthetic)",
+    };
+  }
+
+  // Step 4: Circuit open or per-crawl cap reached — skip AI
+  if (telemetry.quotaCircuitOpen || telemetry.aiCallCount >= AI_CAP_PER_CRAWL) {
+    telemetry.aiFallbackCount++;
+    return keyResult;
+  }
+
+  // Step 5: Attempt AI with rate-limit retry (quota errors never retried)
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const result = await callAIScorer(opp);
+      telemetry.aiCallCount++;
+      return result;
+    } catch (err) {
+      if (isQuotaError(err)) {
+        // Open circuit immediately — don't retry, keyword for rest of crawl
+        telemetry.quotaCircuitOpen = true;
+        telemetry.quotaErrorHit = true;
+        telemetry.aiFallbackCount++;
+        console.warn("[scoring] Quota exhausted — circuit open, keyword scoring for remainder of crawl");
+        return keyResult;
+      }
+      if (isTemporaryRateLimitError(err) && attempt < 2) {
+        const delay = (attempt + 1) * 3000;
+        console.warn(`[scoring] Rate limited (attempt ${attempt + 1}/3) — retrying in ${delay}ms`);
+        await new Promise<void>((r) => setTimeout(r, delay));
+        continue;
+      }
+      // Unknown error — fallback, circuit stays closed
+      console.warn("[scoring] AI error, using keyword fallback:", err instanceof Error ? err.message : String(err));
+      telemetry.aiFallbackCount++;
+      return keyResult;
+    }
+  }
+
+  // Retries exhausted (rate-limit) — fallback
+  telemetry.aiFallbackCount++;
+  return keyResult;
+}
+
+// ── Rescore all existing items with keyword engine ──────────────────────────
 export async function rescoreWithKeywords(): Promise<number> {
   const items = await db.select().from(discoveredTendersTable);
 
@@ -390,12 +481,28 @@ export async function rescoreWithKeywords(): Promise<number> {
   return count;
 }
 
-// ── Main crawl runner ───────────────────────────────────────────────────────
+// ── Main crawl runner ────────────────────────────────────────────────────────
 export async function runCrawler(sourceId?: number): Promise<{
   total: number;
   newItems: number;
   sources: number;
+  aiCallCount: number;
+  aiFallbackCount: number;
+  quotaErrorHit: boolean;
 }> {
+  // Overlap prevention — reject if a crawl is already running
+  if (crawlInProgress) {
+    throw new Error("A crawl is already in progress — skipping to prevent overlap.");
+  }
+  crawlInProgress = true;
+
+  const telemetry: CrawlTelemetry = {
+    aiCallCount: 0,
+    aiFallbackCount: 0,
+    quotaCircuitOpen: false,
+    quotaErrorHit: false,
+  };
+
   const sources = sourceId
     ? await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.id, sourceId))
     : await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.active, true));
@@ -403,123 +510,130 @@ export async function runCrawler(sourceId?: number): Promise<{
   let totalFound = 0;
   let totalNew = 0;
 
-  for (const source of sources) {
-    const adapter = getAdapter(source.adapterType);
-    if (!adapter) continue;
+  try {
+    for (const source of sources) {
+      const adapter = getAdapter(source.adapterType);
+      if (!adapter) continue;
 
-    const [run] = await db.insert(crawlerRunsTable).values({
-      sourceId: source.id,
-      startedAt: new Date(),
-      status: "running",
-    }).returning();
+      // Snapshot telemetry before processing this source so per-source deltas can be recorded
+      const aiCallsBefore = telemetry.aiCallCount;
+      const aiFallbackBefore = telemetry.aiFallbackCount;
 
-    try {
-      const opportunities = await adapter.fetchOpportunities();
-      totalFound += opportunities.length;
+      const [run] = await db.insert(crawlerRunsTable).values({
+        sourceId: source.id,
+        startedAt: new Date(),
+        status: "running",
+        aiProvider: AI_PROVIDER,
+        aiModel: AI_MODEL,
+      }).returning();
 
-      let newCount = 0;
+      try {
+        const opportunities = await adapter.fetchOpportunities();
+        totalFound += opportunities.length;
 
-      for (const opp of opportunities) {
-        // Deduplicate by externalId
-        if (opp.externalId) {
-          const existing = await db.select({ id: discoveredTendersTable.id })
-            .from(discoveredTendersTable)
-            .where(eq(discoveredTendersTable.externalId, opp.externalId));
-          if (existing.length > 0) continue;
+        let newCount = 0;
+
+        for (const opp of opportunities) {
+          // Deduplicate by externalId
+          if (opp.externalId) {
+            const existing = await db.select({ id: discoveredTendersTable.id })
+              .from(discoveredTendersTable)
+              .where(eq(discoveredTendersTable.externalId, opp.externalId));
+            if (existing.length > 0) continue;
+          }
+
+          // Deduplicate by URL
+          if (opp.url) {
+            const existingByUrl = await db.select({ id: discoveredTendersTable.id })
+              .from(discoveredTendersTable)
+              .where(eq(discoveredTendersTable.url, opp.url));
+            if (existingByUrl.length > 0) continue;
+          }
+
+          const result = await scoreOpportunity(opp, telemetry);
+
+          await db.insert(discoveredTendersTable).values({
+            sourceId: source.id,
+            externalId: opp.externalId ?? null,
+            title: opp.title,
+            organization: opp.organization,
+            url: opp.url ?? null,
+            deadline: opp.deadline ?? null,
+            description: opp.description,
+            country: opp.country ?? null,
+            sector: opp.sector ?? null,
+            valueAmount: opp.valueAmount ?? null,
+            rawData: opp.rawData ?? null,
+            status: "new",
+            fitScore: result.fitScore,
+            recommendation: result.recommendation,
+            scoringReasoning: result.reasoning,
+            geographyScore: result.geographyScore,
+            geoRegion: result.geoRegion,
+            bahamasAdvantageScore: result.bahamasAdvantageScore,
+            confidence: result.confidence,
+          });
+
+          newCount++;
+          totalNew++;
         }
 
-        // Deduplicate by URL
-        if (opp.url) {
-          const existingByUrl = await db.select({ id: discoveredTendersTable.id })
-            .from(discoveredTendersTable)
-            .where(eq(discoveredTendersTable.url, opp.url));
-          if (existingByUrl.length > 0) continue;
-        }
+        await db.update(crawlerRunsTable).set({
+          completedAt: new Date(),
+          status: "success",
+          itemsFound: opportunities.length,
+          itemsNew: newCount,
+          aiCallCount: telemetry.aiCallCount - aiCallsBefore,
+          aiFallbackCount: telemetry.aiFallbackCount - aiFallbackBefore,
+          aiQuotaError: telemetry.quotaErrorHit,
+        }).where(eq(crawlerRunsTable.id, run.id));
 
-        const result = await scoreOpportunity(opp);
+        await db.update(tenderSourcesTable).set({
+          lastCheckedAt: new Date(),
+          lastSuccessAt: new Date(),
+          itemsFoundCount: source.itemsFoundCount + newCount,
+          updatedAt: new Date(),
+        }).where(eq(tenderSourcesTable.id, source.id));
 
-        await db.insert(discoveredTendersTable).values({
-          sourceId: source.id,
-          externalId: opp.externalId ?? null,
-          title: opp.title,
-          organization: opp.organization,
-          url: opp.url ?? null,
-          deadline: opp.deadline ?? null,
-          description: opp.description,
-          country: opp.country ?? null,
-          sector: opp.sector ?? null,
-          valueAmount: opp.valueAmount ?? null,
-          rawData: opp.rawData ?? null,
-          status: "new",
-          fitScore: result.fitScore,
-          recommendation: result.recommendation,
-          scoringReasoning: result.reasoning,
-          geographyScore: result.geographyScore,
-          geoRegion: result.geoRegion,
-          bahamasAdvantageScore: result.bahamasAdvantageScore,
-          confidence: result.confidence,
-        });
+      } catch (err) {
+        await db.update(crawlerRunsTable).set({
+          completedAt: new Date(),
+          status: "failed",
+          errorMessage: String(err instanceof Error ? err.message : err),
+          aiCallCount: telemetry.aiCallCount - aiCallsBefore,
+          aiFallbackCount: telemetry.aiFallbackCount - aiFallbackBefore,
+          aiQuotaError: telemetry.quotaErrorHit,
+        }).where(eq(crawlerRunsTable.id, run.id));
 
-        newCount++;
-        totalNew++;
+        await db.update(tenderSourcesTable).set({
+          lastCheckedAt: new Date(),
+          updatedAt: new Date(),
+        }).where(eq(tenderSourcesTable.id, source.id));
       }
-
-      await db.update(crawlerRunsTable).set({
-        completedAt: new Date(),
-        status: "success",
-        itemsFound: opportunities.length,
-        itemsNew: newCount,
-      }).where(eq(crawlerRunsTable.id, run.id));
-
-      await db.update(tenderSourcesTable).set({
-        lastCheckedAt: new Date(),
-        lastSuccessAt: new Date(),
-        itemsFoundCount: source.itemsFoundCount + newCount,
-        updatedAt: new Date(),
-      }).where(eq(tenderSourcesTable.id, source.id));
-
-    } catch (err) {
-      await db.update(crawlerRunsTable).set({
-        completedAt: new Date(),
-        status: "failed",
-        errorMessage: String(err instanceof Error ? err.message : err),
-      }).where(eq(crawlerRunsTable.id, run.id));
-
-      await db.update(tenderSourcesTable).set({
-        lastCheckedAt: new Date(),
-        updatedAt: new Date(),
-      }).where(eq(tenderSourcesTable.id, source.id));
     }
+  } finally {
+    crawlInProgress = false;
   }
 
-  return { total: totalFound, newItems: totalNew, sources: sources.length };
+  return {
+    total: totalFound,
+    newItems: totalNew,
+    sources: sources.length,
+    aiCallCount: telemetry.aiCallCount,
+    aiFallbackCount: telemetry.aiFallbackCount,
+    quotaErrorHit: telemetry.quotaErrorHit,
+  };
 }
 
-// ── Seed default sources ────────────────────────────────────────────────────
+// ── Seed default sources ─────────────────────────────────────────────────────
 export async function seedDefaultSources(): Promise<void> {
   const existing = await db.select().from(tenderSourcesTable);
   if (existing.length > 0) {
-    // Add any new sources that weren't there before
     const existingTypes = new Set(existing.map((s) => s.adapterType));
     const newSources = [
-      {
-        name: "Caribbean Tourism Organization",
-        sourceType: "regional",
-        url: "https://www.caribtourism.com/",
-        adapterType: "cto",
-      },
-      {
-        name: "CARICOM Secretariat",
-        sourceType: "regional",
-        url: "https://caricom.org/",
-        adapterType: "caricom",
-      },
-      {
-        name: "EU Caribbean Development Fund",
-        sourceType: "development_fund",
-        url: "https://www.cariforum.org/",
-        adapterType: "eu_caribbean",
-      },
+      { name: "Caribbean Tourism Organization", sourceType: "regional", url: "https://www.caribtourism.com/", adapterType: "cto" },
+      { name: "CARICOM Secretariat", sourceType: "regional", url: "https://caricom.org/", adapterType: "caricom" },
+      { name: "EU Caribbean Development Fund", sourceType: "development_fund", url: "https://www.cariforum.org/", adapterType: "eu_caribbean" },
     ];
     for (const s of newSources) {
       if (!existingTypes.has(s.adapterType)) {
@@ -529,56 +643,15 @@ export async function seedDefaultSources(): Promise<void> {
     return;
   }
 
-  // Fresh seed — all 8 sources
   const defaults = [
-    {
-      name: "World Bank Procurement",
-      sourceType: "development_bank",
-      url: "https://search.worldbank.org/api/v2/procnotices",
-      adapterType: "world_bank",
-    },
-    {
-      name: "UNDP Procurement Notices",
-      sourceType: "un",
-      url: "https://procurement-notices.undp.org/",
-      adapterType: "ungm",
-    },
-    {
-      name: "Inter-American Development Bank",
-      sourceType: "development_bank",
-      url: "https://www.iadb.org/en/projects/all",
-      adapterType: "idb",
-    },
-    {
-      name: "Caribbean Development Bank",
-      sourceType: "development_bank",
-      url: "https://www.caribank.org/",
-      adapterType: "cdb",
-    },
-    {
-      name: "Bahamas Government Procurement",
-      sourceType: "government",
-      url: "https://www.bahamas.gov.bs/wps/portal/public/gov/government/news",
-      adapterType: "bahamas_gov",
-    },
-    {
-      name: "Caribbean Tourism Organization",
-      sourceType: "regional",
-      url: "https://www.caribtourism.com/",
-      adapterType: "cto",
-    },
-    {
-      name: "CARICOM Secretariat",
-      sourceType: "regional",
-      url: "https://caricom.org/",
-      adapterType: "caricom",
-    },
-    {
-      name: "EU Caribbean Development Fund",
-      sourceType: "development_fund",
-      url: "https://www.cariforum.org/",
-      adapterType: "eu_caribbean",
-    },
+    { name: "World Bank Procurement", sourceType: "development_bank", url: "https://search.worldbank.org/api/v2/procnotices", adapterType: "world_bank" },
+    { name: "UNDP Procurement Notices", sourceType: "un", url: "https://procurement-notices.undp.org/", adapterType: "ungm" },
+    { name: "Inter-American Development Bank", sourceType: "development_bank", url: "https://www.iadb.org/en/projects/all", adapterType: "idb" },
+    { name: "Caribbean Development Bank", sourceType: "development_bank", url: "https://www.caribank.org/", adapterType: "cdb" },
+    { name: "Bahamas Government Procurement", sourceType: "government", url: "https://www.bahamas.gov.bs/wps/portal/public/gov/government/news", adapterType: "bahamas_gov" },
+    { name: "Caribbean Tourism Organization", sourceType: "regional", url: "https://www.caribtourism.com/", adapterType: "cto" },
+    { name: "CARICOM Secretariat", sourceType: "regional", url: "https://caricom.org/", adapterType: "caricom" },
+    { name: "EU Caribbean Development Fund", sourceType: "development_fund", url: "https://www.cariforum.org/", adapterType: "eu_caribbean" },
   ];
 
   for (const s of defaults) {
@@ -586,7 +659,7 @@ export async function seedDefaultSources(): Promise<void> {
   }
 }
 
-// ── Seed default search profiles ────────────────────────────────────────────
+// ── Seed default search profiles ─────────────────────────────────────────────
 export async function seedDefaultSearchProfiles(): Promise<void> {
   const { tenderSearchProfilesTable } = await import("@workspace/db");
   const existing = await db.select().from(tenderSearchProfilesTable);
@@ -596,37 +669,25 @@ export async function seedDefaultSearchProfiles(): Promise<void> {
     {
       name: "Communications & Marketing",
       description: "Core ONWRD practice area",
-      keywords: JSON.stringify([
-        "communications", "marketing", "campaign", "branding", "media",
-        "public awareness", "digital engagement", "stakeholder engagement",
-        "creative", "content",
-      ]),
+      keywords: JSON.stringify(["communications", "marketing", "campaign", "branding", "media", "public awareness", "digital engagement", "stakeholder engagement", "creative", "content"]),
       excludedKeywords: JSON.stringify([]),
     },
     {
       name: "Development Sector",
       description: "NGO/multilateral comms work",
-      keywords: JSON.stringify([
-        "community engagement", "behavior change", "knowledge dissemination",
-        "capacity building", "social impact", "awareness campaign",
-      ]),
+      keywords: JSON.stringify(["community engagement", "behavior change", "knowledge dissemination", "capacity building", "social impact", "awareness campaign"]),
       excludedKeywords: JSON.stringify([]),
     },
     {
       name: "Tourism & Destination",
       description: "Tourism marketing opportunities",
-      keywords: JSON.stringify([
-        "destination marketing", "tourism", "visitor experience",
-        "brand strategy", "promotion", "hospitality",
-      ]),
+      keywords: JSON.stringify(["destination marketing", "tourism", "visitor experience", "brand strategy", "promotion", "hospitality"]),
       excludedKeywords: JSON.stringify([]),
     },
     {
       name: "Bahamas & Caribbean",
       description: "Geo-priority opportunities",
-      keywords: JSON.stringify([
-        "bahamas", "caribbean", "caricom", "oecs", "cdb", "cto",
-      ]),
+      keywords: JSON.stringify(["bahamas", "caribbean", "caricom", "oecs", "cdb", "cto"]),
       excludedKeywords: JSON.stringify([]),
     },
   ];

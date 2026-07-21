@@ -8,7 +8,7 @@ import {
   tenderDigestSettingsTable,
 } from "@workspace/db";
 import { eq, desc, and, gte } from "drizzle-orm";
-import { runCrawler, rescoreWithKeywords } from "../crawlers/index.js";
+import { runCrawler, rescoreWithKeywords, isCrawlRunning } from "../crawlers/index.js";
 
 const router = Router();
 
@@ -58,16 +58,25 @@ router.post("/tender-intelligence/rescore", async (req, res) => {
 });
 
 // ── Manual crawl trigger ───────────────────────────────────────────────────
-router.post("/tender-intelligence/crawl", async (req, res) => {
+router.post("/tender-intelligence/crawl", (req, res) => {
+  // Synchronous overlap check before launching the async crawl
+  if (isCrawlRunning()) {
+    res.status(409).json({ error: "A crawl is already in progress. Please wait for it to finish." });
+    return;
+  }
+
   const sourceId = req.body?.sourceId ? Number(req.body.sourceId) : undefined;
   res.json({ message: "Crawl started in background" });
-  void (async () => {
-    try {
-      await runCrawler(sourceId);
-    } catch (err) {
-      console.error("[manual-crawl] failed:", err);
-    }
-  })();
+
+  void runCrawler(sourceId).then((result) => {
+    console.log(
+      `[manual-crawl] Done. ${result.newItems} new. ` +
+      `AI calls: ${result.aiCallCount}, fallbacks: ${result.aiFallbackCount}` +
+      `${result.quotaErrorHit ? " ⚠ quota error — circuit opened" : ""}`
+    );
+  }).catch((err) => {
+    console.error("[manual-crawl] failed:", err instanceof Error ? err.message : String(err));
+  });
 });
 
 // ── Crawler run history ────────────────────────────────────────────────────

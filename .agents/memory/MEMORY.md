@@ -1,1 +1,1 @@
-- [Proposal Desk Architecture](proposal-desk.md) — full RFP→proposal workflow built; key schema, route, and AI model decisions.
+- [Crawler quota design](crawler-quota-design.md) — circuit breaker + keyword-first gating pattern for AI scoring in the crawl pipeline
