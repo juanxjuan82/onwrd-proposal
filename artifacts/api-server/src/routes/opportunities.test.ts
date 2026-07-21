@@ -20,10 +20,12 @@ import {
   isNetworkError,
   isRetryable,
   callWithSingleRetry,
+  getFirstIncompleteStep,
   MAX_INPUT_CHARS,
   HEAD_CHARS,
   TAIL_CHARS,
   ANALYSIS_ACTIVE_STATUSES,
+  ANALYSIS_STEP_ORDER,
   STALE_JOB_MS,
 } from "../lib/analysis-utils.js";
 
@@ -348,5 +350,138 @@ describe("duplicate analysis prevention (status guard)", () => {
   it("allows a new analysis when status is opportunity_found", () => {
     const isActive = (ANALYSIS_ACTIVE_STATUSES as readonly string[]).includes("opportunity_found");
     assert.ok(!isActive);
+  });
+
+  it("does NOT include analysis_cancelled (cancelled is terminal, not active)", () => {
+    const isActive = (ANALYSIS_ACTIVE_STATUSES as readonly string[]).includes("analysis_cancelled");
+    assert.ok(!isActive, "analysis_cancelled must not be an active status");
+  });
+
+  it("allows a new analysis when status is analysis_cancelled", () => {
+    const isActive = (ANALYSIS_ACTIVE_STATUSES as readonly string[]).includes("analysis_cancelled");
+    assert.ok(!isActive, "cancelled tender can be re-analysed");
+  });
+});
+
+// ── ANALYSIS_STEP_ORDER ───────────────────────────────────────────────────────
+
+describe("ANALYSIS_STEP_ORDER", () => {
+  it("has exactly 3 steps", () => {
+    assert.equal(ANALYSIS_STEP_ORDER.length, 3);
+  });
+
+  it("begins with requirements_extracting", () => {
+    assert.equal(ANALYSIS_STEP_ORDER[0], "requirements_extracting");
+  });
+
+  it("has bid_scoring as the second step", () => {
+    assert.equal(ANALYSIS_STEP_ORDER[1], "bid_scoring");
+  });
+
+  it("ends with strategy_generating", () => {
+    assert.equal(ANALYSIS_STEP_ORDER[2], "strategy_generating");
+  });
+});
+
+// ── getFirstIncompleteStep ────────────────────────────────────────────────────
+
+describe("getFirstIncompleteStep", () => {
+  it("returns requirements_extracting when nothing is complete", () => {
+    assert.equal(getFirstIncompleteStep([]), "requirements_extracting");
+  });
+
+  it("returns bid_scoring when only requirements are complete", () => {
+    assert.equal(getFirstIncompleteStep(["requirements_extracting"]), "bid_scoring");
+  });
+
+  it("returns strategy_generating when requirements + bid_scoring are complete", () => {
+    assert.equal(getFirstIncompleteStep(["requirements_extracting", "bid_scoring"]), "strategy_generating");
+  });
+
+  it("returns null when all three steps are complete", () => {
+    assert.equal(
+      getFirstIncompleteStep(["requirements_extracting", "bid_scoring", "strategy_generating"]),
+      null,
+    );
+  });
+
+  it("skips strategy_generating when skipStrategy is true", () => {
+    assert.equal(
+      getFirstIncompleteStep(["requirements_extracting", "bid_scoring"], true),
+      null,
+    );
+  });
+
+  it("returns requirements_extracting even with skipStrategy true when not done", () => {
+    assert.equal(getFirstIncompleteStep([], true), "requirements_extracting");
+  });
+
+  it("returns bid_scoring even with skipStrategy true when requirements done", () => {
+    assert.equal(getFirstIncompleteStep(["requirements_extracting"], true), "bid_scoring");
+  });
+
+  it("is order-insensitive — only cares about set membership", () => {
+    assert.equal(
+      getFirstIncompleteStep(["strategy_generating", "requirements_extracting"]),
+      "bid_scoring",
+    );
+  });
+
+  it("ignores unknown/extra step names without error", () => {
+    assert.equal(
+      getFirstIncompleteStep(["requirements_extracting", "unknown_step"]),
+      "bid_scoring",
+    );
+  });
+
+  it("handles duplicate entries in completedSteps without throwing", () => {
+    assert.equal(
+      getFirstIncompleteStep(["requirements_extracting", "requirements_extracting"]),
+      "bid_scoring",
+    );
+  });
+});
+
+// ── Cancel/resume eligibility via ANALYSIS_ACTIVE_STATUSES ───────────────────
+
+describe("cancel/resume eligibility", () => {
+  it("cancel is valid during requirements_extracting (active step)", () => {
+    const cancelTarget = "requirements_extracting";
+    assert.ok(
+      (ANALYSIS_ACTIVE_STATUSES as readonly string[]).includes(cancelTarget),
+      "must be cancellable while extracting requirements",
+    );
+  });
+
+  it("cancel is valid during bid_scoring", () => {
+    assert.ok((ANALYSIS_ACTIVE_STATUSES as readonly string[]).includes("bid_scoring"));
+  });
+
+  it("cancel is valid during strategy_generating", () => {
+    assert.ok((ANALYSIS_ACTIVE_STATUSES as readonly string[]).includes("strategy_generating"));
+  });
+
+  it("resume is valid on analysis_cancelled (terminal, non-active)", () => {
+    const status = "analysis_cancelled";
+    const isActive = (ANALYSIS_ACTIVE_STATUSES as readonly string[]).includes(status);
+    assert.ok(!isActive, "cancelled tender is not active → resume is allowed");
+  });
+
+  it("resume is valid on analysis_failed (terminal, non-active)", () => {
+    const status = "analysis_failed";
+    const isActive = (ANALYSIS_ACTIVE_STATUSES as readonly string[]).includes(status);
+    assert.ok(!isActive, "failed tender is not active → resume is allowed");
+  });
+
+  it("simultaneous-cancel race: cancelled status is terminal so cancel endpoint returns alreadyCompleted", () => {
+    const cancelledStatus = "analysis_cancelled";
+    const isStillActive = (ANALYSIS_ACTIVE_STATUSES as readonly string[]).includes(cancelledStatus);
+    assert.ok(!isStillActive, "a second cancel on an already-cancelled tender gets alreadyCompleted=true");
+  });
+
+  it("simultaneous-complete race: screened status is terminal so cancel endpoint returns alreadyCompleted", () => {
+    const screenedStatus = "screened";
+    const isStillActive = (ANALYSIS_ACTIVE_STATUSES as readonly string[]).includes(screenedStatus);
+    assert.ok(!isStillActive, "cancel arriving after completion gets alreadyCompleted=true");
   });
 });

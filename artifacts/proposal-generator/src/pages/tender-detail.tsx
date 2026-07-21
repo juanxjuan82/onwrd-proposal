@@ -10,6 +10,10 @@ import {
   RefreshCw,
   AlertTriangle,
   Clock,
+  CheckCircle2,
+  XCircle,
+  PlayCircle,
+  Zap,
 } from "lucide-react";
 import {
   useGetTender,
@@ -35,29 +39,41 @@ const ANALYSIS_IN_PROGRESS = new Set([
 
 const STEP_LABELS: Record<string, string> = {
   requirements_extracting: "Extracting requirements",
-  bid_scoring: "Scoring bid fit",
-  strategy_generating: "Generating strategy",
-  analysing: "Analysing",
+  bid_scoring:             "Scoring bid fit",
+  strategy_generating:     "Generating strategy",
+  analysing:               "Analysing",
 };
 
 const STATUS_LABELS: Record<string, string> = {
-  opportunity_found: "Found",
-  requirements_extracting: "Extracting Requirements…",
-  bid_scoring: "Scoring Bid…",
-  strategy_generating: "Generating Strategy…",
-  requirements_extracted: "Requirements Extracted",
-  screened: "Screened",
-  no_bid: "No Bid",
-  analysis_failed: "Analysis Failed",
-  proposal_drafting: "Drafting Proposal",
-  needs_onwrd_input: "Needs Input",
-  ready_for_review: "Ready for Review",
-  bid_started: "Bid Started",
+  opportunity_found:        "Found",
+  requirements_extracting:  "Extracting Requirements…",
+  bid_scoring:              "Scoring Bid…",
+  strategy_generating:      "Generating Strategy…",
+  requirements_extracted:   "Requirements Extracted",
+  screened:                 "Screened",
+  no_bid:                   "No Bid",
+  analysis_failed:          "Analysis Failed",
+  analysis_cancelled:       "Analysis Cancelled",
+  proposal_drafting:        "Drafting Proposal",
+  needs_onwrd_input:        "Needs Input",
+  ready_for_review:         "Ready for Review",
+  bid_started:              "Bid Started",
 };
 
-const MAX_POLL_MS = 5 * 60 * 1_000; // stop polling after 5 minutes
+const MAX_POLL_MS = 5 * 60 * 1_000;
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+// New columns that may not yet be in the generated client types
+type TenderExt = {
+  analysisRunId?:   string | null;
+  cancelledAt?:     string | null;
+  completedSteps?:  string | null;
+  aiInputTokens?:   number | null;
+  aiOutputTokens?:  number | null;
+  failedStep?:      string | null;
+  failedErrorCode?: string | null;
+};
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
@@ -70,13 +86,23 @@ export default function TenderDetail() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
+  const tenderExt = tender as (typeof tender & TenderExt) | undefined;
+
   const isAnalysing = ANALYSIS_IN_PROGRESS.has(tender?.status ?? "");
   const pollStartRef = useRef<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [pollTimedOut, setPollTimedOut] = useState(false);
   const [reanalyzing, setReanalyzing] = useState(false);
+  const [cancelling, setCancelling]  = useState(false);
+  const [resuming, setResuming]      = useState(false);
 
-  // Track when polling starts
+  // Parse completed steps from DB JSON string
+  const completedSteps: string[] = (() => {
+    try { return JSON.parse(tenderExt?.completedSteps ?? "[]") as string[]; }
+    catch { return []; }
+  })();
+
+  // Track when polling starts / stops
   useEffect(() => {
     if (isAnalysing && pollStartRef.current === null) {
       pollStartRef.current = Date.now();
@@ -106,6 +132,8 @@ export default function TenderDetail() {
     return () => clearInterval(interval);
   }, [isAnalysing, pollTimedOut, tenderId, queryClient]);
 
+  // ── Actions ───────────────────────────────────────────────────────────────
+
   const handleGenerate = async () => {
     try {
       const proposal = await generate.mutateAsync({ id: tenderId });
@@ -125,9 +153,7 @@ export default function TenderDetail() {
   const handleReanalyze = async () => {
     setReanalyzing(true);
     try {
-      const res = await fetch(`${BASE}/api/opportunities/${tenderId}/analyze`, {
-        method: "POST",
-      });
+      const res = await fetch(`${BASE}/api/opportunities/${tenderId}/analyze`, { method: "POST" });
       if (res.status === 409) {
         toast({ title: "Already running", description: "Analysis is already in progress." });
         return;
@@ -145,6 +171,64 @@ export default function TenderDetail() {
       setReanalyzing(false);
     }
   };
+
+  const handleCancel = async () => {
+    const runId = tenderExt?.analysisRunId;
+    if (!runId) {
+      toast({ title: "Cannot cancel", description: "No active analysis run ID found.", variant: "destructive" });
+      return;
+    }
+    setCancelling(true);
+    try {
+      const res = await fetch(`${BASE}/api/opportunities/${tenderId}/cancel-analysis`, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ analysisRunId: runId }),
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        status?: string;
+        alreadyCompleted?: boolean;
+        error?: string;
+        message?: string;
+      };
+
+      if (!res.ok) {
+        toast({ title: "Cancel failed", description: body.error ?? "Unknown error", variant: "destructive" });
+        return;
+      }
+      if (body.alreadyCompleted) {
+        toast({ title: "Already finished", description: `The analysis completed before the cancel arrived (${body.status ?? ""}).` });
+      } else {
+        toast({ title: "Analysis cancelled", description: "The AI run has been stopped." });
+      }
+      void queryClient.invalidateQueries({ queryKey: getGetTenderQueryKey(tenderId) });
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  const handleResume = async () => {
+    setResuming(true);
+    try {
+      const res = await fetch(`${BASE}/api/opportunities/${tenderId}/resume-analysis`, { method: "POST" });
+      const body = (await res.json().catch(() => ({}))) as { message?: string; fromStep?: string; error?: string };
+      if (!res.ok) {
+        toast({ title: "Cannot resume", description: body.error ?? "Unknown error", variant: "destructive" });
+        return;
+      }
+      toast({
+        title: "Resuming analysis",
+        description: body.fromStep ? `Continuing from: ${STEP_LABELS[body.fromStep] ?? body.fromStep}` : body.message ?? "",
+      });
+      pollStartRef.current = Date.now();
+      setPollTimedOut(false);
+      void queryClient.invalidateQueries({ queryKey: getGetTenderQueryKey(tenderId) });
+    } finally {
+      setResuming(false);
+    }
+  };
+
+  // ── Loading / not found ───────────────────────────────────────────────────
 
   if (isLoading) {
     return (
@@ -168,7 +252,7 @@ export default function TenderDetail() {
   }
 
   const statusLabel = STATUS_LABELS[tender.status] ?? tender.status;
-  const stepLabel = STEP_LABELS[tender.status];
+  const stepLabel   = STEP_LABELS[tender.status];
 
   return (
     <div className="p-8 max-w-4xl mx-auto">
@@ -194,30 +278,55 @@ export default function TenderDetail() {
         <p className="text-lg text-foreground">{tender.agency}</p>
       </div>
 
-      {/* ── Analysis-in-progress banner ─────────────────────────────────── */}
+      {/* ── Analysis in-progress banner ──────────────────────────────────── */}
       {isAnalysing && !pollTimedOut && (
-        <div className="mb-6 flex items-center gap-3 p-4 border border-primary/30 rounded-lg bg-primary/5">
-          <Loader2 className="w-5 h-5 animate-spin text-primary shrink-0" />
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-foreground">
-              {stepLabel ?? "Analysing…"}
-            </p>
-            <p className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5">
-              <Clock className="w-3 h-3" />
-              {elapsed > 0 ? `${elapsed}s elapsed` : "Starting…"} — auto-refreshing every 3 s
-            </p>
+        <div className="mb-6 p-4 border border-primary/30 rounded-lg bg-primary/5">
+          <div className="flex items-center gap-3">
+            <Loader2 className="w-5 h-5 animate-spin text-primary shrink-0" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-foreground">{stepLabel ?? "Analysing…"}</p>
+              <p className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5">
+                <Clock className="w-3 h-3" />
+                {elapsed > 0 ? `${elapsed}s elapsed` : "Starting…"} — auto-refreshing every 3 s
+              </p>
+            </div>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void handleCancel()}
+              disabled={cancelling || !tenderExt?.analysisRunId}
+              className="shrink-0"
+              data-testid="button-cancel-analysis"
+            >
+              {cancelling
+                ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Cancelling…</>
+                : <><XCircle className="w-3 h-3 mr-1" /> Cancel</>
+              }
+            </Button>
           </div>
+
+          {/* Completed steps progress */}
+          {completedSteps.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {completedSteps.map((step) => (
+                <span key={step} className="inline-flex items-center gap-1 text-xs text-muted-foreground bg-muted/50 px-2 py-0.5 rounded-full">
+                  <CheckCircle2 className="w-3 h-3 text-green-500" />
+                  {STEP_LABELS[step] ?? step}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
-      {/* ── Poll timed-out warning ──────────────────────────────────────── */}
+      {/* ── Poll timed-out warning ───────────────────────────────────────── */}
       {isAnalysing && pollTimedOut && (
         <div className="mb-6 flex items-start gap-3 p-4 border border-yellow-500/30 rounded-lg bg-yellow-500/5">
           <AlertTriangle className="w-5 h-5 text-yellow-500 shrink-0 mt-0.5" />
           <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-foreground">Analysis is taking longer than expected</p>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Polling stopped after 5 minutes. The job may still be running — refresh the page to check, or retry.
+              Polling stopped after 5 minutes. The job may still be running — refresh to check, or retry.
             </p>
           </div>
           <Button size="sm" variant="outline" onClick={() => void queryClient.invalidateQueries({ queryKey: getGetTenderQueryKey(tenderId) })}>
@@ -226,35 +335,84 @@ export default function TenderDetail() {
         </div>
       )}
 
-      {/* ── Analysis-failed banner ──────────────────────────────────────── */}
+      {/* ── Analysis failed banner ───────────────────────────────────────── */}
       {tender.status === "analysis_failed" && (
-        <div className="mb-6 flex items-start gap-3 p-4 border border-destructive/30 rounded-lg bg-destructive/5">
-          <AlertTriangle className="w-5 h-5 text-destructive shrink-0 mt-0.5" />
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-foreground">Analysis failed</p>
-            {(tender as unknown as { failedStep?: string; failedErrorCode?: string }).failedStep && (
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Step: <span className="font-medium">{(tender as unknown as { failedStep?: string }).failedStep}</span>
-                {(tender as unknown as { failedErrorCode?: string }).failedErrorCode &&
-                  <> · Code: <span className="font-medium">{(tender as unknown as { failedErrorCode?: string }).failedErrorCode}</span></>
+        <div className="mb-6 p-4 border border-destructive/30 rounded-lg bg-destructive/5">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-destructive shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-foreground">Analysis failed</p>
+              {tenderExt?.failedStep && (
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Failed at: <span className="font-medium">{STEP_LABELS[tenderExt.failedStep] ?? tenderExt.failedStep}</span>
+                  {tenderExt.failedErrorCode && <> · Code: <span className="font-medium">{tenderExt.failedErrorCode}</span></>}
+                </p>
+              )}
+              {completedSteps.length > 0 && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  Completed: {completedSteps.map((s) => STEP_LABELS[s] ?? s).join(" → ")}
+                </p>
+              )}
+            </div>
+            <div className="flex gap-2 shrink-0">
+              {completedSteps.length > 0 && (
+                <Button size="sm" variant="outline" onClick={() => void handleResume()} disabled={resuming}>
+                  {resuming
+                    ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Resuming…</>
+                    : <><PlayCircle className="w-3 h-3 mr-1" /> Resume</>
+                  }
+                </Button>
+              )}
+              <Button size="sm" variant="outline" onClick={() => void handleReanalyze()} disabled={reanalyzing}>
+                {reanalyzing
+                  ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Starting…</>
+                  : <><RefreshCw className="w-3 h-3 mr-1" /> Retry</>
                 }
-              </p>
-            )}
+              </Button>
+            </div>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => void handleReanalyze()}
-            disabled={reanalyzing}
-          >
-            {reanalyzing
-              ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Starting…</>
-              : <><RefreshCw className="w-3 h-3 mr-1" /> Retry</>
-            }
-          </Button>
         </div>
       )}
 
+      {/* ── Analysis cancelled banner ────────────────────────────────────── */}
+      {tender.status === "analysis_cancelled" && (
+        <div className="mb-6 p-4 border border-yellow-500/30 rounded-lg bg-yellow-500/5">
+          <div className="flex items-start gap-3">
+            <XCircle className="w-5 h-5 text-yellow-500 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-foreground">Analysis cancelled</p>
+              {tenderExt?.failedStep && (
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Stopped at: <span className="font-medium">{STEP_LABELS[tenderExt.failedStep] ?? tenderExt.failedStep}</span>
+                </p>
+              )}
+              {completedSteps.length > 0 && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  Completed: {completedSteps.map((s) => STEP_LABELS[s] ?? s).join(" → ")}
+                </p>
+              )}
+            </div>
+            <div className="flex gap-2 shrink-0">
+              {completedSteps.length > 0 && (
+                <Button size="sm" variant="outline" onClick={() => void handleResume()} disabled={resuming}>
+                  {resuming
+                    ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Resuming…</>
+                    : <><PlayCircle className="w-3 h-3 mr-1" /> Resume</>
+                  }
+                </Button>
+              )}
+              <Button size="sm" variant="outline" onClick={() => void handleReanalyze()} disabled={reanalyzing}>
+                {reanalyzing
+                  ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Starting…</>
+                  : <><RefreshCw className="w-3 h-3 mr-1" /> Re-analyse from scratch</>
+                }
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Metadata grid ────────────────────────────────────────────────── */}
       <div className="grid sm:grid-cols-3 gap-4 mb-6 p-4 border rounded-lg bg-card">
         {tender.deadline && (
           <div>
@@ -272,6 +430,17 @@ export default function TenderDetail() {
           <div>
             <p className="text-xs uppercase text-muted-foreground mb-1">Contact</p>
             <p className="text-sm font-medium">{tender.contactInfo}</p>
+          </div>
+        )}
+        {/* Token usage — shown after any AI step completes */}
+        {((tenderExt?.aiInputTokens ?? 0) > 0 || (tenderExt?.aiOutputTokens ?? 0) > 0) && (
+          <div>
+            <p className="text-xs uppercase text-muted-foreground mb-1 flex items-center gap-1">
+              <Zap className="w-3 h-3" /> Token usage
+            </p>
+            <p className="text-sm font-medium text-muted-foreground">
+              {(tenderExt?.aiInputTokens ?? 0).toLocaleString()} in · {(tenderExt?.aiOutputTokens ?? 0).toLocaleString()} out
+            </p>
           </div>
         )}
       </div>
@@ -293,6 +462,7 @@ export default function TenderDetail() {
         )}
       </div>
 
+      {/* ── Action buttons ────────────────────────────────────────────────── */}
       <div className="flex flex-wrap gap-3">
         {tender.proposalId ? (
           <Button asChild variant="default" data-testid="button-view-proposal">
@@ -306,27 +476,28 @@ export default function TenderDetail() {
             disabled={generate.isPending || isAnalysing}
             data-testid="button-generate-proposal"
           >
-            {generate.isPending ? (
-              <><Loader2 className="w-4 h-4 mr-1 animate-spin" /> Generating…</>
-            ) : (
-              <><Sparkles className="w-4 h-4 mr-1" /> Generate Proposal from Tender</>
-            )}
-          </Button>
-        )}
-
-        {!isAnalysing && tender.status !== "analysis_failed" && (
-          <Button
-            variant="outline"
-            onClick={() => void handleReanalyze()}
-            disabled={reanalyzing}
-            data-testid="button-reanalyze"
-          >
-            {reanalyzing
-              ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Starting…</>
-              : <><RefreshCw className="w-3 h-3 mr-1" /> Re-analyse</>
+            {generate.isPending
+              ? <><Loader2 className="w-4 h-4 mr-1 animate-spin" /> Generating…</>
+              : <><Sparkles className="w-4 h-4 mr-1" /> Generate Proposal from Tender</>
             }
           </Button>
         )}
+
+        {!isAnalysing &&
+          tender.status !== "analysis_failed" &&
+          tender.status !== "analysis_cancelled" && (
+            <Button
+              variant="outline"
+              onClick={() => void handleReanalyze()}
+              disabled={reanalyzing}
+              data-testid="button-reanalyze"
+            >
+              {reanalyzing
+                ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Starting…</>
+                : <><RefreshCw className="w-3 h-3 mr-1" /> Re-analyse</>
+              }
+            </Button>
+          )}
       </div>
     </div>
   );

@@ -12,7 +12,7 @@ import {
   proposalGenerationRunsTable,
   proposalStrategiesTable,
 } from "@workspace/db";
-import { eq, desc, and } from "drizzle-orm";
+import { eq, desc, and, inArray } from "drizzle-orm";
 import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
 import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
 import {
@@ -24,10 +24,22 @@ import {
   MAX_REQUIREMENTS,
   MAX_REQ_CHARS,
   ANALYSIS_TIMEOUT_MS,
+  getFirstIncompleteStep,
   type AnalysisActiveStatus,
+  type AnalysisStep,
 } from "../lib/analysis-utils.js";
 
 const router = Router();
+
+// ── Active-run registry ───────────────────────────────────────────────────────
+// One entry per tender that is currently being analysed.
+// Cleared when the run finishes (success, failure, or cancellation).
+interface ActiveRun {
+  runId:      string;
+  controller: AbortController;
+  step:       string; // current step name, updated as the pipeline progresses
+}
+const activeRuns = new Map<number, ActiveRun>();
 
 const SECTION_DEFINITIONS = [
   { key: "executive_summary",   title: "Executive Summary",                         order: 0 },
@@ -53,7 +65,7 @@ function isActiveStatus(status: string): status is AnalysisActiveStatus {
 }
 
 // ── Step 1: Extract requirements ─────────────────────────────────────────────
-async function runExtractRequirements(tenderId: number) {
+async function runExtractRequirements(tenderId: number, cancelSignal?: AbortSignal) {
   const [tender] = await db
     .select()
     .from(tendersTable)
@@ -70,12 +82,11 @@ async function runExtractRequirements(tenderId: number) {
   const rawSource = tender.rawText || tender.description;
   const sourceText = truncateToTokenBudget(rawSource);
 
-  // 90-second hard abort
-  const controller = new AbortController();
-  const abortTimer = setTimeout(
-    () => controller.abort(new Error("AI request timed out after 90s")),
-    ANALYSIS_TIMEOUT_MS,
-  );
+  // Compose user-cancel signal + 90 s hard timeout
+  const timeoutSignal = AbortSignal.timeout(ANALYSIS_TIMEOUT_MS);
+  const signal = cancelSignal
+    ? AbortSignal.any([cancelSignal, timeoutSignal])
+    : timeoutSignal;
 
   let completion: Awaited<ReturnType<typeof openai.chat.completions.create>>;
   try {
@@ -107,17 +118,18 @@ async function runExtractRequirements(tenderId: number) {
             },
           ],
         },
-        { signal: controller.signal },
+        { signal },
       ),
     );
   } catch (err) {
-    clearTimeout(abortTimer);
-    if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) {
+    if (cancelSignal?.aborted) {
+      const e = new Error("Analysis cancelled by user"); e.name = "CancelledError"; throw e;
+    }
+    if (timeoutSignal.aborted || (err instanceof Error && err.name === "AbortError")) {
       throw new Error("AI request timed out after 90s");
     }
     throw err;
   }
-  clearTimeout(abortTimer);
 
   // Record token usage (accumulate across steps within one analysis)
   const usage = completion.usage;
@@ -182,7 +194,7 @@ async function runExtractRequirements(tenderId: number) {
 }
 
 // ── Step 2: Bid scoring ──────────────────────────────────────────────────────
-async function runBidScoring(tenderId: number) {
+async function runBidScoring(tenderId: number, cancelSignal?: AbortSignal) {
   const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, tenderId));
   if (!tender) throw new Error("Tender not found");
 
@@ -199,14 +211,21 @@ async function runBidScoring(tenderId: number) {
           .join("\n")
       : "No requirements extracted yet.";
 
-  const completion = await openai.chat.completions.create({
-    model: AI_MODEL,
-    max_completion_tokens: 2000,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You are a senior business development advisor at ONWRD, a full-service marketing and strategy agency in the Bahamas. You evaluate whether ONWRD should bid on a tender opportunity.
+  const timeoutSignal = AbortSignal.timeout(ANALYSIS_TIMEOUT_MS);
+  const signal = cancelSignal
+    ? AbortSignal.any([cancelSignal, timeoutSignal])
+    : timeoutSignal;
+
+  let completion: Awaited<ReturnType<typeof openai.chat.completions.create>>;
+  try {
+    completion = await openai.chat.completions.create({
+      model: AI_MODEL,
+      max_completion_tokens: 2000,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `You are a senior business development advisor at ONWRD, a full-service marketing and strategy agency in the Bahamas. You evaluate whether ONWRD should bid on a tender opportunity.
 
 ONWRD's strengths: marketing strategy, brand identity, digital marketing, content development, website design, campaign management, social media, communications strategy. ONWRD works across the Caribbean region, particularly the Bahamas. ONWRD is a mid-size boutique agency — not suitable for very large infrastructure or construction tenders.
 
@@ -224,10 +243,10 @@ Evaluate the tender and return JSON with:
 - missingFields: array of short strings naming critical gaps that would strengthen a proposal response (e.g. "Budget not specified", "Timeline vague", "Evaluation criteria unclear", "Contact details absent"). Empty array if the tender is complete.
 
 ${ONWRD_CASE_STUDIES}`,
-      },
-      {
-        role: "user",
-        content: `Evaluate this tender for ONWRD:
+        },
+        {
+          role: "user",
+          content: `Evaluate this tender for ONWRD:
 
 Title: ${tender.title}
 Agency: ${tender.agency}
@@ -240,9 +259,18 @@ ${tender.description}
 
 Requirements:
 ${requirementsSummary}`,
-      },
-    ],
-  });
+        },
+      ],
+    }, { signal });
+  } catch (err) {
+    if (cancelSignal?.aborted) {
+      const e = new Error("Analysis cancelled by user"); e.name = "CancelledError"; throw e;
+    }
+    if (timeoutSignal.aborted || (err instanceof Error && err.name === "AbortError")) {
+      throw new Error("AI request timed out after 90s");
+    }
+    throw err;
+  }
 
   const raw = completion.choices[0]?.message?.content ?? "{}";
   const data = JSON.parse(raw) as {
@@ -269,17 +297,17 @@ ${requirementsSummary}`,
     })
     .returning();
 
-  const newStatus = data.fitLevel === "no_bid" ? "no_bid" : "screened";
+  // Update recommendation score — pipeline handles the status transition
   await db
     .update(tendersTable)
-    .set({ status: newStatus, recommendationScore: data.fitScore ?? 0, updatedAt: new Date() })
+    .set({ recommendationScore: data.fitScore ?? 0, updatedAt: new Date() })
     .where(eq(tendersTable.id, tenderId));
 
   return bidScore;
 }
 
 // ── Step 3: Generate strategy brief ─────────────────────────────────────────
-async function runGenerateStrategy(tenderId: number) {
+async function runGenerateStrategy(tenderId: number, cancelSignal?: AbortSignal) {
   const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, tenderId));
   if (!tender) throw new Error("Tender not found");
 
@@ -303,14 +331,21 @@ async function runGenerateStrategy(tenderId: number) {
           .join("\n")
       : "No requirements extracted.";
 
-  const completion = await openai.chat.completions.create({
-    model: AI_MODEL,
-    max_completion_tokens: 2000,
-    response_format: { type: "json_object" },
-    messages: [
-      {
-        role: "system",
-        content: `You are a senior bid strategist at ONWRD, a full-service marketing and strategy agency in the Bahamas. Generate a proposal strategy brief that will guide the proposal writers.
+  const timeoutSignal = AbortSignal.timeout(ANALYSIS_TIMEOUT_MS);
+  const signal = cancelSignal
+    ? AbortSignal.any([cancelSignal, timeoutSignal])
+    : timeoutSignal;
+
+  let completion: Awaited<ReturnType<typeof openai.chat.completions.create>>;
+  try {
+    completion = await openai.chat.completions.create({
+      model: AI_MODEL,
+      max_completion_tokens: 2000,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content: `You are a senior bid strategist at ONWRD, a full-service marketing and strategy agency in the Bahamas. Generate a proposal strategy brief that will guide the proposal writers.
 
 Return JSON with:
 - positioning: string (1-2 sentences: how ONWRD should position itself for this specific opportunity — what unique angle to take)
@@ -320,10 +355,10 @@ Return JSON with:
 - messagingGuidance: string (1-2 sentences on tone, emphasis, and what the evaluators likely care about most)
 
 ${ONWRD_CASE_STUDIES}`,
-      },
-      {
-        role: "user",
-        content: `Generate a proposal strategy for this tender:
+        },
+        {
+          role: "user",
+          content: `Generate a proposal strategy for this tender:
 
 Title: ${tender.title}
 Agency: ${tender.agency}
@@ -338,9 +373,18 @@ Requirements:
 ${requirementsSummary}
 
 ${bidScore ? `Bid Score: ${bidScore.fitScore}/100 (${bidScore.fitLevel})\nScoring Reasoning: ${bidScore.reasoning}` : ""}`,
-      },
-    ],
-  });
+        },
+      ],
+    }, { signal });
+  } catch (err) {
+    if (cancelSignal?.aborted) {
+      const e = new Error("Analysis cancelled by user"); e.name = "CancelledError"; throw e;
+    }
+    if (timeoutSignal.aborted || (err instanceof Error && err.name === "AbortError")) {
+      throw new Error("AI request timed out after 90s");
+    }
+    throw err;
+  }
 
   const raw = completion.choices[0]?.message?.content ?? "{}";
   const data = JSON.parse(raw) as {
@@ -369,90 +413,154 @@ ${bidScore ? `Bid Score: ${bidScore.fitScore}/100 (${bidScore.fitLevel})\nScorin
 }
 
 // ── Full analysis pipeline ───────────────────────────────────────────────────
-async function autoAnalyzeOpportunity(tenderId: number): Promise<void> {
-  // Guard: skip if another analysis is already running for this tender
+async function autoAnalyzeOpportunity(
+  tenderId: number,
+  resumeFrom: AnalysisStep = "requirements_extracting",
+  runId: string = crypto.randomUUID(),
+): Promise<void> {
+  const controller = new AbortController();
+  const { signal } = controller;
+
+  // Guard: skip if already running (unless the caller is the resume endpoint, which pre-checked)
   const [current] = await db
-    .select({ status: tendersTable.status })
+    .select({ status: tendersTable.status, completedSteps: tendersTable.completedSteps })
     .from(tendersTable)
     .where(eq(tendersTable.id, tenderId));
   if (!current) return;
   if (isActiveStatus(current.status)) {
-    console.warn(`[auto-pipeline] Tender ${tenderId} already in status "${current.status}" — skipping`);
+    console.warn(`[pipeline] Tender ${tenderId} already in status "${current.status}" — skipping`);
     return;
   }
 
-  const fail = async (step: string, err: unknown) => {
-    const { code, message } = classifyError(err);
-    console.error(`[auto-pipeline] step="${step}" tender=${tenderId} code=${code}:`, message);
-    await db
-      .update(tendersTable)
-      .set({
-        status:               "analysis_failed",
-        failedStep:           step,
-        failedErrorCode:      code,
-        analysisCompletedAt:  new Date(),
-        updatedAt:            new Date(),
-      })
-      .where(eq(tendersTable.id, tenderId));
+  // Inherit completed steps from DB when resuming mid-pipeline
+  let completedSteps: string[] = [];
+  if (resumeFrom !== "requirements_extracting") {
+    try { completedSteps = JSON.parse(current.completedSteps ?? "[]") as string[]; } catch { /* noop */ }
+  }
+
+  activeRuns.set(tenderId, { runId, controller, step: resumeFrom });
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  const fail = async (step: string, err: unknown): Promise<void> => {
+    activeRuns.delete(tenderId);
+    const { code } = classifyError(err);
+    console.error(
+      `[pipeline] tender=${tenderId} step="${step}" code=${code}:`,
+      (err instanceof Error ? err.message : String(err)).slice(0, 200),
+    );
+    await db.update(tendersTable).set({
+      status:              "analysis_failed",
+      failedStep:          step,
+      failedErrorCode:     code,
+      analysisCompletedAt: new Date(),
+      completedSteps:      JSON.stringify(completedSteps),
+      updatedAt:           new Date(),
+    }).where(and(eq(tendersTable.id, tenderId), eq(tendersTable.analysisRunId, runId)));
   };
 
-  // ① Mark started
-  await db
-    .update(tendersTable)
-    .set({
-      status:              "requirements_extracting",
-      analysisStartedAt:   new Date(),
-      analysisCompletedAt: null,
-      failedStep:          null,
-      failedErrorCode:     null,
-      aiInputTokens:       0,
-      aiOutputTokens:      0,
-      aiModelUsed:         null,
-      updatedAt:           new Date(),
-    })
-    .where(eq(tendersTable.id, tenderId));
+  // Race-safe: only advance status if it still matches the expected value
+  // (if cancel wrote analysis_cancelled in between, WHERE won't match → we exit)
+  const advance = async (from: string, to: string): Promise<boolean> => {
+    const [row] = await db.update(tendersTable).set({
+      status:         to,
+      completedSteps: JSON.stringify(completedSteps),
+      updatedAt:      new Date(),
+    }).where(and(
+      eq(tendersTable.id, tenderId),
+      eq(tendersTable.analysisRunId, runId),
+      eq(tendersTable.status, from),
+    )).returning({ id: tendersTable.id });
+    return !!row;
+  };
 
-  // ② Extract requirements (single AI call, no iterative loop)
-  try {
-    await runExtractRequirements(tenderId);
-  } catch (err) {
-    await fail("requirements_extracting", err);
-    return;
-  }
+  // ① Write initial state to DB
+  await db.update(tendersTable).set({
+    status:              resumeFrom,
+    analysisRunId:       runId,
+    ...(resumeFrom === "requirements_extracting"
+      ? { analysisStartedAt: new Date(), aiInputTokens: 0, aiOutputTokens: 0 }
+      : {}),
+    analysisCompletedAt: null,
+    cancelledAt:         null,
+    failedStep:          null,
+    failedErrorCode:     null,
+    aiModelUsed:         null,
+    updatedAt:           new Date(),
+  }).where(eq(tendersTable.id, tenderId));
 
-  // ③ Bid scoring
-  await db
-    .update(tendersTable)
-    .set({ status: "bid_scoring", updatedAt: new Date() })
-    .where(eq(tendersTable.id, tenderId));
-
-  let bidScore: Awaited<ReturnType<typeof runBidScoring>>;
-  try {
-    bidScore = await runBidScoring(tenderId);
-  } catch (err) {
-    await fail("bid_scoring", err);
-    return;
-  }
-
-  // ④ Strategy (skipped for no_bid — includes individual employment roles)
-  if (bidScore.fitLevel !== "no_bid") {
-    await db
-      .update(tendersTable)
-      .set({ status: "strategy_generating", updatedAt: new Date() })
-      .where(eq(tendersTable.id, tenderId));
+  // ② Requirements extracting
+  if (resumeFrom === "requirements_extracting") {
+    activeRuns.get(tenderId)!.step = "requirements_extracting";
+    if (signal.aborted) { activeRuns.delete(tenderId); return; }
 
     try {
-      await runGenerateStrategy(tenderId);
+      await runExtractRequirements(tenderId, signal);
     } catch (err) {
-      await fail("strategy_generating", err);
+      if (signal.aborted) { activeRuns.delete(tenderId); return; }
+      await fail("requirements_extracting", err);
       return;
     }
+
+    completedSteps = [...new Set([...completedSteps, "requirements_extracting"])];
+    const ok = await advance("requirements_extracting", "bid_scoring");
+    if (!ok) { activeRuns.delete(tenderId); return; } // cancelled during write
+    if (signal.aborted) { activeRuns.delete(tenderId); return; }
   }
 
-  await db
-    .update(tendersTable)
-    .set({ analysisCompletedAt: new Date(), updatedAt: new Date() })
-    .where(eq(tendersTable.id, tenderId));
+  // ③ Bid scoring (skipped when resuming from strategy)
+  if (resumeFrom !== "strategy_generating") {
+    activeRuns.get(tenderId)!.step = "bid_scoring";
+    if (signal.aborted) { activeRuns.delete(tenderId); return; }
+
+    let bidScore: Awaited<ReturnType<typeof runBidScoring>>;
+    try {
+      bidScore = await runBidScoring(tenderId, signal);
+    } catch (err) {
+      if (signal.aborted) { activeRuns.delete(tenderId); return; }
+      await fail("bid_scoring", err);
+      return;
+    }
+
+    completedSteps = [...new Set([...completedSteps, "bid_scoring"])];
+
+    if (bidScore.fitLevel === "no_bid") {
+      activeRuns.delete(tenderId);
+      await db.update(tendersTable).set({
+        status:              "no_bid",
+        analysisCompletedAt: new Date(),
+        completedSteps:      JSON.stringify(completedSteps),
+        updatedAt:           new Date(),
+      }).where(and(eq(tendersTable.id, tenderId), eq(tendersTable.analysisRunId, runId)));
+      return;
+    }
+
+    const ok = await advance("bid_scoring", "strategy_generating");
+    if (!ok) { activeRuns.delete(tenderId); return; }
+    if (signal.aborted) { activeRuns.delete(tenderId); return; }
+  }
+
+  // ④ Strategy generation
+  activeRuns.get(tenderId)!.step = "strategy_generating";
+  if (signal.aborted) { activeRuns.delete(tenderId); return; }
+
+  try {
+    await runGenerateStrategy(tenderId, signal);
+  } catch (err) {
+    if (signal.aborted) { activeRuns.delete(tenderId); return; }
+    await fail("strategy_generating", err);
+    return;
+  }
+
+  completedSteps = [...new Set([...completedSteps, "strategy_generating"])];
+  activeRuns.delete(tenderId);
+
+  await db.update(tendersTable).set({
+    status:              "screened",
+    analysisCompletedAt: new Date(),
+    completedSteps:      JSON.stringify(completedSteps),
+    updatedAt:           new Date(),
+  }).where(and(eq(tendersTable.id, tenderId), eq(tendersTable.analysisRunId, runId)));
 }
 
 // ── List opportunities (with latest bid score per tender) ───────────────────
@@ -620,11 +728,135 @@ router.post("/opportunities/:id/analyze", async (req, res) => {
       return;
     }
 
-    res.json({ message: "Analysis started" });
-    void autoAnalyzeOpportunity(id);
+    // Generate runId here so the client can immediately use it to cancel
+    const runId = crypto.randomUUID();
+    res.json({ message: "Analysis started", analysisRunId: runId });
+    void autoAnalyzeOpportunity(id, "requirements_extracting", runId);
   } catch (err) {
     req.log.error({ err }, "Error triggering analysis");
     res.status(500).json({ error: "Failed to start analysis" });
+  }
+});
+
+// ── Cancel an in-progress analysis ───────────────────────────────────────────
+// Body: { analysisRunId: string }
+// Returns 200 when cancelled (or already terminal).
+// Returns 409 when the runId doesn't match the current active run.
+router.post("/opportunities/:id/cancel-analysis", async (req, res) => {
+  const id = Number(req.params.id);
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  const { analysisRunId } = (req.body ?? {}) as { analysisRunId?: string };
+  if (!analysisRunId) {
+    res.status(400).json({ error: "analysisRunId is required" });
+    return;
+  }
+
+  try {
+    const [tender] = await db
+      .select({ status: tendersTable.status, analysisRunId: tendersTable.analysisRunId })
+      .from(tendersTable)
+      .where(eq(tendersTable.id, id));
+
+    if (!tender) { res.status(404).json({ error: "Tender not found" }); return; }
+
+    // Already in a terminal state — run completed before cancel arrived
+    if (!isActiveStatus(tender.status)) {
+      res.json({ status: tender.status, alreadyCompleted: true });
+      return;
+    }
+
+    // RunId mismatch — stale cancel request
+    if (tender.analysisRunId !== analysisRunId) {
+      res.status(409).json({ error: "analysisRunId does not match the current active run" });
+      return;
+    }
+
+    // Abort the in-flight HTTP request
+    const run = activeRuns.get(id);
+    const interruptedStep = run?.step ?? (tender.status as string);
+    if (run?.runId === analysisRunId) {
+      run.controller.abort(new Error("Cancelled by user"));
+      activeRuns.delete(id);
+    }
+
+    // Write cancellation to DB atomically (race-safe: only matches active statuses)
+    const [updated] = await db.update(tendersTable).set({
+      status:              "analysis_cancelled",
+      cancelledAt:         new Date(),
+      failedStep:          interruptedStep,
+      analysisCompletedAt: new Date(),
+      updatedAt:           new Date(),
+    }).where(and(
+      eq(tendersTable.id, id),
+      eq(tendersTable.analysisRunId, analysisRunId),
+      inArray(tendersTable.status, [...ANALYSIS_ACTIVE_STATUSES]),
+    )).returning({ status: tendersTable.status });
+
+    if (!updated) {
+      // Race: pipeline completed between our read and write above
+      const [fresh] = await db
+        .select({ status: tendersTable.status })
+        .from(tendersTable)
+        .where(eq(tendersTable.id, id));
+      res.json({ status: fresh?.status ?? "unknown", alreadyCompleted: true });
+      return;
+    }
+
+    res.json({ message: "Analysis cancelled", status: "analysis_cancelled" });
+  } catch (err) {
+    req.log.error({ err }, "Error cancelling analysis");
+    res.status(500).json({ error: "Failed to cancel analysis" });
+  }
+});
+
+// ── Resume a cancelled or failed analysis ─────────────────────────────────────
+// Reads completedSteps from DB and restarts from the first incomplete step.
+router.post("/opportunities/:id/resume-analysis", async (req, res) => {
+  const id = Number(req.params.id);
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  try {
+    const [tender] = await db
+      .select({
+        status:         tendersTable.status,
+        completedSteps: tendersTable.completedSteps,
+      })
+      .from(tendersTable)
+      .where(eq(tendersTable.id, id));
+
+    if (!tender) { res.status(404).json({ error: "Tender not found" }); return; }
+
+    if (isActiveStatus(tender.status)) {
+      res.status(409).json({ error: "Analysis is already in progress" });
+      return;
+    }
+
+    // Parse completed steps and find the first one to (re)run
+    let completed: string[] = [];
+    try { completed = JSON.parse(tender.completedSteps ?? "[]") as string[]; } catch { /* noop */ }
+
+    // Check latest bid score for no_bid — skip strategy if so
+    const [latestBid] = await db
+      .select({ fitLevel: bidScoresTable.fitLevel })
+      .from(bidScoresTable)
+      .where(eq(bidScoresTable.tenderId, id))
+      .orderBy(desc(bidScoresTable.createdAt))
+      .limit(1);
+    const isNoBid = latestBid?.fitLevel === "no_bid";
+
+    const fromStep = getFirstIncompleteStep(completed, isNoBid);
+
+    if (!fromStep) {
+      res.json({ message: "All steps already completed", status: tender.status });
+      return;
+    }
+
+    res.json({ message: "Resuming analysis", fromStep });
+    void autoAnalyzeOpportunity(id, fromStep);
+  } catch (err) {
+    req.log.error({ err }, "Error resuming analysis");
+    res.status(500).json({ error: "Failed to resume analysis" });
   }
 });
 

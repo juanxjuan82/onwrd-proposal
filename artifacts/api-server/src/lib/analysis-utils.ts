@@ -116,6 +116,41 @@ export function classifyError(err: unknown): { code: ErrorCode; message: string 
  * waits `retryDelayMs` and tries exactly once more. Quota errors re-throw
  * immediately with no retry. Pass `retryDelayMs = 0` in unit tests.
  */
+// ── Step ordering (for resume logic) ─────────────────────────────────────────
+
+export type AnalysisStep =
+  | "requirements_extracting"
+  | "bid_scoring"
+  | "strategy_generating";
+
+/** Canonical execution order. */
+export const ANALYSIS_STEP_ORDER: readonly AnalysisStep[] = [
+  "requirements_extracting",
+  "bid_scoring",
+  "strategy_generating",
+] as const;
+
+/**
+ * Given the set of already-completed step names (from the DB column), returns
+ * the first step that has not yet succeeded — i.e. where a resumed run
+ * should begin. Returns `null` when all applicable steps are done.
+ *
+ * @param completedSteps - Steps that succeeded in the current or prior run.
+ * @param skipStrategy   - `true` when the latest bid score is `no_bid`;
+ *                         strategy generation is intentionally skipped.
+ */
+export function getFirstIncompleteStep(
+  completedSteps: string[],
+  skipStrategy = false,
+): AnalysisStep | null {
+  const done = new Set(completedSteps);
+  for (const step of ANALYSIS_STEP_ORDER) {
+    if (step === "strategy_generating" && skipStrategy) continue;
+    if (!done.has(step)) return step;
+  }
+  return null;
+}
+
 export async function callWithSingleRetry<T>(
   fn: () => Promise<T>,
   retryDelayMs = 3_000,
