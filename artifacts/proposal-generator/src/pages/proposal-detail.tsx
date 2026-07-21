@@ -18,7 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
-import { ExternalLink, Loader2, ArrowLeft, Trash2, CheckCircle2, Eye, Pencil, Sparkles, AlertCircle, ShieldCheck } from "lucide-react";
+import { ExternalLink, Loader2, ArrowLeft, Trash2, CheckCircle2, Eye, Pencil, Sparkles, AlertCircle, ShieldCheck, RefreshCw } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
@@ -485,11 +485,12 @@ export default function ProposalDetail() {
       onSuccess: (data) => {
         queryClient.invalidateQueries({ queryKey: getGetProposalQueryKey(id) });
         queryClient.invalidateQueries({ queryKey: getListProposalsQueryKey() });
+        const isUpdate = (data as { isUpdate?: boolean }).isUpdate;
         toast({
-          title: "Exported successfully",
+          title: isUpdate ? "Document synced" : "Exported successfully",
           description: (
             <div className="flex flex-col gap-2 mt-2">
-              <p>Document created in Google Docs.</p>
+              <p>{isUpdate ? "Google Doc updated with the latest content." : "Document created in Google Docs."}</p>
               <Button variant="outline" size="sm" asChild className="w-fit">
                 <a href={data.docUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2">
                   <ExternalLink className="w-4 h-4" />
@@ -504,7 +505,7 @@ export default function ProposalDetail() {
       onError: (error) => {
         toast({
           title: "Export failed",
-          description: error.error || "Could not export to Google Docs.",
+          description: error.error || "Could not export to Google Docs. Make sure your Google account is connected in Settings.",
           variant: "destructive"
         });
       }
@@ -783,20 +784,37 @@ export default function ProposalDetail() {
                 {updateProposal.isPending && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
                 Save Changes
               </Button>
-              <Button 
-                type="button"
-                disabled={updateProposal.isPending || exportToDocs.isPending}
-                onClick={handleExport}
-                className="bg-[#0000FF] hover:bg-[#0000FF] text-white border border-[#0000FF]"
-                data-testid="button-export"
-              >
-                {exportToDocs.isPending ? (
-                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                ) : (
-                  <CheckCircle2 className="w-4 h-4 mr-2" />
-                )}
-                Export to Google Docs
-              </Button>
+              {proposal.googleDocUrl ? (
+                <Button
+                  type="button"
+                  disabled={updateProposal.isPending || exportToDocs.isPending}
+                  onClick={handleExport}
+                  variant="outline"
+                  data-testid="button-sync"
+                >
+                  {exportToDocs.isPending ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-4 h-4 mr-2" />
+                  )}
+                  Sync Changes
+                </Button>
+              ) : (
+                <Button
+                  type="button"
+                  disabled={updateProposal.isPending || exportToDocs.isPending}
+                  onClick={handleExport}
+                  className="bg-[#0000FF] hover:bg-[#0000FF] text-white border border-[#0000FF]"
+                  data-testid="button-export"
+                >
+                  {exportToDocs.isPending ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  ) : (
+                    <CheckCircle2 className="w-4 h-4 mr-2" />
+                  )}
+                  Export to Google Docs
+                </Button>
+              )}
             </div>
           )}
         </form>

@@ -8,7 +8,8 @@ import {
 } from "@workspace/db";
 import { eq, and } from "drizzle-orm";
 import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
-import { createGoogleDoc, appendContentWithLogo, shareWithAnyone } from "../lib/google-docs.js";
+import { createGoogleDoc, appendContentWithLogo, clearAndReplaceContent, moveDocToFolder } from "../lib/google-docs.js";
+import { googleDriveConfigTable } from "@workspace/db";
 
 const router = Router();
 
@@ -250,11 +251,28 @@ router.post("/proposals/:id/approve-for-export", async (req, res) => {
   res.json(updatedProposal[0]);
 });
 
-// ── Export to Google Docs (enhanced) ──────────────────────────────────────
-router.post("/proposals/:id/export-to-google-docs", async (req, res) => {
+// ── Unified export / sync to Google Docs ──────────────────────────────────
+//
+// POST /proposals/:id/export
+//
+// Behaviour:
+//   - Requires a connected Google OAuth session (googleAccessToken in session)
+//   - Loads the configured Drive destination folder (if any) from
+//     google_drive_config; the doc is created there.
+//   - If the proposal already has a googleFileId the existing doc is cleared
+//     and rewritten (sync).  No new doc is created.
+//   - Never calls shareWithAnyone — the doc inherits the folder's permissions.
+//
+router.post("/proposals/:id/export", async (req, res) => {
   const proposalId = Number(req.params.id);
   if (isNaN(proposalId)) {
     res.status(400).json({ error: "Invalid proposal id" });
+    return;
+  }
+
+  const accessToken: string | undefined = req.session.googleAccessToken;
+  if (!accessToken) {
+    res.status(401).json({ error: "Google account not connected. Connect your account in Settings → Google Docs." });
     return;
   }
 
@@ -268,9 +286,9 @@ router.post("/proposals/:id/export-to-google-docs", async (req, res) => {
     return;
   }
 
-  const accessToken: string | undefined = req.session.googleAccessToken;
-
   try {
+    const [driveConfig] = await db.select().from(googleDriveConfigTable).limit(1);
+
     const sections = await db
       .select()
       .from(proposalSectionsTable)
@@ -281,31 +299,54 @@ router.post("/proposals/:id/export-to-google-docs", async (req, res) => {
       ? sections.map((s) => `## ${s.title}\n\n${s.content}`).join("\n\n---\n\n")
       : proposal.proposalContent;
 
-    const docTitle = `ONWRD Proposal — ${proposal.clientName}`;
-    const doc = await createGoogleDoc(docTitle, accessToken);
-    await appendContentWithLogo(doc.documentId, contentToExport, accessToken);
-    await shareWithAnyone(doc.documentId, accessToken);
+    const exportedBy = req.session.googleUserEmail ?? undefined;
 
-    const docUrl = `https://docs.google.com/document/d/${doc.documentId}/edit`;
+    if (proposal.googleFileId) {
+      // ── Sync: update the existing doc ──────────────────────────────────
+      await clearAndReplaceContent(proposal.googleFileId, contentToExport, accessToken);
 
-    await db.insert(googleExportsTable).values({
-      proposalId,
-      googleDocUrl: docUrl,
-      googleFileId: doc.documentId,
-      driveFolderId: null,
-    });
+      await db.insert(googleExportsTable).values({
+        proposalId,
+        googleDocUrl: proposal.googleDocUrl!,
+        googleFileId: proposal.googleFileId,
+        driveFolderId: driveConfig?.folderId ?? null,
+        exportedBy: exportedBy ?? null,
+      });
 
-    await db
-      .update(proposalsTable)
-      .set({
+      res.json({ docUrl: proposal.googleDocUrl, documentId: proposal.googleFileId, isUpdate: true });
+    } else {
+      // ── Create: new doc in the configured folder ────────────────────────
+      const docTitle = `ONWRD Proposal — ${proposal.clientName}`;
+      const doc = await createGoogleDoc(docTitle, accessToken);
+      const docId = doc.documentId;
+      const docUrl = `https://docs.google.com/document/d/${docId}/edit`;
+
+      if (driveConfig?.folderId) {
+        await moveDocToFolder(docId, driveConfig.folderId, driveConfig.driveId, accessToken);
+      }
+
+      await appendContentWithLogo(docId, contentToExport, accessToken);
+
+      await db.insert(googleExportsTable).values({
+        proposalId,
         googleDocUrl: docUrl,
-        googleFileId: doc.documentId,
-        status: "exported_to_drive",
-        updatedAt: new Date(),
-      })
-      .where(eq(proposalsTable.id, proposalId));
+        googleFileId: docId,
+        driveFolderId: driveConfig?.folderId ?? null,
+        exportedBy: exportedBy ?? null,
+      });
 
-    res.json({ docUrl, documentId: doc.documentId });
+      await db
+        .update(proposalsTable)
+        .set({
+          googleDocUrl: docUrl,
+          googleFileId: docId,
+          status: "exported_to_drive",
+          updatedAt: new Date(),
+        })
+        .where(eq(proposalsTable.id, proposalId));
+
+      res.json({ docUrl, documentId: docId, isUpdate: false });
+    }
   } catch (err) {
     req.log.error({ err }, "Error exporting to Google Docs");
     res.status(500).json({ error: "Failed to export to Google Docs" });

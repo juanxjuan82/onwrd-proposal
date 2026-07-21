@@ -15,7 +15,6 @@ import {
   GetProposalParams,
   UpdateProposalParams,
   DeleteProposalParams,
-  ExportToGoogleDocsParams,
 } from "@workspace/api-zod";
 
 const upload = multer({
@@ -891,32 +890,13 @@ Return ONLY the completed proposal text — no JSON wrapper, no commentary.`;
         .catch(() => { /* non-critical */ });
     }
 
-    // Respond immediately — client doesn't need to wait for export or email
+    // Respond immediately — client doesn't need to wait for email
     res.json({ success: true });
 
-    // Fire-and-forget: export to Google Docs, then notify with the doc link
-    (async () => {
-      let googleDocUrl: string | null = null;
-      try {
-        const { createGoogleDoc, appendContentWithLogo, shareWithAnyone } = await import("../lib/google-docs.js");
-        const title = `ONWRD Proposal — ${clientName}`;
-        const doc = await createGoogleDoc(title);
-        const docId = doc.documentId;
-        googleDocUrl = `https://docs.google.com/document/d/${docId}/edit`;
-        await appendContentWithLogo(docId, content);
-        await shareWithAnyone(docId);
-        await db
-          .update(proposalsTable)
-          .set({ googleDocUrl, status: "exported", updatedAt: new Date() })
-          .where(eq(proposalsTable.id, saved.id));
-        console.log(`[intake] Google Doc created: ${googleDocUrl}`);
-      } catch (err) {
-        console.error("[intake] Google Docs export failed — will notify with app link:", err);
-      }
-      sendIntakeNotification(clientName, industry, saved.id, googleDocUrl).catch((err) =>
-        console.error("[intake] Email notification failed:", err),
-      );
-    })();
+    // Fire-and-forget: email notification (no auto-export — team exports manually)
+    sendIntakeNotification(clientName, industry, saved.id, null).catch((err) =>
+      console.error("[intake] Email notification failed:", err),
+    );
   } catch (err) {
     req.log.error({ err }, "Error processing intake submission");
     const status = (err as { status?: number })?.status;
@@ -925,51 +905,6 @@ Return ONLY the completed proposal text — no JSON wrapper, no commentary.`;
     } else {
       res.status(500).json({ error: "Failed to process submission. Please try again." });
     }
-  }
-});
-
-router.post("/proposals/:id/export-to-google-docs", async (req, res) => {
-  const parsed = ExportToGoogleDocsParams.safeParse({
-    id: Number(req.params.id),
-  });
-  if (!parsed.success) {
-    res.status(400).json({ error: "Invalid id" });
-    return;
-  }
-
-  try {
-    const [proposal] = await db
-      .select()
-      .from(proposalsTable)
-      .where(eq(proposalsTable.id, parsed.data.id));
-
-    if (!proposal) {
-      res.status(404).json({ error: "Proposal not found" });
-      return;
-    }
-
-    const { createGoogleDoc, appendContentWithLogo, shareWithAnyone } = await import("../lib/google-docs.js");
-
-    const userAccessToken = req.session.googleAccessToken ?? undefined;
-
-    const title = `ONWRD Proposal - ${proposal.clientName}`;
-
-    const doc = await createGoogleDoc(title, userAccessToken);
-    const docId = doc.documentId;
-    const docUrl = `https://docs.google.com/document/d/${docId}/edit`;
-
-    await appendContentWithLogo(docId, proposal.proposalContent, userAccessToken);
-    await shareWithAnyone(docId, userAccessToken);
-
-    await db
-      .update(proposalsTable)
-      .set({ googleDocUrl: docUrl, status: "exported", updatedAt: new Date() })
-      .where(eq(proposalsTable.id, parsed.data.id));
-
-    res.json({ docId, docUrl, title });
-  } catch (err) {
-    req.log.error({ err }, "Error exporting to Google Docs");
-    res.status(500).json({ error: "Failed to export to Google Docs" });
   }
 });
 

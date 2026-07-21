@@ -538,6 +538,61 @@ async function insertTextBlock(
   return startIndex + combined.length;
 }
 
+/**
+ * Move a Google Doc into a Drive folder. If driveId is supplied the folder is
+ * treated as a Shared Drive (supportsAllDrives=true).  Safe to call even when
+ * the doc is already in the target folder — Drive silently ignores duplicate
+ * parents.
+ */
+export async function moveDocToFolder(
+  fileId: string,
+  folderId: string,
+  driveId?: string | null,
+  accessToken?: string,
+): Promise<void> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+
+  const params = new URLSearchParams({ addParents: folderId, fields: "id,parents" });
+  if (driveId) params.set("supportsAllDrives", "true");
+
+  try {
+    const res = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${fileId}?${params.toString()}`,
+      { method: "PATCH", headers },
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`moveDocToFolder failed (${res.status}): ${text}`);
+    }
+  } catch (err) {
+    console.error("moveDocToFolder error:", err);
+  }
+}
+
+/**
+ * Clear all content from an existing Google Doc and re-write it with new
+ * content + logo.  Used for "Sync Changes" on an already-exported proposal.
+ */
+export async function clearAndReplaceContent(
+  documentId: string,
+  content: string,
+  accessToken?: string,
+): Promise<void> {
+  const doc = await getDocument(documentId, accessToken);
+  const bodyContent = ((doc.body as Record<string, unknown>).content as { endIndex?: number }[]) ?? [];
+  const lastEl = bodyContent[bodyContent.length - 1];
+  const endIndex = lastEl?.endIndex ?? 1;
+
+  if (endIndex > 2) {
+    await batchUpdate(documentId, [
+      { deleteContentRange: { range: { startIndex: 1, endIndex: endIndex - 1 } } },
+    ], accessToken);
+  }
+
+  await appendContentWithLogo(documentId, content, accessToken);
+}
+
 export async function appendContentWithLogo(
   documentId: string,
   content: string,

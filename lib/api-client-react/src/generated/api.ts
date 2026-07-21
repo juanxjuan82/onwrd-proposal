@@ -1233,7 +1233,7 @@ export const useGenerateProposalFromTender = <
  * @summary Export a proposal to Google Docs
  */
 export const getExportToGoogleDocsUrl = (id: number) => {
-  return `/api/proposals/${id}/export-to-google-docs`;
+  return `/api/proposals/${id}/export`;
 };
 
 export const exportToGoogleDocs = async (
