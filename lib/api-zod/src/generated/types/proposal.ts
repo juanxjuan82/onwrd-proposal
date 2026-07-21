@@ -15,6 +15,10 @@ export interface Proposal {
   briefText: string;
   proposalContent: string;
   googleDocUrl?: string | null;
+  googleFileId?: string | null;
+  syncStatus?: string | null;
+  lastSyncedAt?: string | null;
+  dirtySince?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }

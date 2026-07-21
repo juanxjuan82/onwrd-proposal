@@ -532,8 +532,11 @@ router.put("/proposals/:id", async (req, res) => {
       updateData.clientName = bodyParsed.data.clientName;
     if (bodyParsed.data.industry !== undefined)
       updateData.industry = bodyParsed.data.industry;
-    if (bodyParsed.data.proposalContent !== undefined)
+    if (bodyParsed.data.proposalContent !== undefined) {
       updateData.proposalContent = bodyParsed.data.proposalContent;
+      // Mark as having un-synced changes (cleared on successful export/sync)
+      updateData.dirtySince = new Date();
+    }
     if (bodyParsed.data.status !== undefined)
       updateData.status = bodyParsed.data.status;
 

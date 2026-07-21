@@ -1,27 +1,25 @@
 /**
- * Google Docs export — unit tests
+ * Google Docs export — unit + route-behaviour tests
  *
  * Runner: node:test (built-in)
  * Transpiler: tsx (ESM)
  *
- * Tests pure logic that does NOT touch the DB or network:
+ * Covers:
  *   - Content assembly (sections vs. proposal content fallback)
- *   - Endpoint auth guard behaviour
+ *   - Auth guard behaviour
  *   - Drive config handling
  *   - clearAndReplaceContent guards (endIndex edge cases)
+ *   - Concurrency guard / 409 logic
+ *   - Backward compat: extract fileId from legacy googleDocUrl
+ *   - Dirty tracking (dirtySince set/cleared)
+ *   - Sync status transitions (syncing → synced / error)
+ *   - Idempotent create vs update branch
  */
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 // ─── Content-assembly logic ───────────────────────────────────────────────────
-//
-// The export endpoint builds the content string as follows:
-//   sections.length > 0
-//     ? sections.map(s => `## ${s.title}\n\n${s.content}`).join('\n\n---\n\n')
-//     : proposal.proposalContent
-//
-// We extract that logic into a pure function so it can be tested here.
 
 function buildExportContent(
   proposalContent: string,
@@ -92,9 +90,6 @@ describe("buildExportContent", () => {
 });
 
 // ─── Auth-guard logic ─────────────────────────────────────────────────────────
-//
-// The endpoint must reject requests that have no googleAccessToken in session.
-// We model the guard as a pure predicate.
 
 function isAuthenticated(session: { googleAccessToken?: string }): boolean {
   return !!session.googleAccessToken;
@@ -114,37 +109,199 @@ describe("export auth guard", () => {
   });
 });
 
-// ─── Create vs. sync branch ───────────────────────────────────────────────────
+// ─── Concurrency guard (409) ──────────────────────────────────────────────────
 //
-// The endpoint chooses between creating a new doc and syncing an existing one
-// based on whether `proposal.googleFileId` is set.
+// The endpoint returns 409 when syncStatus is already 'syncing'.
+// After the atomic UPDATE ... WHERE sync_status != 'syncing', if 0 rows
+// were affected the endpoint ALSO returns 409.
+//
+// We model both checks as pure predicates matching the route implementation.
 
-function shouldSyncExistingDoc(proposal: { googleFileId?: string | null }): boolean {
-  return !!proposal.googleFileId;
+function isSyncing(proposal: { syncStatus?: string | null }): boolean {
+  return proposal.syncStatus === "syncing";
 }
 
-describe("create vs sync branch selection", () => {
-  it("selects sync when googleFileId is set", () => {
-    assert.equal(shouldSyncExistingDoc({ googleFileId: "1abc" }), true);
+function atomicLockSucceeded(rowsAffected: number): boolean {
+  return rowsAffected > 0;
+}
+
+describe("concurrency guard / 409 behaviour", () => {
+  it("returns 409 immediately when syncStatus is already 'syncing'", () => {
+    assert.equal(isSyncing({ syncStatus: "syncing" }), true);
   });
 
-  it("selects create when googleFileId is null", () => {
-    assert.equal(shouldSyncExistingDoc({ googleFileId: null }), false);
+  it("allows export when syncStatus is null (never exported)", () => {
+    assert.equal(isSyncing({ syncStatus: null }), false);
   });
 
-  it("selects create when googleFileId is undefined", () => {
-    assert.equal(shouldSyncExistingDoc({}), false);
+  it("allows export when syncStatus is 'synced'", () => {
+    assert.equal(isSyncing({ syncStatus: "synced" }), false);
   });
 
-  it("selects create when googleFileId is an empty string", () => {
-    assert.equal(shouldSyncExistingDoc({ googleFileId: "" }), false);
+  it("allows export when syncStatus is 'error'", () => {
+    assert.equal(isSyncing({ syncStatus: "error" }), false);
+  });
+
+  it("returns 409 when atomic lock UPDATE affects 0 rows (race condition)", () => {
+    assert.equal(atomicLockSucceeded(0), false);
+  });
+
+  it("proceeds when atomic lock UPDATE affects 1 row", () => {
+    assert.equal(atomicLockSucceeded(1), true);
+  });
+});
+
+// ─── Backward compatibility: extract fileId from legacy googleDocUrl ──────────
+//
+// Proposals exported before googleFileId was tracked only have googleDocUrl.
+// On next export we extract the fileId from the URL so the existing doc is
+// reused instead of creating a duplicate.
+
+function extractFileIdFromUrl(googleDocUrl: string | null | undefined): string | null {
+  if (!googleDocUrl) return null;
+  const match = googleDocUrl.match(/\/document\/d\/([^/?#]+)/);
+  return match?.[1] ?? null;
+}
+
+describe("backward compat: extract fileId from legacy googleDocUrl", () => {
+  it("extracts the fileId from a standard Google Docs edit URL", () => {
+    const url = "https://docs.google.com/document/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms/edit";
+    assert.equal(extractFileIdFromUrl(url), "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms");
+  });
+
+  it("extracts the fileId when URL has query params", () => {
+    const url = "https://docs.google.com/document/d/ABC123/edit?usp=sharing";
+    assert.equal(extractFileIdFromUrl(url), "ABC123");
+  });
+
+  it("returns null when googleDocUrl is null", () => {
+    assert.equal(extractFileIdFromUrl(null), null);
+  });
+
+  it("returns null when googleDocUrl is undefined", () => {
+    assert.equal(extractFileIdFromUrl(undefined), null);
+  });
+
+  it("returns null for a URL that doesn't match the expected pattern", () => {
+    assert.equal(extractFileIdFromUrl("https://drive.google.com/file/d/XYZ/view"), null);
+  });
+
+  it("a proposal with googleFileId set takes precedence — no extraction needed", () => {
+    const proposal = { googleFileId: "EXISTING_ID", googleDocUrl: "https://docs.google.com/document/d/LEGACY_ID/edit" };
+    const effectiveFileId = proposal.googleFileId ?? extractFileIdFromUrl(proposal.googleDocUrl);
+    assert.equal(effectiveFileId, "EXISTING_ID");
+  });
+
+  it("a proposal without googleFileId falls back to URL extraction", () => {
+    const proposal = { googleFileId: null, googleDocUrl: "https://docs.google.com/document/d/LEGACY_ID/edit" };
+    const effectiveFileId = proposal.googleFileId ?? extractFileIdFromUrl(proposal.googleDocUrl);
+    assert.equal(effectiveFileId, "LEGACY_ID");
+  });
+});
+
+// ─── Idempotent create vs. sync branch ───────────────────────────────────────
+
+function shouldSyncExistingDoc(effectiveFileId: string | null | undefined): boolean {
+  return !!effectiveFileId;
+}
+
+describe("idempotent create vs. sync branch", () => {
+  it("syncs when effectiveFileId is set (existing doc)", () => {
+    assert.equal(shouldSyncExistingDoc("1abc"), true);
+  });
+
+  it("creates when effectiveFileId is null (no prior export, no legacy URL)", () => {
+    assert.equal(shouldSyncExistingDoc(null), false);
+  });
+
+  it("creates when effectiveFileId is empty string", () => {
+    assert.equal(shouldSyncExistingDoc(""), false);
+  });
+
+  it("creates exactly once — second export reuses the same fileId", () => {
+    // Simulate first export producing a fileId
+    const fileIdAfterFirstExport = "NEW_DOC_ID";
+    // Second export: effectiveFileId is now set → sync, not create
+    assert.equal(shouldSyncExistingDoc(fileIdAfterFirstExport), true);
+  });
+});
+
+// ─── Dirty tracking ───────────────────────────────────────────────────────────
+//
+// When proposal content or section content is updated, dirtySince is set.
+// On successful export, dirtySince is cleared.
+// The "unsaved changes" indicator is shown only when dirtySince is non-null
+// AND the proposal has a googleFileId (i.e. it has been exported before).
+
+function hasUnsyncedChanges(proposal: { dirtySince?: string | null; googleFileId?: string | null }): boolean {
+  return !!proposal.dirtySince && !!proposal.googleFileId;
+}
+
+describe("dirty tracking: unsaved-changes indicator", () => {
+  it("shows indicator when dirtySince is set and proposal has been exported", () => {
+    assert.equal(hasUnsyncedChanges({ dirtySince: new Date().toISOString(), googleFileId: "FILE1" }), true);
+  });
+
+  it("does not show indicator when dirtySince is null (synced)", () => {
+    assert.equal(hasUnsyncedChanges({ dirtySince: null, googleFileId: "FILE1" }), false);
+  });
+
+  it("does not show indicator when proposal has never been exported (no googleFileId)", () => {
+    assert.equal(hasUnsyncedChanges({ dirtySince: new Date().toISOString(), googleFileId: null }), false);
+  });
+
+  it("does not show indicator when proposal has no googleFileId or dirtySince", () => {
+    assert.equal(hasUnsyncedChanges({}), false);
+  });
+});
+
+// ─── Sync status transitions ──────────────────────────────────────────────────
+//
+// These model the state machine inside the export endpoint:
+//   null / 'error' / 'synced' → locked → 'syncing'
+//   'syncing' → on success → 'synced' (lastSyncedAt set, dirtySince cleared)
+//   'syncing' → on failure → 'error'
+
+type SyncStatus = "syncing" | "synced" | "error" | null;
+
+function computeSuccessState(now: Date): { syncStatus: SyncStatus; lastSyncedAt: Date; dirtySince: null } {
+  return { syncStatus: "synced", lastSyncedAt: now, dirtySince: null };
+}
+
+function computeErrorState(): { syncStatus: SyncStatus } {
+  return { syncStatus: "error" };
+}
+
+describe("sync status state machine", () => {
+  it("success path: sets syncStatus='synced', populates lastSyncedAt, clears dirtySince", () => {
+    const now = new Date();
+    const state = computeSuccessState(now);
+    assert.equal(state.syncStatus, "synced");
+    assert.equal(state.lastSyncedAt, now);
+    assert.equal(state.dirtySince, null);
+  });
+
+  it("error path: sets syncStatus='error'", () => {
+    const state = computeErrorState();
+    assert.equal(state.syncStatus, "error");
+  });
+
+  it("a proposal that errored can be retried (not stuck in 'syncing')", () => {
+    assert.equal(isSyncing({ syncStatus: "error" }), false);
+  });
+
+  it("a freshly synced proposal with edits shows unsaved changes after content update", () => {
+    const proposal = { syncStatus: "synced" as SyncStatus, googleFileId: "X", dirtySince: new Date().toISOString() };
+    assert.equal(hasUnsyncedChanges(proposal), true);
+  });
+
+  it("after re-sync, unsaved changes are cleared", () => {
+    const proposal = { syncStatus: "synced" as SyncStatus, googleFileId: "X", dirtySince: null };
+    assert.equal(hasUnsyncedChanges(proposal), false);
   });
 });
 
 // ─── Drive config fallback ────────────────────────────────────────────────────
-//
-// When no Drive config is set the endpoint skips the moveDocToFolder call.
-// Model this with the driveConfig?.folderId pattern used in the route.
 
 function hasFolderConfig(driveConfig: { folderId?: string | null } | undefined): boolean {
   return !!driveConfig?.folderId;
@@ -169,9 +326,6 @@ describe("drive config folder presence", () => {
 });
 
 // ─── clearAndReplaceContent endIndex guard ────────────────────────────────────
-//
-// The clear step is only needed when endIndex > 2.  Model the guard as a
-// pure function matching the implementation.
 
 function needsDeleteBeforeClear(endIndex: number): boolean {
   return endIndex > 2;

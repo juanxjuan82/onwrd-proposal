@@ -6,7 +6,7 @@ import {
   proposalsTable,
   googleExportsTable,
 } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
+import { eq, and, ne } from "drizzle-orm";
 import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
 import { createGoogleDoc, appendContentWithLogo, clearAndReplaceContent, moveDocToFolder } from "../lib/google-docs.js";
 import { googleDriveConfigTable } from "@workspace/db";
@@ -77,6 +77,15 @@ router.put("/proposals/:id/sections/:sectionId", async (req, res) => {
         eventType: "section_approved",
         notes: null,
       });
+    }
+
+    // Dirty tracking: if content was updated, mark the parent proposal as having
+    // un-synced changes (only meaningful when the proposal has been exported).
+    if (content !== undefined) {
+      db.update(proposalsTable)
+        .set({ dirtySince: new Date() })
+        .where(eq(proposalsTable.id, proposalId))
+        .catch(() => {});
     }
 
     res.json(updated);
@@ -259,9 +268,11 @@ router.post("/proposals/:id/approve-for-export", async (req, res) => {
 //   - Requires a connected Google OAuth session (googleAccessToken in session)
 //   - Loads the configured Drive destination folder (if any) from
 //     google_drive_config; the doc is created there.
-//   - If the proposal already has a googleFileId the existing doc is cleared
-//     and rewritten (sync).  No new doc is created.
-//   - Never calls shareWithAnyone — the doc inherits the folder's permissions.
+//   - If the proposal already has a googleFileId (or googleDocUrl from a
+//     legacy export) the existing doc is cleared and rewritten — one canonical
+//     doc per proposal, no duplicates.
+//   - Concurrency guard: returns 409 if syncStatus is already 'syncing'.
+//   - Never calls shareWithAnyone — permissions are inherited from the folder.
 //
 router.post("/proposals/:id/export", async (req, res) => {
   const proposalId = Number(req.params.id);
@@ -276,6 +287,7 @@ router.post("/proposals/:id/export", async (req, res) => {
     return;
   }
 
+  // ── 1. Load proposal ──────────────────────────────────────────────────────
   const [proposal] = await db
     .select()
     .from(proposalsTable)
@@ -286,69 +298,123 @@ router.post("/proposals/:id/export", async (req, res) => {
     return;
   }
 
+  // ── 2. Fast-path 409 to avoid a lock-attempt on obviously-busy proposals ─
+  if (proposal.syncStatus === "syncing") {
+    res.status(409).json({ error: "Export already in progress for this proposal." });
+    return;
+  }
+
+  // ── 3. Atomic lock: UPDATE ... WHERE sync_status != 'syncing' ─────────────
+  //    If another request slipped in between steps 1 and 3, the WHERE clause
+  //    will match 0 rows and we return 409 without proceeding.
+  const [locked] = await db
+    .update(proposalsTable)
+    .set({ syncStatus: "syncing" })
+    .where(and(eq(proposalsTable.id, proposalId), ne(proposalsTable.syncStatus, "syncing")))
+    .returning({ id: proposalsTable.id });
+
+  if (!locked) {
+    res.status(409).json({ error: "Export already in progress for this proposal." });
+    return;
+  }
+
   try {
-    const [driveConfig] = await db.select().from(googleDriveConfigTable).limit(1);
+    // ── 4. Backward compat: extract fileId from legacy URL ────────────────
+    let effectiveFileId = proposal.googleFileId;
+    if (!effectiveFileId && proposal.googleDocUrl) {
+      const match = proposal.googleDocUrl.match(/\/document\/d\/([^/?#]+)/);
+      effectiveFileId = match?.[1] ?? null;
+      if (effectiveFileId) {
+        await db
+          .update(proposalsTable)
+          .set({ googleFileId: effectiveFileId })
+          .where(eq(proposalsTable.id, proposalId));
+      }
+    }
 
-    const sections = await db
-      .select()
-      .from(proposalSectionsTable)
-      .where(eq(proposalSectionsTable.proposalId, proposalId))
-      .orderBy(proposalSectionsTable.orderIndex);
+    // ── 5. Collect content and Drive config ───────────────────────────────
+    const [[driveConfig], sections] = await Promise.all([
+      db.select().from(googleDriveConfigTable).limit(1),
+      db
+        .select()
+        .from(proposalSectionsTable)
+        .where(eq(proposalSectionsTable.proposalId, proposalId))
+        .orderBy(proposalSectionsTable.orderIndex),
+    ]);
 
-    const contentToExport = sections.length > 0
-      ? sections.map((s) => `## ${s.title}\n\n${s.content}`).join("\n\n---\n\n")
-      : proposal.proposalContent;
+    const contentToExport =
+      sections.length > 0
+        ? sections
+            .map((s) => `## ${s.title}\n\n${s.content}`)
+            .join("\n\n---\n\n")
+        : proposal.proposalContent;
 
     const exportedBy = req.session.googleUserEmail ?? undefined;
 
-    if (proposal.googleFileId) {
-      // ── Sync: update the existing doc ──────────────────────────────────
-      await clearAndReplaceContent(proposal.googleFileId, contentToExport, accessToken);
+    let docUrl: string;
+    let documentId: string;
+    let isUpdate: boolean;
 
-      await db.insert(googleExportsTable).values({
-        proposalId,
-        googleDocUrl: proposal.googleDocUrl!,
-        googleFileId: proposal.googleFileId,
-        driveFolderId: driveConfig?.folderId ?? null,
-        exportedBy: exportedBy ?? null,
-      });
-
-      res.json({ docUrl: proposal.googleDocUrl, documentId: proposal.googleFileId, isUpdate: true });
+    if (effectiveFileId) {
+      // ── Sync: rewrite existing doc ──────────────────────────────────────
+      documentId = effectiveFileId;
+      docUrl =
+        proposal.googleDocUrl ??
+        `https://docs.google.com/document/d/${documentId}/edit`;
+      await clearAndReplaceContent(documentId, contentToExport, accessToken);
+      isUpdate = true;
     } else {
       // ── Create: new doc in the configured folder ────────────────────────
       const docTitle = `ONWRD Proposal — ${proposal.clientName}`;
       const doc = await createGoogleDoc(docTitle, accessToken);
-      const docId = doc.documentId;
-      const docUrl = `https://docs.google.com/document/d/${docId}/edit`;
+      documentId = doc.documentId;
+      docUrl = `https://docs.google.com/document/d/${documentId}/edit`;
 
       if (driveConfig?.folderId) {
-        await moveDocToFolder(docId, driveConfig.folderId, driveConfig.driveId, accessToken);
+        await moveDocToFolder(
+          documentId,
+          driveConfig.folderId,
+          driveConfig.driveId,
+          accessToken,
+        );
       }
 
-      await appendContentWithLogo(docId, contentToExport, accessToken);
-
-      await db.insert(googleExportsTable).values({
-        proposalId,
-        googleDocUrl: docUrl,
-        googleFileId: docId,
-        driveFolderId: driveConfig?.folderId ?? null,
-        exportedBy: exportedBy ?? null,
-      });
-
-      await db
-        .update(proposalsTable)
-        .set({
-          googleDocUrl: docUrl,
-          googleFileId: docId,
-          status: "exported_to_drive",
-          updatedAt: new Date(),
-        })
-        .where(eq(proposalsTable.id, proposalId));
-
-      res.json({ docUrl, documentId: docId, isUpdate: false });
+      await appendContentWithLogo(documentId, contentToExport, accessToken);
+      isUpdate = false;
     }
+
+    // ── 6. Record the export ──────────────────────────────────────────────
+    await db.insert(googleExportsTable).values({
+      proposalId,
+      googleDocUrl: docUrl,
+      googleFileId: documentId,
+      driveFolderId: driveConfig?.folderId ?? null,
+      exportedBy: exportedBy ?? null,
+    });
+
+    const now = new Date();
+    await db
+      .update(proposalsTable)
+      .set({
+        googleDocUrl: docUrl,
+        googleFileId: documentId,
+        status: isUpdate ? proposal.status : "exported_to_drive",
+        syncStatus: "synced",
+        lastSyncedAt: now,
+        dirtySince: null,
+        updatedAt: now,
+      })
+      .where(eq(proposalsTable.id, proposalId));
+
+    res.json({ docUrl, documentId, isUpdate });
   } catch (err) {
     req.log.error({ err }, "Error exporting to Google Docs");
+    // Release the lock and record the error state
+    await db
+      .update(proposalsTable)
+      .set({ syncStatus: "error" })
+      .where(eq(proposalsTable.id, proposalId))
+      .catch(() => {});
     res.status(500).json({ error: "Failed to export to Google Docs" });
   }
 });

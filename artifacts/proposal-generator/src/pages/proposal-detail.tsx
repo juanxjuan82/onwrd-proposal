@@ -18,7 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
-import { ExternalLink, Loader2, ArrowLeft, Trash2, CheckCircle2, Eye, Pencil, Sparkles, AlertCircle, ShieldCheck, RefreshCw } from "lucide-react";
+import { ExternalLink, Loader2, ArrowLeft, Trash2, CheckCircle2, Eye, Pencil, Sparkles, AlertCircle, ShieldCheck, RefreshCw, Clock, AlertTriangle } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
@@ -503,9 +503,12 @@ export default function ProposalDetail() {
         });
       },
       onError: (error) => {
+        const is409 = (error as { status?: number }).status === 409;
         toast({
-          title: "Export failed",
-          description: error.error || "Could not export to Google Docs. Make sure your Google account is connected in Settings.",
+          title: is409 ? "Export already in progress" : "Export failed",
+          description: is409
+            ? "Another export is already running for this proposal. Please wait and try again."
+            : error.error || "Could not export to Google Docs. Make sure your Google account is connected in Settings.",
           variant: "destructive"
         });
       }
@@ -774,47 +777,83 @@ export default function ProposalDetail() {
           )}
 
           {activeTab === "content" && (
-            <div className="flex justify-end gap-4 pt-4">
-              <Button 
-                type="submit"
-                variant="secondary"
-                disabled={updateProposal.isPending || exportToDocs.isPending}
-                data-testid="button-save"
-              >
-                {updateProposal.isPending && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
-                Save Changes
-              </Button>
-              {proposal.googleDocUrl ? (
-                <Button
-                  type="button"
-                  disabled={updateProposal.isPending || exportToDocs.isPending}
-                  onClick={handleExport}
-                  variant="outline"
-                  data-testid="button-sync"
-                >
-                  {exportToDocs.isPending ? (
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                  ) : (
-                    <RefreshCw className="w-4 h-4 mr-2" />
+            <div className="pt-4 space-y-3">
+              {/* Sync status panel — shown after the proposal has been exported */}
+              {proposal.googleFileId && (
+                <div className="flex flex-wrap items-center gap-3 text-sm bg-card border rounded-lg px-4 py-3">
+                  {proposal.syncStatus === "error" && (
+                    <>
+                      <AlertTriangle className="w-4 h-4 text-destructive shrink-0" />
+                      <span className="text-destructive font-medium">Last sync failed — try again.</span>
+                    </>
                   )}
-                  Sync Changes
-                </Button>
-              ) : (
-                <Button
-                  type="button"
-                  disabled={updateProposal.isPending || exportToDocs.isPending}
-                  onClick={handleExport}
-                  className="bg-[#0000FF] hover:bg-[#0000FF] text-white border border-[#0000FF]"
-                  data-testid="button-export"
-                >
-                  {exportToDocs.isPending ? (
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                  ) : (
-                    <CheckCircle2 className="w-4 h-4 mr-2" />
+                  {proposal.syncStatus === "syncing" && (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin text-muted-foreground shrink-0" />
+                      <span className="text-muted-foreground">Syncing to Google Docs…</span>
+                    </>
                   )}
-                  Export to Google Docs
-                </Button>
+                  {(proposal.syncStatus === "synced" || proposal.syncStatus == null) && proposal.lastSyncedAt && (
+                    <>
+                      <Clock className="w-4 h-4 text-muted-foreground shrink-0" />
+                      <span className="text-muted-foreground">
+                        Last synced {new Date(proposal.lastSyncedAt).toLocaleString()}
+                      </span>
+                    </>
+                  )}
+                  {!proposal.syncStatus && !proposal.lastSyncedAt && (
+                    <span className="text-muted-foreground">Linked to Google Docs</span>
+                  )}
+                  {proposal.dirtySince && (
+                    <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-orange-900/20 text-orange-400 border border-orange-900 px-2.5 py-0.5 text-xs font-medium">
+                      <AlertCircle className="w-3 h-3" />
+                      Changes not synced
+                    </span>
+                  )}
+                </div>
               )}
+              <div className="flex justify-end gap-4">
+                <Button
+                  type="submit"
+                  variant="secondary"
+                  disabled={updateProposal.isPending || exportToDocs.isPending}
+                  data-testid="button-save"
+                >
+                  {updateProposal.isPending && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+                  Save Changes
+                </Button>
+                {proposal.googleDocUrl || proposal.googleFileId ? (
+                  <Button
+                    type="button"
+                    disabled={updateProposal.isPending || exportToDocs.isPending}
+                    onClick={handleExport}
+                    variant="outline"
+                    data-testid="button-sync"
+                  >
+                    {exportToDocs.isPending ? (
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    ) : (
+                      <RefreshCw className="w-4 h-4 mr-2" />
+                    )}
+                    Sync to Google Docs
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    disabled={updateProposal.isPending || exportToDocs.isPending}
+                    onClick={handleExport}
+                    className="bg-[#0000FF] hover:bg-[#0000FF] text-white border border-[#0000FF]"
+                    data-testid="button-export"
+                  >
+                    {exportToDocs.isPending ? (
+                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="w-4 h-4 mr-2" />
+                    )}
+                    Export to Google Docs
+                  </Button>
+                )}
+              </div>
             </div>
           )}
         </form>
