@@ -63,11 +63,14 @@ interface CircuitCache {
 let _circuitCache: CircuitCache | null = null;
 const CIRCUIT_CACHE_TTL_MS = 30_000;
 
-async function readCircuit(): Promise<CircuitCache> {
+/**
+ * Always reads circuit state from DB — used for every AI gating decision so
+ * that circuit-open and circuit-reset are immediately effective across all
+ * instances (no cache staleness in the hot path).
+ * On DB error, fails open to avoid false-blocking calls.
+ */
+async function readCircuitForGating(): Promise<CircuitCache> {
   const now = Date.now();
-  if (_circuitCache && now - _circuitCache.loadedAt < CIRCUIT_CACHE_TTL_MS) {
-    return _circuitCache;
-  }
   try {
     const [row] = await db.select().from(aiCircuitTable).where(eq(aiCircuitTable.id, 1));
 
@@ -87,11 +90,26 @@ async function readCircuit(): Promise<CircuitCache> {
       loadedAt:  now,
     };
   } catch {
+    // DB unreachable — fail open so a DB hiccup doesn't block all AI calls.
+    // Use stale cache if available; otherwise synthesise a closed state.
     if (!_circuitCache) {
       _circuitCache = { open: false, openedAt: null, errorCode: null, resetAt: null, loadedAt: now };
     }
+    console.warn("[ai-gateway] DB error reading circuit — using cached/open-fail-safe state.");
   }
   return _circuitCache;
+}
+
+/**
+ * Reads circuit state for admin/status endpoints (cached 30 s).
+ * Do NOT use this for the AI gating decision — use readCircuitForGating().
+ */
+async function readCircuit(): Promise<CircuitCache> {
+  const now = Date.now();
+  if (_circuitCache && now - _circuitCache.loadedAt < CIRCUIT_CACHE_TTL_MS) {
+    return _circuitCache;
+  }
+  return readCircuitForGating();
 }
 
 async function _doResetCircuit(): Promise<void> {
@@ -162,27 +180,31 @@ function startOfTomorrow(): Date {
 // each prefix tier) to prevent deadlocks.
 
 interface ReserveResult {
-  logId:     number;
-  allowed:   boolean;
-  globalOk:  boolean;
-  featureOk: boolean;
-  tokenOk:   boolean;
-  opOk:      boolean;
+  logId:           number;
+  allowed:         boolean;
+  globalOk:        boolean;
+  featureOk:       boolean;
+  tokenOk:         boolean;
+  opOk:            boolean;
+  /** Tokens reserved in the global quota row for this call (= maxTokens). */
+  estimatedTokens: number;
 }
 
 async function atomicReserveAndLog(opts: {
-  requestId:      string;
-  feature:        string;
-  opportunityId?: number;
-  proposalId?:    number;
-  operationKey?:  string;
-  globalLimit:    number;
-  featureLimit:   number;
-  tokenLimit:     number;
-  opLimit:        number;
+  requestId:       string;
+  feature:         string;
+  opportunityId?:  number;
+  proposalId?:     number;
+  operationKey?:   string;
+  globalLimit:     number;
+  featureLimit:    number;
+  tokenLimit:      number;
+  opLimit:         number;
+  /** Conservative upper-bound token budget for this call (= maxTokens param). */
+  estimatedTokens: number;
 }): Promise<ReserveResult> {
   const { requestId, feature, opportunityId, proposalId, operationKey,
-          globalLimit, featureLimit, tokenLimit, opLimit } = opts;
+          globalLimit, featureLimit, tokenLimit, opLimit, estimatedTokens } = opts;
   const today   = todayKey();
   const oppVal  = opportunityId ?? null;
   const propVal = proposalId    ?? null;
@@ -225,7 +247,9 @@ async function atomicReserveAndLog(opts: {
 
     const globalOk  = globalCalls  < globalLimit;
     const featureOk = featCalls    < featureLimit;
-    const tokenOk   = globalTokens < tokenLimit;
+    // Token check: ensure reserved + estimated budget fits within limit so that
+    // concurrent calls can never jointly overshoot the token budget.
+    const tokenOk   = globalTokens + estimatedTokens <= tokenLimit;
     const opOk      = !operationKey || opCalls < opLimit;
     const allowed   = globalOk && featureOk && tokenOk && opOk;
 
@@ -246,14 +270,21 @@ async function atomicReserveAndLog(opts: {
            'limit_exceeded', NOW(), ${errorCode})
         RETURNING id
       `);
-      return { logId: Number(limitRow!.id), allowed: false, globalOk, featureOk, tokenOk, opOk };
+      return { logId: Number(limitRow!.id), allowed: false, globalOk, featureOk, tokenOk, opOk, estimatedTokens: 0 };
     }
 
-    // 3. Increment call counters for all locked scopes
+    // 3. Increment call counters for all locked scopes AND pre-reserve estimated
+    //    tokens for the global scope — this prevents concurrent callers from
+    //    seeing the same available budget and jointly exceeding the token limit.
     await tx.execute(sql`
       UPDATE ai_daily_quota
       SET calls = calls + 1, updated_at = NOW()
       WHERE date = ${today} AND scope = ANY(${scopes})
+    `);
+    await tx.execute(sql`
+      UPDATE ai_daily_quota
+      SET tokens = tokens + ${estimatedTokens}, updated_at = NOW()
+      WHERE date = ${today} AND scope = 'global'
     `);
 
     // 4. Insert pending log row
@@ -266,34 +297,42 @@ async function atomicReserveAndLog(opts: {
     `);
 
     return {
-      logId:     Number(logRow!.id),
-      allowed:   true,
-      globalOk:  true,
-      featureOk: true,
-      tokenOk:   true,
-      opOk:      true,
+      logId:           Number(logRow!.id),
+      allowed:         true,
+      globalOk:        true,
+      featureOk:       true,
+      tokenOk:         true,
+      opOk:            true,
+      estimatedTokens,
     };
   });
 }
 
-// ── Token accounting — increment global token counter on call completion ──────
+// ── Token accounting — correct pre-reserved estimate to actual usage ──────────
+//
+// At reservation time we pre-reserved `estimatedTokens` (= maxTokens) in the
+// global ai_daily_quota row so concurrent calls see the reserved budget.
+// After the call we correct the running total:
+//   • on success: tokens += (actualTotal - estimatedTokens)  — may be negative
+//   • on failure: tokens -= estimatedTokens                  — release reservation
+//
+// This keeps the global token counter accurate without ever allowing overruns.
 
-async function addTokensToQuota(total: number): Promise<void> {
-  if (!total) return;
+async function correctTokenReservation(delta: number): Promise<void> {
+  if (!delta) return;
   try {
     const today = todayKey();
     await db.execute(sql`
-      INSERT INTO ai_daily_quota (date, scope, calls, tokens)
-      VALUES (${today}, 'global', 0, ${total})
-      ON CONFLICT (date, scope)
-      DO UPDATE SET tokens = ai_daily_quota.tokens + ${total}, updated_at = NOW()
+      UPDATE ai_daily_quota
+      SET tokens = GREATEST(0, tokens + ${delta}), updated_at = NOW()
+      WHERE date = ${today} AND scope = 'global'
     `);
-  } catch { /* non-critical */ }
+  } catch { /* non-critical — the conservative reservation still stands */ }
 }
 
 // ── Log completion helpers ────────────────────────────────────────────────────
 
-async function logComplete(logId: number, result: AIResult): Promise<void> {
+async function logComplete(logId: number, estimatedTokens: number, result: AIResult): Promise<void> {
   try {
     await db.update(aiUsageLogTable).set({
       status:      "completed",
@@ -302,18 +341,21 @@ async function logComplete(logId: number, result: AIResult): Promise<void> {
       inputTokens:  result.usage?.promptTokens     ?? null,
       outputTokens: result.usage?.completionTokens ?? null,
     }).where(eq(aiUsageLogTable.id, logId));
-    const total = (result.usage?.totalTokens ?? 0);
-    void addTokensToQuota(total);
+    // Correct the pre-reserved budget: add actual tokens, subtract the estimate.
+    const actualTotal = result.usage?.totalTokens ?? 0;
+    void correctTokenReservation(actualTotal - estimatedTokens);
   } catch { /* non-critical */ }
 }
 
-async function logFail(logId: number, errorCode: string): Promise<void> {
+async function logFail(logId: number, estimatedTokens: number, errorCode: string): Promise<void> {
   try {
     await db.update(aiUsageLogTable).set({
       status:      "failed",
       completedAt: new Date(),
       errorCode,
     }).where(eq(aiUsageLogTable.id, logId));
+    // Release the pre-reserved token budget — the call never consumed tokens.
+    void correctTokenReservation(-estimatedTokens);
   } catch { /* non-critical */ }
 }
 
@@ -477,24 +519,28 @@ export async function invokeAI(params: InvokeAIParams): Promise<AIResult> {
 
   if (!ALLOWED_FEATURES.has(feature)) throw new GatewayFeatureError(feature);
 
-  // ① DB-backed circuit check (cached 30 s; auto-expires via resetAt)
-  const circuit = await readCircuit();
+  // ① DB-backed circuit check — always reads DB so open/reset is globally
+  //    effective immediately across all instances (no cache in the hot path).
+  const circuit = await readCircuitForGating();
   if (circuit.open) {
     void logCircuitOpen({ feature, opportunityId, proposalId, operationKey });
     throw new GatewayCircuitOpenError(circuit.openedAt, circuit.resetAt);
   }
 
-  // ② Atomic quota reservation (SELECT FOR UPDATE in transaction)
+  // ② Atomic quota reservation (SELECT FOR UPDATE in transaction).
+  //    estimatedTokens = maxTokens is pre-reserved in the global token counter
+  //    so concurrent callers cannot jointly overshoot the token budget.
   const reserve = await atomicReserveAndLog({
-    requestId:    crypto.randomUUID(),
+    requestId:       crypto.randomUUID(),
     feature,
     opportunityId,
     proposalId,
     operationKey,
-    globalLimit:  LIMITS.dailyCalls(),
-    featureLimit: LIMITS.perFeature[feature]?.() ?? 100,
-    tokenLimit:   LIMITS.dailyTokens(),
-    opLimit:      LIMITS.perOperation(),
+    globalLimit:     LIMITS.dailyCalls(),
+    featureLimit:    LIMITS.perFeature[feature]?.() ?? 100,
+    tokenLimit:      LIMITS.dailyTokens(),
+    opLimit:         LIMITS.perOperation(),
+    estimatedTokens: maxTokens,
   });
 
   if (!reserve.allowed) {
@@ -509,7 +555,8 @@ export async function invokeAI(params: InvokeAIParams): Promise<AIResult> {
     throw new GatewayLimitError(reason, tomorrow);
   }
 
-  const logId = reserve.logId;
+  const logId           = reserve.logId;
+  const estimatedTokens = reserve.estimatedTokens;
   const ctx = [
     feature,
     opportunityId != null ? `opp=${opportunityId}` : null,
@@ -546,7 +593,7 @@ export async function invokeAI(params: InvokeAIParams): Promise<AIResult> {
   try {
     const result = await callOnce();
     console.info(`[ai-gateway] ok — ${ctx}`);
-    void logComplete(logId, result);
+    void logComplete(logId, estimatedTokens, result);
     return result;
   } catch (err) {
     if (isQuotaError(err)) {
@@ -555,7 +602,7 @@ export async function invokeAI(params: InvokeAIParams): Promise<AIResult> {
         `[ai-gateway] quota exhausted — circuit opened (${ctx}). ` +
           "All AI calls blocked until admin resets via POST /api/admin/ai/circuit/reset or cooldown expires.",
       );
-      void logFail(logId, "insufficient_quota");
+      void logFail(logId, estimatedTokens, "insufficient_quota");
       throw err;
     }
 
@@ -566,14 +613,14 @@ export async function invokeAI(params: InvokeAIParams): Promise<AIResult> {
       try {
         const result = await callOnce();
         console.info(`[ai-gateway] ok (after retry) — ${ctx}`);
-        void logComplete(logId, result);
+        void logComplete(logId, estimatedTokens, result);
         return result;
       } catch (retryErr) {
         if (isQuotaError(retryErr)) {
           await openCircuit("insufficient_quota");
           console.error(`[ai-gateway] quota exhausted on retry — circuit opened (${ctx}).`);
         }
-        void logFail(logId, retryErr instanceof Error ? retryErr.name : "retry_error");
+        void logFail(logId, estimatedTokens, retryErr instanceof Error ? retryErr.name : "retry_error");
         throw retryErr;
       }
     }
@@ -582,7 +629,7 @@ export async function invokeAI(params: InvokeAIParams): Promise<AIResult> {
       `[ai-gateway] error (${ctx}):`,
       err instanceof Error ? err.message : String(err),
     );
-    void logFail(logId, err instanceof Error ? err.name : "unknown");
+    void logFail(logId, estimatedTokens, err instanceof Error ? err.name : "unknown");
     throw err;
   }
 }
