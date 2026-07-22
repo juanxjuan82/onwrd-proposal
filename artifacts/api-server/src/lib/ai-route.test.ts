@@ -9,7 +9,7 @@
  * Transpiler: tsx (ESM)
  * Requires: live PostgreSQL connection
  *
- * All hooks are scoped inside the top-level describe so that the before/after
+ * All hooks are scoped inside the top-level describe so that before/after
  * run in the correct order when node:test runs multiple files in the same process.
  */
 
@@ -17,6 +17,10 @@ import http from "node:http";
 import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import app from "../app.js";
+import {
+  acquireCrawlLock,
+  releaseCrawlLock,
+} from "../crawlers/index.js";
 import {
   __setInvokeAISpy,
   __setOpenAICompletionForTesting,
@@ -69,8 +73,6 @@ describe("ai-route: route-level zero-AI boundary tests", () => {
 
   function withZeroAiSpy(): { getCount: () => number; restore: () => void } {
     let count = 0;
-    // Count calls but do NOT throw — this lets the route complete and we can
-    // inspect the count after, giving better diagnostics than a 500 error.
     __setInvokeAISpy(async (_p: InvokeAIParams): Promise<AIResult> => {
       count++;
       return { content: "unexpected-ai-call", model: "mock" };
@@ -81,9 +83,9 @@ describe("ai-route: route-level zero-AI boundary tests", () => {
     };
   }
 
-  // ── Zero-AI automatic paths ─────────────────────────────────────────────────
+  // ── Zero-AI automatic paths — direct create + JSON import ──────────────────
 
-  describe("zero invokeAI calls on automatic creation paths", () => {
+  describe("zero invokeAI calls on JSON-body automatic creation paths", () => {
     it("POST /api/opportunities (direct creation) makes zero AI calls", async () => {
       const spy = withZeroAiSpy();
       try {
@@ -120,6 +122,30 @@ describe("ai-route: route-level zero-AI boundary tests", () => {
       assert.equal(spy.getCount(), 0, "pasted-text import must not call invokeAI (keyword engine only)");
     });
 
+    it("POST /api/tenders/import-csv (JSON-body CSV) makes zero AI calls", async () => {
+      const spy = withZeroAiSpy();
+      try {
+        const csv = [
+          "title,agency,description",
+          '"Route Test Tender via CSV","CSV Agency","A test tender imported from CSV with enough description text to pass any minimum validation"',
+        ].join("\n");
+
+        const res = await post("/api/tenders/import-csv", { csv });
+        assert.notEqual(
+          res.status,
+          500,
+          `POST /api/tenders/import-csv returned 500; spy calls: ${spy.getCount()}`,
+        );
+      } finally {
+        spy.restore();
+      }
+      assert.equal(spy.getCount(), 0, "CSV JSON-body import must not call invokeAI");
+    });
+  });
+
+  // ── Zero-AI automatic paths — validation failures ──────────────────────────
+
+  describe("zero invokeAI calls on validation failures", () => {
     it("POST /api/opportunities with missing fields returns 400, zero AI calls", async () => {
       const spy = withZeroAiSpy();
       try {
@@ -140,6 +166,96 @@ describe("ai-route: route-level zero-AI boundary tests", () => {
         spy.restore();
       }
       assert.equal(spy.getCount(), 0, "validation failure must not call invokeAI");
+    });
+  });
+
+  // ── Zero-AI automatic paths — file upload ──────────────────────────────────
+
+  describe("zero invokeAI calls on file-upload paths", () => {
+    it("POST /api/tenders/manual with .txt file upload makes zero AI calls", async () => {
+      const spy = withZeroAiSpy();
+      try {
+        const tenderText =
+          "TENDER NOTICE — Department of Infrastructure\n\n" +
+          "Agency: City Infrastructure Authority\n" +
+          "Title: Road Maintenance Services 2026-2027\n\n" +
+          "Scope: The Authority invites tenders for the provision of road maintenance " +
+          "services across the metropolitan area. Requirements include: qualified civil " +
+          "engineers, ISO 9001 certification, public liability insurance of $10M minimum, " +
+          "and ability to mobilise within 48 hours of award. Submissions close 2026-09-01.\n";
+
+        const formData = new FormData();
+        formData.append(
+          "file",
+          new Blob([tenderText], { type: "text/plain" }),
+          "tender.txt",
+        );
+
+        const res = await fetch(`${baseUrl}/api/tenders/manual`, {
+          method: "POST",
+          body:   formData,
+        });
+
+        assert.notEqual(
+          res.status,
+          500,
+          `POST /api/tenders/manual (TXT) returned 500; spy calls: ${spy.getCount()}`,
+        );
+        assert.notEqual(res.status, 413, "file must be within size limit");
+      } finally {
+        spy.restore();
+      }
+      assert.equal(spy.getCount(), 0, "TXT file upload must use deterministic extraction — no invokeAI call");
+    });
+
+    it("POST /api/tenders/manual with private/internal URL returns 400, zero AI calls", async () => {
+      const spy = withZeroAiSpy();
+      try {
+        const res = await fetch(`${baseUrl}/api/tenders/manual`, {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ url: "http://127.0.0.1/internal.pdf" }),
+        });
+        assert.equal(res.status, 400, "private URL must return 400 without fetching");
+      } finally {
+        spy.restore();
+      }
+      assert.equal(spy.getCount(), 0, "private-URL rejection must not call invokeAI");
+    });
+
+    it("POST /api/tenders/manual with invalid URL returns 400, zero AI calls", async () => {
+      const spy = withZeroAiSpy();
+      try {
+        const res = await fetch(`${baseUrl}/api/tenders/manual`, {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ url: "not-a-valid-url" }),
+        });
+        assert.equal(res.status, 400, "invalid URL must return 400");
+      } finally {
+        spy.restore();
+      }
+      assert.equal(spy.getCount(), 0, "URL-validation failure must not call invokeAI");
+    });
+  });
+
+  // ── Zero-AI automatic paths — crawl trigger ────────────────────────────────
+
+  describe("zero invokeAI calls on crawl trigger path", () => {
+    it("POST /api/tender-intelligence/crawl with lock held returns 409, zero AI calls", async () => {
+      // Hold the crawl lock so the route returns 409 without starting a crawl.
+      const held = await acquireCrawlLock();
+      assert.equal(held, true, "precondition: must be able to acquire crawl lock");
+
+      const spy = withZeroAiSpy();
+      try {
+        const res = await post("/api/tender-intelligence/crawl", {});
+        assert.equal(res.status, 409, "crawl trigger must return 409 when lock is held");
+      } finally {
+        spy.restore();
+        await releaseCrawlLock();
+      }
+      assert.equal(spy.getCount(), 0, "crawl 409 short-circuit must not call invokeAI");
     });
   });
 });

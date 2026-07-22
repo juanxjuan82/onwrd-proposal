@@ -156,23 +156,98 @@ describe("concurrent runCrawler() calls", () => {
   before(clearLock);
   after(clearLock);
 
-  it("two concurrent calls both complete without throwing", async () => {
-    // Both start nearly simultaneously; only one acquires the DB lock.
-    // The other sees the lock held and exits cleanly (returns, not throws).
+  it("with lock already held: runCrawler rejects with 'in progress' message", async () => {
+    // Explicitly hold the lock so runCrawler cannot acquire it.
+    const held = await acquireCrawlLock();
+    assert.equal(held, true, "precondition: lock must be acquirable");
+
+    let threw = false;
+    try {
+      await runCrawler(99999);
+      // If runCrawler returned instead of throwing, the lock was not correctly held.
+      // This is a test defect, not a pass — report it explicitly.
+      assert.fail("runCrawler should have thrown because the lock was held");
+    } catch (err) {
+      threw = true;
+      const msg = err instanceof Error ? err.message : String(err);
+      assert.ok(
+        msg.includes("in progress") || msg.includes("lock") || msg.includes("running"),
+        `expected a lock-held error message, got: ${msg}`,
+      );
+    } finally {
+      await releaseCrawlLock();
+    }
+
+    assert.ok(threw, "runCrawler must throw when the lock is already held");
+  });
+
+  it("concurrent runCrawler calls: at least one proceeds; any failure is lock-held", async () => {
+    // Fire both simultaneously. Due to DB-level SELECT FOR UPDATE:
+    //   - One acquires the lock and runs (success or internal error).
+    //   - The other may be rejected with a lock-held error if r1 still holds
+    //     the lock when r2 checks, OR r2 may succeed if r1 released first.
+    // Either outcome is acceptable; what is NOT acceptable is any other kind
+    // of failure (e.g., a DB connection error or an uncaught exception).
     const [r1, r2] = await Promise.allSettled([
       runCrawler(99999),
       runCrawler(99999),
     ]);
 
-    assert.equal(r1.status, "fulfilled", "first concurrent runCrawler must not throw");
-    assert.equal(r2.status, "fulfilled", "second concurrent runCrawler must not throw (exits early)");
+    const isLockHeldError = (r: PromiseSettledResult<unknown>): boolean =>
+      r.status === "rejected" &&
+      r.reason instanceof Error &&
+      (
+        r.reason.message.includes("in progress") ||
+        r.reason.message.includes("running") ||
+        r.reason.message.includes("lock")
+      );
+
+    const successes      = [r1, r2].filter(r => r.status === "fulfilled");
+    const lockHeldErrors = [r1, r2].filter(isLockHeldError);
+    const unexpectedErrors = [r1, r2].filter(
+      r => r.status === "rejected" && !isLockHeldError(r),
+    );
+
+    assert.equal(
+      unexpectedErrors.length,
+      0,
+      `all rejections must be lock-held errors; unexpected: ${
+        unexpectedErrors.map(r => (r as PromiseRejectedResult).reason).join(", ")
+      }`,
+    );
+    assert.ok(
+      successes.length >= 1,
+      "at least one concurrent runCrawler must succeed",
+    );
+    assert.ok(
+      successes.length + lockHeldErrors.length === 2,
+      "every result must be either a success or a lock-held rejection",
+    );
   });
 
-  it("lock is free after both concurrent crawlers complete", async () => {
+  it("lock is free after both concurrent crawlers settle", async () => {
     await Promise.allSettled([runCrawler(99999), runCrawler(99999)]);
 
     const ok = await acquireCrawlLock();
-    assert.equal(ok, true, "lock must be free after both concurrent crawlers complete");
+    assert.equal(ok, true, "lock must be free after all concurrent crawlers have settled");
+    await releaseCrawlLock();
+  });
+
+  it("lock is released by the finally block even when runCrawler encounters an error", async () => {
+    // runCrawler wraps its body in try/finally { releaseCrawlLock() }.
+    // Whether the crawl succeeds or throws internally, the lock must be free after.
+    try {
+      await runCrawler(99999); // non-existent source — may return or throw
+    } catch {
+      // Any error is fine for this test; we only care about lock release.
+    }
+
+    const ok = await acquireCrawlLock();
+    assert.equal(
+      ok,
+      true,
+      "lock must be released by the finally block regardless of crawl outcome",
+    );
     await releaseCrawlLock();
   });
 });

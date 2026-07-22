@@ -8,7 +8,7 @@
  * Transpiler: tsx (ESM)
  * Requires: live PostgreSQL connection
  *
- * All hooks are scoped inside the top-level describe so that the before/after/
+ * All hooks are scoped inside the top-level describe so that before/after/
  * afterEach run in the correct order when node:test runs multiple files in the
  * same process.
  */
@@ -16,8 +16,8 @@
 import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { db } from "@workspace/db";
-import { aiDailyQuotaTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
+import { aiDailyQuotaTable, aiUsageLogTable } from "@workspace/db";
+import { eq, and, gte, desc } from "drizzle-orm";
 import {
   invokeAI,
   getCircuitState,
@@ -56,8 +56,7 @@ describe("ai-circuit: gateway circuit/retry integration", () => {
   let savedReqLimit:   string | undefined;
 
   // Set very high daily limits so accumulated DB quota never blocks these tests.
-  // The individual concurrent-limit test temporarily overrides AI_DAILY_REQUIREMENTS_LIMIT
-  // to the precise value it needs for its own assertion.
+  // Individual tests temporarily override specific limits for their own assertions.
   before(async () => {
     savedCallLimit  = process.env.AI_DAILY_CALL_LIMIT;
     savedTokenLimit = process.env.AI_DAILY_TOKEN_LIMIT;
@@ -183,7 +182,6 @@ describe("ai-circuit: gateway circuit/retry integration", () => {
         if (providerCalls === 1) {
           const err: any = new Error("rate limit exceeded");
           err.status  = 429;
-          // Very short Retry-After so the test doesn't stall for 5 s.
           err.headers = { "retry-after": "0.001" };
           throw err;
         }
@@ -211,14 +209,12 @@ describe("ai-circuit: gateway circuit/retry integration", () => {
     });
   });
 
-  // ── Daily call-limit concurrency ────────────────────────────────────────────
+  // ── Feature-scope daily call-limit concurrency ─────────────────────────────
 
-  describe("daily call-limit enforcement", () => {
+  describe("feature-scope daily call-limit enforcement", () => {
     it("concurrent calls against the feature limit: exactly one succeeds, one gets GatewayLimitError", async () => {
       const today = new Date().toISOString().split("T")[0]!;
 
-      // Read the per-feature quota scope so the constraint is on requirements_extraction
-      // specifically — independent of the high global limit set in before().
       const [quota] = await db
         .select({ calls: aiDailyQuotaTable.calls })
         .from(aiDailyQuotaTable)
@@ -235,7 +231,7 @@ describe("ai-circuit: gateway circuit/retry integration", () => {
 
       const params: InvokeAIParams = {
         feature:   "requirements_extraction",
-        messages:  [{ role: "user", content: "concurrent limit test" }],
+        messages:  [{ role: "user", content: "concurrent feature limit test" }],
         maxTokens: 10,
       };
 
@@ -251,6 +247,112 @@ describe("ai-circuit: gateway circuit/retry integration", () => {
 
       assert.equal(successes.length,   1, "exactly one concurrent call must succeed");
       assert.equal(limitErrors.length, 1, "exactly one concurrent call must get GatewayLimitError");
+    });
+  });
+
+  // ── Global daily call-limit concurrency ────────────────────────────────────
+
+  describe("global daily call-limit enforcement", () => {
+    it("concurrent calls against the global limit: exactly one succeeds, one gets GatewayLimitError", async () => {
+      const today = new Date().toISOString().split("T")[0]!;
+
+      // Read current global quota so we can set the limit to exactly one above it.
+      const [quota] = await db
+        .select({ calls: aiDailyQuotaTable.calls })
+        .from(aiDailyQuotaTable)
+        .where(and(
+          eq(aiDailyQuotaTable.date, today),
+          eq(aiDailyQuotaTable.scope, "global"),
+        ));
+      const baseGlobal = quota?.calls ?? 0;
+
+      // Allow exactly one more global call; feature limit stays at 99999.
+      process.env.AI_DAILY_CALL_LIMIT = String(baseGlobal + 1);
+
+      __setOpenAICompletionForTesting(async () => makeSuccessCompletion("global-ok"));
+
+      const params: InvokeAIParams = {
+        feature:   "requirements_extraction",
+        messages:  [{ role: "user", content: "concurrent global limit test" }],
+        maxTokens: 10,
+      };
+
+      const [r1, r2] = await Promise.allSettled([invokeAI(params), invokeAI(params)]);
+
+      // Restore the high global limit set in the before() hook.
+      process.env.AI_DAILY_CALL_LIMIT = "99999";
+
+      const successes   = [r1, r2].filter(r => r.status === "fulfilled");
+      const limitErrors = [r1, r2].filter(
+        r => r.status === "rejected" && r.reason instanceof GatewayLimitError,
+      );
+
+      assert.equal(successes.length,   1, "exactly one concurrent global call must succeed");
+      assert.equal(limitErrors.length, 1, "exactly one concurrent global call must get GatewayLimitError");
+
+      // Verify the error references the global (daily_call) limit, not the feature limit.
+      if (limitErrors[0]?.status === "rejected") {
+        const errMsg = (limitErrors[0].reason as GatewayLimitError).message.toLowerCase();
+        assert.ok(
+          errMsg.includes("daily") || errMsg.includes("limit"),
+          `GatewayLimitError must cite a limit, got: ${errMsg}`,
+        );
+      }
+    });
+  });
+
+  // ── Abort / cancellation terminal status in ai_usage_log ──────────────────
+
+  describe("abort/cancellation: terminal status in ai_usage_log", () => {
+    it("AbortError from provider produces a 'failed' log entry with errorCode='AbortError'", async () => {
+      // Mock the provider to throw AbortError unconditionally.
+      // This simulates a cancelled request reaching the completion layer.
+      __setOpenAICompletionForTesting(async () => {
+        throw new DOMException("This operation was aborted", "AbortError");
+      });
+
+      const before = new Date(Date.now() - 100);
+      let threw = false;
+
+      try {
+        await invokeAI({
+          feature:   "requirements_extraction",
+          messages:  [{ role: "user", content: "abort terminal status test" }],
+          maxTokens: 10,
+        });
+      } catch (err) {
+        threw = true;
+        assert.ok(
+          err instanceof DOMException && err.name === "AbortError",
+          `expected DOMException(AbortError), got: ${err}`,
+        );
+      }
+
+      assert.ok(threw, "invokeAI must propagate the AbortError");
+
+      // logFail() is called as void (fire-and-forget), so give it time to settle.
+      await new Promise((r) => setTimeout(r, 150));
+
+      // Find the most-recent failed log entry written after the test started.
+      const logs = await db
+        .select({
+          status:    aiUsageLogTable.status,
+          errorCode: aiUsageLogTable.errorCode,
+        })
+        .from(aiUsageLogTable)
+        .where(
+          and(
+            eq(aiUsageLogTable.status,    "failed"),
+            eq(aiUsageLogTable.errorCode, "AbortError"),
+            gte(aiUsageLogTable.startedAt, before),
+          ),
+        )
+        .orderBy(desc(aiUsageLogTable.id))
+        .limit(1);
+
+      assert.ok(logs.length > 0,       "must have at least one 'failed/AbortError' log entry");
+      assert.equal(logs[0]!.status,    "failed",     "log status must be 'failed'");
+      assert.equal(logs[0]!.errorCode, "AbortError", "errorCode must be 'AbortError'");
     });
   });
 });
