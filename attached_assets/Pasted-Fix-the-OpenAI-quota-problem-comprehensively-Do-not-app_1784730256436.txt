@@ -1,0 +1,280 @@
+Fix the OpenAI quota problem comprehensively. Do not apply another narrow fallback or cosmetic patch.
+
+The required outcome is:
+
+**Crawling, scoring, recommendations, creation, file import, URL import, pasted-text import, CSV import, and Google export must always use zero AI calls.**
+
+AI may run only after an explicit user action for:
+
+1. Extract Requirements
+2. Generate Strategy Brief
+3. Generate or regenerate proposal content
+
+Before implementing, inspect the entire repository and inventory every AI invocation, including:
+
+* `openai.chat.completions.create`
+* `new OpenAI`
+* OpenAI integration imports
+* Gemini or other model SDK calls
+* Background AI helpers
+* Scheduled jobs
+* Fire-and-forget model calls
+* Retry wrappers
+* Duplicate or legacy generation endpoints
+
+Report the inventory before changing it, then implement the following.
+
+## 1. Remove AI from the crawler completely
+
+In `artifacts/api-server/src/crawlers/index.ts`:
+
+* Delete `callAIScorer()`.
+* Delete the AI scoring system prompt.
+* Remove the OpenAI client and model imports.
+* Remove AI retries, quota handling and per-crawl AI caps.
+* Make every opportunity use the deterministic `keywordScore()` engine.
+* Preserve explainable scores, recommendations, geographic scoring, confidence and Bahamas-advantage calculations.
+* Ensure `runCrawler()` makes exactly zero AI/provider calls regardless of the number of opportunities found.
+* A scheduled crawl and manual crawl must produce identical deterministic scoring.
+
+Update crawler telemetry so it reports:
+
+* `scoringEngine: "deterministic"`
+* `aiCallCount: 0`
+
+Remove misleading AI provider/model values from crawler-run records or set them to null.
+
+## 2. Remove AI from every import path
+
+The following must make zero AI calls:
+
+* `POST /opportunities`
+* `POST /tenders`
+* `POST /tenders/manual`
+* `POST /tenders/import-csv`
+* `POST /tenders/extract-text`
+* File upload
+* URL import
+* Pasted-text import
+* Crawler ingestion
+
+Continue extracting PDF, DOCX, text and webpage content locally.
+
+Replace AI metadata extraction with deterministic parsing:
+
+* Title: document heading or first meaningful line
+* Agency: common issuing-authority labels and header patterns
+* Deadline: date-pattern extraction
+* Value: currency and budget-pattern extraction
+* Contact information: email and phone patterns
+* Category: centralized keyword mapping
+* Description: clean excerpt from the source text
+
+After import, show the extracted metadata in an editable review form. The user can correct it before analysis. Missing metadata should remain blank or display “Needs review”; never invoke AI silently to fill it.
+
+Do not describe an import as zero-AI while performing an AI metadata call.
+
+## 3. Create one enforceable AI gateway
+
+No route, crawler, scheduler or service should call an AI SDK directly.
+
+Create a single server-side gateway such as:
+
+`artifacts/api-server/src/lib/ai-gateway.ts`
+
+Only this gateway may import the OpenAI client or another model SDK.
+
+Every invocation must declare an allowlisted feature:
+
+* `requirements_extraction`
+* `strategy_generation`
+* `proposal_generation`
+* `section_regeneration`
+
+Reject any unknown feature.
+
+Every invocation must also include:
+
+* User/request context
+* Proposal or opportunity ID
+* Maximum input size
+* Maximum output tokens
+* Timeout
+* Whether retry is permitted
+* A unique operation/idempotency key
+
+The gateway must reject calls without an explicit user-initiated operation. Scheduled jobs, crawlers, imports, scoring and automatic creation paths must never satisfy this requirement.
+
+## 4. Add durable usage and quota protection
+
+Implement persistent database-backed AI usage tracking. Do not rely solely on in-memory counters.
+
+Record:
+
+* Feature
+* Opportunity/proposal ID
+* Operation ID
+* Model
+* Status
+* Started/completed timestamp
+* Input tokens
+* Output tokens
+* Error code
+* User/request identifier where available
+
+Add configurable limits:
+
+* Global daily AI call limit
+* Global daily token limit
+* Per-feature daily call limits
+* Maximum calls per individual operation
+* An administrator AI kill switch
+
+Use atomic database checks/reservations so concurrent requests cannot exceed the limits.
+
+If a limit is reached:
+
+* Do not call the provider.
+* Return a clear usage-limit response.
+* Preserve the proposal and existing work.
+* Show when usage may be available again.
+
+## 5. Handle provider quota and rate limits correctly
+
+Classify provider errors using structured status/code fields, not only error-message text.
+
+For `insufficient_quota`, exhausted billing or project-budget errors:
+
+* Open a persistent global AI circuit.
+* Do not retry.
+* Prevent further AI calls until an administrator resets the circuit or a configured cooldown expires.
+* Display a clear message that the connected API project has no available quota.
+
+For temporary rate limits:
+
+* Respect `Retry-After` when provided.
+* Allow at most one bounded retry.
+* Count every attempted request—not only successful requests—against operation and daily call limits.
+
+A failed request must never create an unlimited retry loop.
+
+## 6. Preserve explicit AI workflows
+
+### Extract Requirements
+
+* Starts only after the user clicks the relevant action.
+* Maximum one initial model request and one explicitly bounded retry.
+* Retain input truncation, output limits, timeout, cancellation and idempotency.
+* Do not automatically generate a strategy.
+
+### Generate Strategy Brief
+
+* Separate explicit action.
+* Clearly labeled “Uses AI.”
+* One bounded request.
+* Retain cancellation and timeout protection.
+
+### Proposal generation
+
+* Explicit action only.
+* Consolidate duplicate legacy proposal-generation endpoints.
+* Use one canonical endpoint and one canonical document/proposal record.
+* Do not generate a Google Doc automatically.
+* Route every model call through the gateway.
+* Remove unused legacy generation routes rather than leaving hidden alternatives.
+
+### Google export
+
+* Must make zero AI calls.
+* It should only format and synchronize existing proposal content.
+
+## 7. Prevent duplicate scheduled crawls
+
+The existing crawl lock is in memory and does not protect against multiple server instances.
+
+Replace it with a database-backed lock or PostgreSQL advisory lock so only one daily or manual crawl can run across all instances.
+
+The lock must:
+
+* Have an expiry/recovery mechanism
+* Prevent scheduled/manual overlap
+* Release on success and failure
+* Never invoke AI
+
+## 8. Replace the misleading tests
+
+The existing `no-auto-ai.test.ts` mostly tests copied helper logic and statuses. It does not prove that routes and crawlers make zero provider calls.
+
+Replace or expand it with integration-level tests that mock the centralized AI gateway and invoke the real handlers.
+
+Assert exactly zero AI calls for:
+
+* Direct opportunity creation
+* Generic tender creation
+* PDF/DOCX/TXT import
+* URL import
+* Pasted-text import
+* CSV import with multiple rows
+* Crawler ingestion
+* Scheduled daily crawl
+* Deterministic scoring and rescoring
+* Google export
+
+Assert exact maximum calls for:
+
+* Requirements extraction
+* Strategy generation
+* Proposal generation
+* Section regeneration
+
+Also test:
+
+* Duplicate-click idempotency
+* Concurrent requests against the global budget
+* Insufficient-quota circuit opening
+* No retry after insufficient quota
+* At most one retry after a temporary rate limit
+* Every attempt being counted
+* Cancellation and timeout
+* Multiple crawler instances using the database lock
+
+Add a repository-level guard test that fails if an OpenAI/model SDK is imported anywhere outside the centralized AI gateway and its isolated test mocks.
+
+## 9. Runtime verification and deployment
+
+Add a read-only diagnostics endpoint for administrators that exposes no secrets but returns:
+
+* Deployed commit SHA
+* AI enabled/disabled
+* Circuit status
+* Calls and tokens used today
+* Configured limits
+* Last provider error code and timestamp
+* Last crawl scoring engine
+* Last crawl AI call count
+
+Never return API keys or secret values.
+
+After implementation:
+
+1. Run the complete test suite.
+2. Search the entire repository again for direct AI calls.
+3. Provide the final AI-call inventory by workflow.
+4. Confirm every automatic workflow makes zero calls.
+5. Publish/redeploy the application.
+6. Confirm the deployed commit SHA matches the implementation commit.
+7. Run one manual crawl and verify its recorded `aiCallCount` is exactly zero.
+8. Run one file import and verify its recorded AI call count is exactly zero.
+
+Do not declare this resolved solely because unit tests pass. Resolution requires repository inspection, runtime deployment verification, and observed zero-AI crawler/import runs.
+
+Final report must include:
+
+* Every direct AI invocation removed
+* Every permitted explicit AI workflow
+* AI calls per workflow
+* Database/schema changes
+* Test results
+* Deployed commit SHA
+* Evidence from a real crawl and import showing zero AI calls
+* Any remaining provider-account or billing configuration that cannot be verified from code
