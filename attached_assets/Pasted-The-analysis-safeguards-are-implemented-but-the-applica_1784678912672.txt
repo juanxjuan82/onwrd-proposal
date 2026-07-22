@@ -1,0 +1,28 @@
+The analysis safeguards are implemented, but the application still exposes two competing detail pages.
+
+Current routing problem:
+
+* `/opportunities/:id` renders the legacy `opportunity-detail.tsx`, which still shows the indefinite “AI is analysing this opportunity” spinner.
+* `/tenders/:id` renders the newer `tender-detail.tsx`, which contains the timeout, progress stages, Cancel, Resume, and recovery behavior.
+* The Opportunities drawer’s “Full Detail” button routes to the legacy page, while “Start Bid” routes to the newer page.
+
+Fix this by consolidating to one canonical detail experience.
+
+Requirements:
+
+1. Make `/opportunities/:id` the canonical opportunity-analysis route.
+2. Render the newer bounded analysis experience currently implemented in `tender-detail.tsx` at that route.
+3. Update its labels and back navigation to Opportunities where appropriate.
+4. Update every opportunity, inbox, import, recommendation, notification, and Start Bid link to use `/opportunities/:id`.
+5. Redirect legacy `/tenders/:id` URLs to `/opportunities/:id` so existing links continue working.
+6. Remove the legacy `opportunity-detail.tsx` component after confirming nothing still imports it.
+7. Do not maintain two copies of the analysis UI.
+8. Ensure `opportunity_found` and `pending_review` do not display an active-analysis spinner.
+9. Only the durable active statuses—`requirements_extracting`, `bid_scoring`, and `strategy_generating`—should trigger polling.
+10. Reconcile existing records stuck in legacy `analysing` or `requirements_extracted` states so they display a recoverable Failed/Timed Out state rather than spinning.
+11. Confirm that Cancel, Resume, the five-minute polling cutoff, and the backend 90-second request timeout all work from `/opportunities/:id`.
+12. Add route tests proving that no user-facing action can reach the deleted legacy screen.
+
+Also report why `autoAnalyzeOpportunity()` is still invoked automatically from multiple creation/import paths. Do not change that behavior in this routing fix unless required to prevent another automatic duplicate analysis; identify it clearly as remaining work.
+
+Run the relevant tests and report all routes, links, and components consolidated or removed.

@@ -111,7 +111,7 @@ export default function Tenders() {
             >
               <div className="flex items-start justify-between gap-4">
                 <Link
-                  href={`/tenders/${t.id}`}
+                  href={`/opportunities/${t.id}`}
                   className="flex-1 group cursor-pointer"
                   data-testid={`link-tender-${t.id}`}
                 >
@@ -148,7 +148,7 @@ export default function Tenders() {
                   >
                     <Trash2 className="w-4 h-4" />
                   </Button>
-                  <Link href={`/tenders/${t.id}`}>
+                  <Link href={`/opportunities/${t.id}`}>
                     <ChevronRight className="w-5 h-5 text-muted-foreground" />
                   </Link>
                 </div>

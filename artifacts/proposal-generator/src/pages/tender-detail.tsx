@@ -30,22 +30,28 @@ import { useToast } from "@/hooks/use-toast";
 
 // ── Analysis status helpers ───────────────────────────────────────────────────
 
+// Only the three durable active pipeline steps should trigger polling.
+// "analysing" (legacy) and "opportunity_found" / "pending_review" are NOT
+// active-analysis states — they must never display a spinner.
 const ANALYSIS_IN_PROGRESS = new Set([
-  "analysing",
   "requirements_extracting",
   "bid_scoring",
   "strategy_generating",
 ]);
 
+// Records stuck in these legacy statuses are displayed as recoverable
+// failures rather than spinning indefinitely.
+const STUCK_STATES = new Set(["analysing", "requirements_extracted"]);
+
 const STEP_LABELS: Record<string, string> = {
   requirements_extracting: "Extracting requirements",
   bid_scoring:             "Scoring bid fit",
   strategy_generating:     "Generating strategy",
-  analysing:               "Analysing",
 };
 
 const STATUS_LABELS: Record<string, string> = {
   opportunity_found:        "Found",
+  pending_review:           "Pending Review",
   requirements_extracting:  "Extracting Requirements…",
   bid_scoring:              "Scoring Bid…",
   strategy_generating:      "Generating Strategy…",
@@ -77,7 +83,7 @@ type TenderExt = {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function TenderDetail() {
+export default function OpportunityDetail() {
   const { id } = useParams<{ id: string }>();
   const tenderId = Number(id);
   const [, setLocation] = useLocation();
@@ -89,6 +95,7 @@ export default function TenderDetail() {
   const tenderExt = tender as (typeof tender & TenderExt) | undefined;
 
   const isAnalysing = ANALYSIS_IN_PROGRESS.has(tender?.status ?? "");
+  const isStuck = STUCK_STATES.has(tender?.status ?? "");
   const pollStartRef = useRef<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [pollTimedOut, setPollTimedOut] = useState(false);
@@ -243,10 +250,10 @@ export default function TenderDetail() {
   if (!tender) {
     return (
       <div className="p-8 max-w-4xl mx-auto">
-        <Link href="/tenders" className="text-sm text-muted-foreground hover:text-foreground inline-flex items-center gap-1 mb-4">
-          <ArrowLeft className="w-4 h-4" /> Back to Tenders
+        <Link href="/opportunities" className="text-sm text-muted-foreground hover:text-foreground inline-flex items-center gap-1 mb-4">
+          <ArrowLeft className="w-4 h-4" /> Back to Opportunities
         </Link>
-        <p>Tender not found.</p>
+        <p>Opportunity not found.</p>
       </div>
     );
   }
@@ -257,11 +264,11 @@ export default function TenderDetail() {
   return (
     <div className="p-8 max-w-4xl mx-auto">
       <Link
-        href="/tenders"
+        href="/opportunities"
         className="text-sm text-muted-foreground hover:text-foreground inline-flex items-center gap-1 mb-6"
         data-testid="link-back"
       >
-        <ArrowLeft className="w-4 h-4" /> Back to Tenders
+        <ArrowLeft className="w-4 h-4" /> Back to Opportunities
       </Link>
 
       <div className="mb-6">
@@ -332,6 +339,42 @@ export default function TenderDetail() {
           <Button size="sm" variant="outline" onClick={() => void queryClient.invalidateQueries({ queryKey: getGetTenderQueryKey(tenderId) })}>
             <RefreshCw className="w-3 h-3 mr-1" /> Refresh
           </Button>
+        </div>
+      )}
+
+      {/* ── Stuck / legacy state banner ──────────────────────────────────── */}
+      {isStuck && (
+        <div className="mb-6 p-4 border border-yellow-500/30 rounded-lg bg-yellow-500/5">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-yellow-500 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-foreground">Analysis did not complete</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                This opportunity was left in an incomplete state. You can resume from where it stopped, or re-analyse from scratch.
+              </p>
+              {completedSteps.length > 0 && (
+                <p className="text-xs text-muted-foreground mt-1">
+                  Completed: {completedSteps.map((s) => STEP_LABELS[s] ?? s).join(" → ")}
+                </p>
+              )}
+            </div>
+            <div className="flex gap-2 shrink-0">
+              {completedSteps.length > 0 && (
+                <Button size="sm" variant="outline" onClick={() => void handleResume()} disabled={resuming} data-testid="button-resume-stuck">
+                  {resuming
+                    ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Resuming…</>
+                    : <><PlayCircle className="w-3 h-3 mr-1" /> Resume</>
+                  }
+                </Button>
+              )}
+              <Button size="sm" variant="outline" onClick={() => void handleReanalyze()} disabled={reanalyzing} data-testid="button-reanalyze-stuck">
+                {reanalyzing
+                  ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Starting…</>
+                  : <><RefreshCw className="w-3 h-3 mr-1" /> Re-analyse</>
+                }
+              </Button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -478,12 +521,12 @@ export default function TenderDetail() {
           >
             {generate.isPending
               ? <><Loader2 className="w-4 h-4 mr-1 animate-spin" /> Generating…</>
-              : <><Sparkles className="w-4 h-4 mr-1" /> Generate Proposal from Tender</>
+              : <><Sparkles className="w-4 h-4 mr-1" /> Generate Proposal</>
             }
           </Button>
         )}
 
-        {!isAnalysing &&
+        {!isAnalysing && !isStuck &&
           tender.status !== "analysis_failed" &&
           tender.status !== "analysis_cancelled" && (
             <Button

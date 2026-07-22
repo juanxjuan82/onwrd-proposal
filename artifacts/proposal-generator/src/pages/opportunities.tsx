@@ -287,7 +287,7 @@ function EnrichDrawer({
         description: "Opening the tender analysis page…",
       });
       onClose();
-      setLocation(`/tenders/${opp.id}`);
+      setLocation(`/opportunities/${opp.id}`);
     } catch (err) {
       toast({ title: "Failed to start bid", description: (err as Error).message, variant: "destructive" });
     }
