@@ -36,9 +36,39 @@ describe("ai-workflow: call-count and operationKey idempotency", () => {
   let server: http.Server;
   let baseUrl: string;
 
+  // Saved quota env vars — restored in after().
+  let savedCallLimit:  string | undefined;
+  let savedTokenLimit: string | undefined;
+  let savedReqLimit:   string | undefined;
+  let savedStratLimit: string | undefined;
+  let savedPropLimit:  string | undefined;
+  let savedOpLimit:    string | undefined;
+
   before(
     () =>
       new Promise<void>((resolve) => {
+        // Set very high daily limits so accumulated DB quota from other test
+        // files never blocks these tests.  Individual tests that want to verify
+        // limit enforcement temporarily override specific values and restore them
+        // before returning.
+        savedCallLimit  = process.env.AI_DAILY_CALL_LIMIT;
+        savedTokenLimit = process.env.AI_DAILY_TOKEN_LIMIT;
+        savedReqLimit   = process.env.AI_DAILY_REQUIREMENTS_LIMIT;
+        savedStratLimit = process.env.AI_DAILY_STRATEGY_LIMIT;
+        savedPropLimit  = process.env.AI_DAILY_PROPOSAL_LIMIT;
+        savedOpLimit    = process.env.AI_MAX_CALLS_PER_OPERATION;
+
+        process.env.AI_DAILY_CALL_LIMIT         = "99999";
+        process.env.AI_DAILY_TOKEN_LIMIT        = "999999999";
+        process.env.AI_DAILY_REQUIREMENTS_LIMIT = "99999";
+        process.env.AI_DAILY_STRATEGY_LIMIT     = "99999";
+        process.env.AI_DAILY_PROPOSAL_LIMIT     = "99999";
+        // AI_MAX_CALLS_PER_OPERATION stays at its default — individual
+        // operationKey tests set it to 1 and restore it themselves.
+
+        __setInvokeAISpy(null);
+        __setOpenAICompletionForTesting(null);
+
         server = http.createServer(app as any);
         server.listen(0, "127.0.0.1", () => {
           const addr = server.address() as { port: number };
@@ -53,6 +83,21 @@ describe("ai-workflow: call-count and operationKey idempotency", () => {
       new Promise<void>((resolve, reject) => {
         __setInvokeAISpy(null);
         __setOpenAICompletionForTesting(null);
+
+        const env = process.env as Record<string, string | undefined>;
+        if (savedCallLimit  !== undefined) env.AI_DAILY_CALL_LIMIT         = savedCallLimit;
+        else delete env.AI_DAILY_CALL_LIMIT;
+        if (savedTokenLimit !== undefined) env.AI_DAILY_TOKEN_LIMIT        = savedTokenLimit;
+        else delete env.AI_DAILY_TOKEN_LIMIT;
+        if (savedReqLimit   !== undefined) env.AI_DAILY_REQUIREMENTS_LIMIT = savedReqLimit;
+        else delete env.AI_DAILY_REQUIREMENTS_LIMIT;
+        if (savedStratLimit !== undefined) env.AI_DAILY_STRATEGY_LIMIT     = savedStratLimit;
+        else delete env.AI_DAILY_STRATEGY_LIMIT;
+        if (savedPropLimit  !== undefined) env.AI_DAILY_PROPOSAL_LIMIT     = savedPropLimit;
+        else delete env.AI_DAILY_PROPOSAL_LIMIT;
+        if (savedOpLimit    !== undefined) env.AI_MAX_CALLS_PER_OPERATION   = savedOpLimit;
+        else delete env.AI_MAX_CALLS_PER_OPERATION;
+
         server.close((err) => (err ? reject(err) : resolve()));
       }),
   );
