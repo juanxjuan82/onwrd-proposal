@@ -1,0 +1,129 @@
+Fix the Google Drive / Google Docs connection end-to-end. The current implementation can incorrectly report that a valid folder or Shared Drive ID is wrong.
+
+Do not modify the proposal-generation or opportunity-analysis workflows.
+
+GOAL
+
+Users should connect Google, choose a writable destination folder—including a nested Shared Drive folder—and reliably create or sync one Google Doc per proposal without manually entering a Shared Drive ID.
+
+1. OAUTH AND TOKEN MANAGEMENT
+
+- Keep the narrow Google scopes:
+  - https://www.googleapis.com/auth/documents
+  - https://www.googleapis.com/auth/drive.file
+  - https://www.googleapis.com/auth/userinfo.email
+- Implement a reusable getValidGoogleAccessToken(session) helper.
+- Before every Google API request:
+  - Check googleTokenExpiry.
+  - Refresh the access token using googleRefreshToken when needed.
+  - Update the session with the new token and expiry.
+- If refresh fails, clear the Google session and return an actionable 401 requiring reconnection.
+- Google connection status must validate the token, not merely check whether a token string exists.
+- Replace the current OAuth state value with a cryptographically random, session-validated CSRF state. Store returnTo separately and only allow internal paths.
+- Never log access tokens, refresh tokens, client secrets, or authorization codes.
+
+2. PERSISTENT, SECURE SESSIONS
+
+- Do not use express-session’s default MemoryStore in production.
+- Use the existing Postgres database for persistent sessions.
+- Require SESSION_SECRET in production—do not use the fallback secret.
+- Use secure cookies in production with httpOnly, sameSite=lax, and secure=true.
+- Preserve local-development compatibility.
+
+3. GOOGLE PICKER
+
+- Replace the manual Folder ID, Display Name, and Shared Drive ID fields with a “Choose Google Drive folder” button using Google Picker.
+- Configure Picker for folder-only selection and Shared Drive support.
+- The selected folder must be explicitly granted to the app under the drive.file scope.
+- Save:
+  - folderId
+  - folderName
+  - automatically detected driveId, or null for My Drive
+- Do not ask the user to find or enter a Shared Drive ID manually.
+- Show the connected Google account and selected destination after selection.
+- Add “Change folder,” “Test connection,” and “Clear folder” actions.
+
+4. CORRECT FOLDER VALIDATION
+
+Validate the selected folder using:
+
+GET /drive/v3/files/{folderId}
+  ?supportsAllDrives=true
+  &fields=id,name,mimeType,driveId,parents,capabilities(canAddChildren,canEdit)
+
+- Do not send driveId or includeItemsFromAllDrives to files.get.
+- Confirm mimeType is application/vnd.google-apps.folder.
+- Require capabilities.canAddChildren === true.
+- Derive driveId from the returned metadata.
+- Return distinct errors for:
+  - expired/disconnected account
+  - folder not found or not granted to the app
+  - selected item is not a folder
+  - insufficient write permission
+  - Workspace administrator restriction
+  - temporary Google API failure
+- Preserve Google’s useful error reason in server logs without exposing credentials.
+
+5. CREATE DOCUMENTS DIRECTLY IN THE DESTINATION
+
+Remove the “create in My Drive, then move” workflow.
+
+For a first export, create the document directly through Drive files.create:
+
+POST /drive/v3/files?supportsAllDrives=true&fields=id,name,webViewLink,parents,driveId
+
+Body:
+{
+  "name": "<proposal title>",
+  "mimeType": "application/vnd.google-apps.document",
+  "parents": ["<folderId>"]
+}
+
+Then populate the returned document ID through the Google Docs API.
+
+- Do not send driveId or includeItemsFromAllDrives to files.create/update.
+- Do not call shareWithAnyone.
+- Let the document inherit the destination folder’s permissions.
+- Preserve the existing one-canonical-document-per-proposal sync behavior.
+- Avoid leaving orphaned documents if content population fails. Record enough state to retry the same document safely rather than creating duplicates.
+
+6. SETTINGS COPY
+
+Make the UI and backend consistent.
+
+Recommended behavior: a destination folder is required before first export.
+
+- Remove all text saying that clearing or leaving the folder blank exports to Drive root.
+- When no folder is selected, disable first export and link directly to Google settings.
+- Existing linked documents may continue syncing if the connected user still has access.
+
+7. TESTS
+
+Add tests covering:
+
+- My Drive folder selection and export
+- Shared Drive root selection
+- Nested Shared Drive folder selection
+- automatic driveId detection
+- invalid file ID
+- non-folder selection
+- Viewer-only access
+- expired token successfully refreshed
+- failed refresh requiring reconnection
+- unsupported Drive parameters are never sent
+- first export creates directly in the configured parent
+- subsequent export reuses the same document
+- concurrent export protection
+- content-write failure retries without creating duplicate documents
+- OAuth state validation and internal-only returnTo paths
+
+Run the full test suite and report:
+
+- files changed
+- migrations or new environment variables required
+- Google Cloud APIs that must be enabled
+- OAuth redirect URI requirements
+- Picker API configuration requirements
+- manual test steps for both My Drive and Shared Drives
+
+Do not claim completion based only on mocked unit tests. Verify the generated Drive request URLs and parameters against the Google Drive v3 API specification.
