@@ -10,7 +10,7 @@ import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { db } from "@workspace/db";
 import { aiCircuitTable, aiUsageLogTable } from "@workspace/db";
-import { eq, gte, and, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 // ── Feature allowlist ─────────────────────────────────────────────────────────
 
@@ -56,6 +56,7 @@ interface CircuitCache {
   open:      boolean;
   openedAt:  Date | null;
   errorCode: string | null;
+  resetAt:   Date | null;
   loadedAt:  number;
 }
 let _circuitCache: CircuitCache | null = null;
@@ -72,18 +73,20 @@ async function readCircuit(): Promise<CircuitCache> {
       open:      row?.open      ?? false,
       openedAt:  row?.openedAt  ?? null,
       errorCode: row?.errorCode ?? null,
+      resetAt:   row?.resetAt   ?? null,
       loadedAt:  now,
     };
   } catch {
-    // DB error — use last known cache or assume closed
-    if (!_circuitCache) _circuitCache = { open: false, openedAt: null, errorCode: null, loadedAt: now };
+    if (!_circuitCache) {
+      _circuitCache = { open: false, openedAt: null, errorCode: null, resetAt: null, loadedAt: now };
+    }
   }
   return _circuitCache;
 }
 
 async function openCircuit(errorCode: string): Promise<void> {
   const now = new Date();
-  _circuitCache = { open: true, openedAt: now, errorCode, loadedAt: Date.now() };
+  _circuitCache = { open: true, openedAt: now, errorCode, resetAt: null, loadedAt: Date.now() };
   try {
     await db
       .insert(aiCircuitTable)
@@ -99,7 +102,7 @@ async function openCircuit(errorCode: string): Promise<void> {
 
 /** Admin-only reset — clears circuit in DB and cache. */
 export async function resetCircuit(): Promise<void> {
-  _circuitCache = { open: false, openedAt: null, errorCode: null, loadedAt: Date.now() };
+  _circuitCache = { open: false, openedAt: null, errorCode: null, resetAt: null, loadedAt: Date.now() };
   await db
     .insert(aiCircuitTable)
     .values({ id: 1, open: false, openedAt: undefined, errorCode: undefined, updatedAt: new Date() })
@@ -110,118 +113,196 @@ export async function resetCircuit(): Promise<void> {
 }
 
 export async function getCircuitState(): Promise<{
-  open: boolean;
-  openedAt: Date | null;
+  open:      boolean;
+  openedAt:  Date | null;
   errorCode: string | null;
+  resetAt:   Date | null;
 }> {
   const c = await readCircuit();
-  return { open: c.open, openedAt: c.openedAt, errorCode: c.errorCode };
+  return { open: c.open, openedAt: c.openedAt, errorCode: c.errorCode, resetAt: c.resetAt };
 }
 
-// ── In-process daily call count cache (60 s TTL) ──────────────────────────────
+// ── Date helpers ──────────────────────────────────────────────────────────────
 
-interface CountCache {
-  totalCalls:   number;
-  totalTokens:  number;
-  byCalls:      Record<string, number>;
-  loadedAt:     number;
-}
-let _countCache: CountCache | null = null;
-const COUNT_CACHE_TTL_MS = 60_000;
-
-function startOfToday(): Date {
+function startOfTomorrow(): Date {
   const d = new Date();
+  d.setUTCDate(d.getUTCDate() + 1);
   d.setUTCHours(0, 0, 0, 0);
   return d;
 }
 
-async function getDailyCounts(): Promise<CountCache> {
-  const now = Date.now();
-  if (_countCache && now - _countCache.loadedAt < COUNT_CACHE_TTL_MS) return _countCache;
+// ── Atomic quota reservation ──────────────────────────────────────────────────
+//
+// A single SQL statement atomically:
+//   1. Counts today's calls and token usage
+//   2. Inserts the log row with status = 'pending'  (if within limits)
+//                                   or 'limit_exceeded' (if over any limit)
+//
+// Because it is one statement running under Postgres snapshot isolation,
+// concurrent requests cannot both pass the limit check and both insert 'pending'.
 
-  try {
-    const since = startOfToday();
-    const rows = await db
-      .select({
-        feature:     aiUsageLogTable.feature,
-        calls:       sql<number>`count(*)::int`,
-        inputTokens: sql<number>`coalesce(sum(${aiUsageLogTable.inputTokens}),0)::int`,
-        outputTokens: sql<number>`coalesce(sum(${aiUsageLogTable.outputTokens}),0)::int`,
-      })
-      .from(aiUsageLogTable)
-      .where(
-        and(
-          gte(aiUsageLogTable.startedAt, since),
-          sql`${aiUsageLogTable.status} NOT IN ('limit_exceeded','circuit_open')`,
-        ),
-      )
-      .groupBy(aiUsageLogTable.feature);
-
-    let totalCalls = 0;
-    let totalTokens = 0;
-    const byCalls: Record<string, number> = {};
-    for (const r of rows) {
-      totalCalls  += r.calls;
-      totalTokens += (r.inputTokens + r.outputTokens);
-      byCalls[r.feature] = r.calls;
-    }
-    _countCache = { totalCalls, totalTokens, byCalls, loadedAt: now };
-  } catch {
-    if (!_countCache) _countCache = { totalCalls: 0, totalTokens: 0, byCalls: {}, loadedAt: now };
-  }
-  return _countCache;
+interface ReserveResult {
+  logId:      number;
+  allowed:    boolean;
+  globalOk:   boolean;
+  featureOk:  boolean;
+  tokenOk:    boolean;
 }
 
-function invalidateCountCache(): void {
-  _countCache = null;
-}
+async function atomicReserveAndLog(opts: {
+  requestId:     string;
+  feature:       string;
+  opportunityId?: number;
+  proposalId?:   number;
+  operationKey?: string;
+  globalLimit:   number;
+  featureLimit:  number;
+  tokenLimit:    number;
+}): Promise<ReserveResult> {
+  const {
+    requestId, feature, opportunityId, proposalId, operationKey,
+    globalLimit, featureLimit, tokenLimit,
+  } = opts;
 
-// ── Error helpers ─────────────────────────────────────────────────────────────
+  const oppVal   = opportunityId ?? null;
+  const propVal  = proposalId    ?? null;
+  const opKeyVal = operationKey  ?? null;
 
-function isQuotaError(err: unknown): boolean {
-  const e = err as { status?: number; code?: string; message?: string };
-  if (e?.status === 402 || e?.code === "insufficient_quota") return true;
-  const msg = String(e?.message ?? "");
-  return (
-    msg.includes("insufficient_quota") ||
-    msg.includes("exceeded your current quota")
-  );
-}
+  // Raw SQL CTE: check + insert in one atomic statement.
+  //
+  // Call limit counts all non-terminal rows (including pending in-flight).
+  // Token limit counts only rows that have actual token data (completed calls).
+  const result = await db.execute<{
+    id:          number;
+    status:      string;
+    global_ok:   boolean;
+    feature_ok:  boolean;
+    token_ok:    boolean;
+  }>(sql`
+    WITH today_stats AS (
+      SELECT
+        COUNT(*) FILTER (
+          WHERE status NOT IN ('limit_exceeded', 'circuit_open')
+        )::int AS total_calls,
 
-function isRateLimitError(err: unknown): boolean {
-  if (isQuotaError(err)) return false;
-  const e = err as { status?: number; message?: string };
-  if (e?.status === 429) return true;
-  const msg = String(e?.message ?? "");
-  return (
-    msg.includes("rate_limit_exceeded") ||
-    msg.includes("rate limit") ||
-    msg.includes("too many requests")
-  );
-}
+        COUNT(*) FILTER (
+          WHERE feature = ${feature}
+            AND status NOT IN ('limit_exceeded', 'circuit_open')
+        )::int AS feature_calls,
 
-/** Returns the Retry-After delay in ms, capped at 60 s. Defaults to 5 s. */
-function getRetryAfterMs(err: unknown): number {
-  const e = err as {
-    headers?: Record<string, string>;
-    response?: { headers?: Record<string, string> };
+        COALESCE(SUM(
+          COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)
+        ) FILTER (
+          WHERE status = 'completed'
+        ), 0)::int AS total_tokens
+
+      FROM ai_usage_log
+      WHERE started_at >= CURRENT_DATE
+    ),
+    limit_check AS (
+      SELECT
+        total_calls  < ${globalLimit}  AS global_ok,
+        feature_calls < ${featureLimit} AS feature_ok,
+        total_tokens  < ${tokenLimit}   AS token_ok
+      FROM today_stats
+    ),
+    ins AS (
+      INSERT INTO ai_usage_log
+        (request_id, feature, opportunity_id, proposal_id, operation_key, status)
+      SELECT
+        ${requestId},
+        ${feature},
+        ${oppVal},
+        ${propVal},
+        ${opKeyVal},
+        CASE WHEN global_ok AND feature_ok AND token_ok
+             THEN 'pending'
+             ELSE 'limit_exceeded'
+        END
+      FROM limit_check
+      RETURNING id, status
+    )
+    SELECT
+      ins.id,
+      ins.status,
+      lc.global_ok,
+      lc.feature_ok,
+      lc.token_ok
+    FROM ins, limit_check lc
+  `);
+
+  const row = result.rows[0];
+  if (!row) throw new Error("[ai-gateway] atomicReserveAndLog: no row returned — DB error");
+
+  const allowed = row.status === "pending";
+  return {
+    logId:     row.id,
+    allowed,
+    globalOk:  Boolean(row.global_ok),
+    featureOk: Boolean(row.feature_ok),
+    tokenOk:   Boolean(row.token_ok),
   };
-  const raw =
-    e?.headers?.["retry-after"] ?? e?.response?.headers?.["retry-after"];
-  if (!raw) return 5_000;
-  const secs = Number(raw);
-  return isNaN(secs) ? 5_000 : Math.min(secs * 1_000, 60_000);
+}
+
+// ── Log completion helpers ────────────────────────────────────────────────────
+
+async function logComplete(logId: number, result: AIResult): Promise<void> {
+  try {
+    await db.update(aiUsageLogTable).set({
+      status:      "completed",
+      completedAt: new Date(),
+      model:       result.model,
+      inputTokens:  result.usage?.promptTokens     ?? null,
+      outputTokens: result.usage?.completionTokens ?? null,
+    }).where(eq(aiUsageLogTable.id, logId));
+  } catch { /* non-critical */ }
+}
+
+async function logFail(logId: number, errorCode: string): Promise<void> {
+  try {
+    await db.update(aiUsageLogTable).set({
+      status:      "failed",
+      completedAt: new Date(),
+      errorCode,
+    }).where(eq(aiUsageLogTable.id, logId));
+  } catch { /* non-critical */ }
+}
+
+/** Log a circuit_open attempt (no prior pending row exists for this call). */
+async function logCircuitOpen(opts: {
+  feature:       string;
+  opportunityId?: number;
+  proposalId?:   number;
+  operationKey?: string;
+}): Promise<void> {
+  try {
+    await db.insert(aiUsageLogTable).values({
+      requestId:     crypto.randomUUID(),
+      feature:       opts.feature,
+      opportunityId: opts.opportunityId ?? null,
+      proposalId:    opts.proposalId    ?? null,
+      operationKey:  opts.operationKey  ?? null,
+      status:        "circuit_open",
+      completedAt:   new Date(),
+      errorCode:     "circuit_open",
+    });
+  } catch { /* non-critical */ }
 }
 
 // ── Public error classes ──────────────────────────────────────────────────────
 
 export class GatewayCircuitOpenError extends Error {
-  constructor(openedAt: Date | null) {
+  public readonly openedAt: Date | null;
+  public readonly resetAt:  Date | null;
+
+  constructor(openedAt: Date | null, resetAt?: Date | null) {
     super(
       `AI gateway circuit open (quota exhausted at ${openedAt?.toISOString() ?? "unknown"}). ` +
         `An admin must reset the circuit before AI features resume.`,
     );
-    this.name = "GatewayCircuitOpenError";
+    this.name     = "GatewayCircuitOpenError";
+    this.openedAt = openedAt;
+    this.resetAt  = resetAt ?? null;
   }
 }
 
@@ -271,57 +352,41 @@ export interface InvokeAIParams {
   operationKey?:  string;
 }
 
-// ── Usage log helpers ─────────────────────────────────────────────────────────
+// ── Error helpers ─────────────────────────────────────────────────────────────
 
-async function logStart(params: {
-  requestId: string;
-  feature: string;
-  opportunityId?: number;
-  proposalId?: number;
-  operationKey?: string;
-}): Promise<number | null> {
-  try {
-    const [row] = await db
-      .insert(aiUsageLogTable)
-      .values({
-        requestId:    params.requestId,
-        feature:      params.feature,
-        opportunityId: params.opportunityId ?? null,
-        proposalId:   params.proposalId    ?? null,
-        operationKey: params.operationKey  ?? null,
-        status:       "pending",
-      })
-      .returning({ id: aiUsageLogTable.id });
-    return row?.id ?? null;
-  } catch {
-    return null;
-  }
+function isQuotaError(err: unknown): boolean {
+  const e = err as { status?: number; code?: string; message?: string };
+  if (e?.status === 402 || e?.code === "insufficient_quota") return true;
+  const msg = String(e?.message ?? "");
+  return (
+    msg.includes("insufficient_quota") ||
+    msg.includes("exceeded your current quota")
+  );
 }
 
-async function logComplete(logId: number | null, result: AIResult): Promise<void> {
-  if (logId == null) return;
-  try {
-    await db.update(aiUsageLogTable).set({
-      status:      "completed",
-      completedAt: new Date(),
-      model:       result.model,
-      inputTokens:  result.usage?.promptTokens     ?? null,
-      outputTokens: result.usage?.completionTokens ?? null,
-    }).where(eq(aiUsageLogTable.id, logId));
-    invalidateCountCache();
-  } catch { /* non-critical */ }
+function isRateLimitError(err: unknown): boolean {
+  if (isQuotaError(err)) return false;
+  const e = err as { status?: number; message?: string };
+  if (e?.status === 429) return true;
+  const msg = String(e?.message ?? "");
+  return (
+    msg.includes("rate_limit_exceeded") ||
+    msg.includes("rate limit") ||
+    msg.includes("too many requests")
+  );
 }
 
-async function logFail(logId: number | null, status: string, errorCode: string): Promise<void> {
-  if (logId == null) return;
-  try {
-    await db.update(aiUsageLogTable).set({
-      status,
-      completedAt: new Date(),
-      errorCode,
-    }).where(eq(aiUsageLogTable.id, logId));
-    invalidateCountCache();
-  } catch { /* non-critical */ }
+/** Returns the Retry-After delay in ms, capped at 60 s. Defaults to 5 s. */
+function getRetryAfterMs(err: unknown): number {
+  const e = err as {
+    headers?: Record<string, string>;
+    response?: { headers?: Record<string, string> };
+  };
+  const raw =
+    e?.headers?.["retry-after"] ?? e?.response?.headers?.["retry-after"];
+  if (!raw) return 5_000;
+  const secs = Number(raw);
+  return isNaN(secs) ? 5_000 : Math.min(secs * 1_000, 60_000);
 }
 
 // ── Core gateway function ─────────────────────────────────────────────────────
@@ -331,12 +396,12 @@ async function logFail(logId: number | null, status: string, errorCode: string):
  *
  * Behaviour:
  *  - Validates feature against the allowlist.
- *  - Checks DB-backed circuit (cached 30 s); rejects if open.
- *  - Checks configurable daily call/token/per-feature limits; rejects if exceeded.
- *  - Logs every call to ai_usage_log (start + completion/failure).
- *  - On quota exhaustion: opens DB circuit, never retries.
- *  - On rate-limit + permitRetry: waits Retry-After (≤60 s), retries once.
- *    If that retry also hits quota, opens the circuit before re-throwing.
+ *  - Checks DB-backed circuit (cached 30 s); rejects if open (logs circuit_open).
+ *  - Atomically reserves a usage-log slot and checks call/token/per-feature limits;
+ *    rejects with GatewayLimitError if any limit is exceeded (logged as limit_exceeded).
+ *  - On quota exhaustion: opens DB circuit, logs failure, never retries.
+ *  - On rate-limit + permitRetry: waits Retry-After (≤60 s) and retries once.
+ *    If that retry also hits quota, opens circuit before re-throwing.
  *
  * @throws {GatewayFeatureError}     unknown feature name
  * @throws {GatewayCircuitOpenError} quota circuit is open
@@ -358,31 +423,36 @@ export async function invokeAI(params: InvokeAIParams): Promise<AIResult> {
 
   if (!ALLOWED_FEATURES.has(feature)) throw new GatewayFeatureError(feature);
 
-  // ① DB-backed circuit check
+  // ① DB-backed circuit check (cached 30 s)
   const circuit = await readCircuit();
-  if (circuit.open) throw new GatewayCircuitOpenError(circuit.openedAt);
-
-  // ② Configurable daily limit check
-  const counts = await getDailyCounts();
-  const tomorrow = new Date(); tomorrow.setUTCDate(tomorrow.getUTCDate() + 1); tomorrow.setUTCHours(0, 0, 0, 0);
-
-  if (counts.totalCalls >= LIMITS.dailyCalls()) {
-    const logId = await logStart({ requestId: crypto.randomUUID(), feature, opportunityId, proposalId, operationKey });
-    await logFail(logId, "limit_exceeded", "daily_call_limit");
-    throw new GatewayLimitError(`global daily call limit (${LIMITS.dailyCalls()}) reached`, tomorrow);
-  }
-  const featureLimit = LIMITS.perFeature[feature]?.() ?? 100;
-  const featureCalls = counts.byCalls[feature] ?? 0;
-  if (featureCalls >= featureLimit) {
-    const logId = await logStart({ requestId: crypto.randomUUID(), feature, opportunityId, proposalId, operationKey });
-    await logFail(logId, "limit_exceeded", `feature_limit:${feature}`);
-    throw new GatewayLimitError(`per-feature daily limit for "${feature}" (${featureLimit}) reached`, tomorrow);
+  if (circuit.open) {
+    void logCircuitOpen({ feature, opportunityId, proposalId, operationKey });
+    throw new GatewayCircuitOpenError(circuit.openedAt, circuit.resetAt);
   }
 
-  // ③ Log start
-  const requestId = crypto.randomUUID();
-  const logId = await logStart({ requestId, feature, opportunityId, proposalId, operationKey });
+  // ② Atomic quota reservation — single SQL statement (check + insert)
+  const reserve = await atomicReserveAndLog({
+    requestId:    crypto.randomUUID(),
+    feature,
+    opportunityId,
+    proposalId,
+    operationKey,
+    globalLimit:  LIMITS.dailyCalls(),
+    featureLimit: LIMITS.perFeature[feature]?.() ?? 100,
+    tokenLimit:   LIMITS.dailyTokens(),
+  });
 
+  if (!reserve.allowed) {
+    const tomorrow = startOfTomorrow();
+    const reason = !reserve.globalOk
+      ? `global daily call limit (${LIMITS.dailyCalls()}) reached`
+      : !reserve.featureOk
+        ? `per-feature daily limit for "${feature}" (${LIMITS.perFeature[feature]?.() ?? 100}) reached`
+        : `daily token limit (${LIMITS.dailyTokens()}) reached`;
+    throw new GatewayLimitError(reason, tomorrow);
+  }
+
+  const logId = reserve.logId;
   const ctx = [
     feature,
     opportunityId != null ? `opp=${opportunityId}` : null,
@@ -428,7 +498,7 @@ export async function invokeAI(params: InvokeAIParams): Promise<AIResult> {
         `[ai-gateway] quota exhausted — circuit opened (${ctx}). ` +
           "All AI calls blocked until admin resets via POST /api/admin/ai/circuit/reset.",
       );
-      void logFail(logId, "failed", "insufficient_quota");
+      void logFail(logId, "insufficient_quota");
       throw err;
     }
 
@@ -445,10 +515,8 @@ export async function invokeAI(params: InvokeAIParams): Promise<AIResult> {
         if (isQuotaError(retryErr)) {
           await openCircuit("insufficient_quota");
           console.error(`[ai-gateway] quota exhausted on retry — circuit opened (${ctx}).`);
-          void logFail(logId, "failed", "insufficient_quota");
-        } else {
-          void logFail(logId, "failed", "retry_error");
         }
+        void logFail(logId, retryErr instanceof Error ? retryErr.name : "retry_error");
         throw retryErr;
       }
     }
@@ -457,7 +525,7 @@ export async function invokeAI(params: InvokeAIParams): Promise<AIResult> {
       `[ai-gateway] error (${ctx}):`,
       err instanceof Error ? err.message : String(err),
     );
-    void logFail(logId, "failed", err instanceof Error ? err.name : "unknown");
+    void logFail(logId, err instanceof Error ? err.name : "unknown");
     throw err;
   }
 }

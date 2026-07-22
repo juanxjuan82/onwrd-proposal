@@ -23,6 +23,6 @@ router.use(sectionsRouter);
 router.use(knowledgeRouter);
 router.use(tenderIntelligenceRouter);
 router.use(driveConfigRouter);
-router.use(adminRouter);
+router.use("/admin", adminRouter);
 
 export default router;

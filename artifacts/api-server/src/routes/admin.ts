@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request, type Response, type NextFunction } from "express";
 import { db } from "@workspace/db";
 import { aiUsageLogTable, aiCircuitTable } from "@workspace/db";
 import { eq, gte, and, sql, desc } from "drizzle-orm";
@@ -6,8 +6,31 @@ import { resetCircuit, getCircuitState } from "../lib/ai-gateway.js";
 
 const router = Router();
 
+// ── Admin auth guard ─────────────────────────────────────────────────────────
+// All /admin/* routes require a bearer token matching ADMIN_API_KEY env var.
+// If ADMIN_API_KEY is not set, all admin access is blocked (fail-closed).
+
+function requireAdminKey(req: Request, res: Response, next: NextFunction): void {
+  const key = process.env.ADMIN_API_KEY?.trim();
+  if (!key) {
+    res.status(503).json({
+      error: "Admin API key not configured. Set the ADMIN_API_KEY environment variable.",
+    });
+    return;
+  }
+  const auth = req.headers.authorization ?? "";
+  if (!auth.startsWith("Bearer ") || auth.slice(7) !== key) {
+    res.status(401).json({ error: "Unauthorized. Provide a valid Bearer token." });
+    return;
+  }
+  next();
+}
+
+// Apply auth guard to every route in this router
+router.use(requireAdminKey);
+
 // ── GET /api/admin/ai/circuit — inspect circuit state ─────────────────────────
-router.get("/admin/ai/circuit", async (_req, res) => {
+router.get("/ai/circuit", async (_req, res) => {
   try {
     const state = await getCircuitState();
     const [row] = await db.select().from(aiCircuitTable).where(eq(aiCircuitTable.id, 1));
@@ -24,7 +47,7 @@ router.get("/admin/ai/circuit", async (_req, res) => {
 });
 
 // ── POST /api/admin/ai/circuit/reset — close circuit and re-enable AI calls ──
-router.post("/admin/ai/circuit/reset", async (_req, res) => {
+router.post("/ai/circuit/reset", async (_req, res) => {
   try {
     await resetCircuit();
     res.json({ ok: true, message: "Circuit reset. AI calls are now permitted." });
@@ -34,7 +57,7 @@ router.post("/admin/ai/circuit/reset", async (_req, res) => {
 });
 
 // ── GET /api/admin/ai/usage — daily usage summary ────────────────────────────
-router.get("/admin/ai/usage", async (req, res) => {
+router.get("/ai/usage", async (req, res) => {
   try {
     const days = Math.min(Number(req.query.days ?? "7"), 30);
     const since = new Date();
@@ -68,7 +91,7 @@ router.get("/admin/ai/usage", async (req, res) => {
 });
 
 // ── GET /api/admin/ai/usage/today — today's totals only ──────────────────────
-router.get("/admin/ai/usage/today", async (_req, res) => {
+router.get("/ai/usage/today", async (_req, res) => {
   try {
     const today = new Date();
     today.setUTCHours(0, 0, 0, 0);
