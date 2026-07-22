@@ -1,6 +1,7 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
+import { execSync } from "node:child_process";
 import { db } from "@workspace/db";
-import { aiUsageLogTable, aiCircuitTable } from "@workspace/db";
+import { aiUsageLogTable, aiCircuitTable, aiDailyQuotaTable, crawlerRunsTable } from "@workspace/db";
 import { eq, gte, and, sql, desc } from "drizzle-orm";
 import { resetCircuit, getCircuitState } from "../lib/ai-gateway.js";
 
@@ -134,6 +135,76 @@ router.get("/ai/usage/today", async (_req, res) => {
     });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "Failed to read today's usage" });
+  }
+});
+
+// ── GET /api/admin/ai/diagnostics — runtime health snapshot ──────────────────
+router.get("/ai/diagnostics", async (_req, res) => {
+  try {
+    const today = new Date().toISOString().split("T")[0]!;
+
+    // Circuit state
+    const circuit = await getCircuitState();
+
+    // Today's quota counters (global scope)
+    const [quota] = await db
+      .select({ calls: aiDailyQuotaTable.calls, tokens: aiDailyQuotaTable.tokens })
+      .from(aiDailyQuotaTable)
+      .where(and(eq(aiDailyQuotaTable.date, today), eq(aiDailyQuotaTable.scope, "global")));
+
+    // Last provider error (most recent failed log row with an error_code)
+    const [lastError] = await db
+      .select({
+        errorCode:   aiUsageLogTable.errorCode,
+        completedAt: aiUsageLogTable.completedAt,
+      })
+      .from(aiUsageLogTable)
+      .where(and(
+        eq(aiUsageLogTable.status, "failed"),
+        sql`${aiUsageLogTable.errorCode} IS NOT NULL`,
+      ))
+      .orderBy(desc(aiUsageLogTable.completedAt))
+      .limit(1);
+
+    // Last completed crawl run
+    const [lastCrawl] = await db
+      .select({
+        aiModel:     crawlerRunsTable.aiModel,
+        aiCallCount: crawlerRunsTable.aiCallCount,
+        completedAt: crawlerRunsTable.completedAt,
+      })
+      .from(crawlerRunsTable)
+      .where(eq(crawlerRunsTable.status, "success"))
+      .orderBy(desc(crawlerRunsTable.completedAt))
+      .limit(1);
+
+    // Commit SHA — from env first, then git
+    let commitSha: string | null = process.env.COMMIT_SHA ?? null;
+    if (!commitSha) {
+      try {
+        commitSha = execSync("git rev-parse --short HEAD", { timeout: 2_000 }).toString().trim();
+      } catch {
+        commitSha = null;
+      }
+    }
+
+    res.json({
+      commitSha,
+      aiEnabled:               !circuit.open,
+      circuitStatus:           circuit.open ? "open" : "closed",
+      circuitOpenedAt:         circuit.openedAt,
+      circuitResetAt:          circuit.resetAt,
+      todayCalls:              quota?.calls  ?? 0,
+      todayTokens:             quota?.tokens ?? 0,
+      configuredDailyCallLimit:  Number(process.env.AI_DAILY_CALL_LIMIT  ?? 200),
+      configuredDailyTokenLimit: Number(process.env.AI_DAILY_TOKEN_LIMIT ?? 500_000),
+      lastProviderErrorCode:   lastError?.errorCode  ?? null,
+      lastProviderErrorAt:     lastError?.completedAt ?? null,
+      lastCrawlScoringEngine:  lastCrawl ? (lastCrawl.aiModel ? "ai" : "keyword") : null,
+      lastCrawlAiCallCount:    lastCrawl?.aiCallCount ?? null,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "Failed to read diagnostics" });
   }
 });
 

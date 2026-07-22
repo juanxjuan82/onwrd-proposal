@@ -480,6 +480,22 @@ function getRetryAfterMs(err: unknown): number {
   return isNaN(secs) ? 5_000 : Math.min(secs * 1_000, 60_000);
 }
 
+// ── Test-double hook ──────────────────────────────────────────────────────────
+// Allows test suites to intercept every invokeAI() call without ESM module
+// replacement or process-level mocking.  Always null in production.
+// Import __setInvokeAISpy only from *.test.ts files.
+let _invokeAISpy: ((params: InvokeAIParams) => Promise<AIResult>) | null = null;
+
+/**
+ * FOR TESTING ONLY — swap in a test double for every invokeAI() call.
+ * Pass null to restore the real implementation.
+ */
+export function __setInvokeAISpy(
+  spy: ((params: InvokeAIParams) => Promise<AIResult>) | null,
+): void {
+  _invokeAISpy = spy;
+}
+
 // ── Core gateway function ─────────────────────────────────────────────────────
 
 /**
@@ -505,6 +521,9 @@ function getRetryAfterMs(err: unknown): number {
  * @throws                           any other OpenAI / network error
  */
 export async function invokeAI(params: InvokeAIParams): Promise<AIResult> {
+  // Test double: completely short-circuits gateway logic (DB, circuit, quota).
+  if (_invokeAISpy) return _invokeAISpy(params);
+
   const {
     feature,
     messages,

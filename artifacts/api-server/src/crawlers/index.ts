@@ -47,7 +47,8 @@ const CRAWL_LOCK_KEY = "default";
 const LOCK_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours — 2× max expected crawl duration
 const INSTANCE_ID = randomUUID();
 
-async function acquireCrawlLock(): Promise<boolean> {
+/** @internal Exported for testing only — prefer testing behaviour through runCrawler(). */
+export async function acquireCrawlLock(): Promise<boolean> {
   const now = new Date();
   const expiresAt = new Date(now.getTime() + LOCK_TTL_MS);
 
@@ -66,7 +67,8 @@ async function acquireCrawlLock(): Promise<boolean> {
   return result.length > 0;
 }
 
-async function releaseCrawlLock(): Promise<void> {
+/** @internal Exported for testing only. */
+export async function releaseCrawlLock(): Promise<void> {
   await db
     .delete(crawlerLockTable)
     .where(sql`${crawlerLockTable.lockKey} = ${CRAWL_LOCK_KEY} AND ${crawlerLockTable.instanceId} = ${INSTANCE_ID}`);

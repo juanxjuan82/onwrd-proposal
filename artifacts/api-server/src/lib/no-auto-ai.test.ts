@@ -1,27 +1,80 @@
 /**
- * No-auto-AI assertions for creation/import paths
+ * No-auto-AI assertions — static boundary + pure-logic invariants
  *
  * Runner: node:test (built-in)
  * Transpiler: tsx (ESM)
  *
  * Covers:
- *  - ANALYSIS_ACTIVE_STATUSES does not include creation-time resting states
- *  - Status determination logic after deterministic scoring
- *  - Extraction pipeline terminal states
- *  - Strategy generation is a distinct, separate step
+ *  - Repository boundary guard: only ai-gateway.ts may import the OpenAI SDK
+ *  - ANALYSIS_ACTIVE_STATUSES invariants
+ *  - Creation-path status assignment (all import/creation routes)
+ *  - Extraction pipeline terminal-state invariants
+ *  - Strategy generation as a distinct pipeline phase
+ *  - Convert-endpoint idempotency logic
  */
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readdir, readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { ANALYSIS_ACTIVE_STATUSES } from "./analysis-utils.js";
 
-// ── Helper: mirrors the status-assignment logic in all three import paths ─────
+// ── 1. Repository boundary guard ──────────────────────────────────────────────
+//
+// The build guard (build.mjs) enforces this at build time; this test enforces
+// it at test time so a CI run without a build step still catches violations.
+
+describe("repository AI-import boundary", () => {
+  it("only src/lib/ai-gateway.ts imports from @workspace/integrations-openai-ai-server", async () => {
+    const srcDir = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "..",
+    );
+    const gatewayPath = path.resolve(srcDir, "lib/ai-gateway.ts");
+    // Match actual import statements only (not variable declarations or comments).
+    // Constructed in two parts so this source file itself doesn't match the scan.
+    const forbiddenPkg = "@workspace/" + "integrations-openai-ai-server";
+    const importPattern = new RegExp(
+      `^\\s*import\\s[\\s\\S]*?from\\s+['"]${forbiddenPkg.replace("/", "\\/")}['"]`,
+      "m",
+    );
+    const violators: string[] = [];
+
+    const scan = async (dir: string) => {
+      const entries = await readdir(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          await scan(full);
+        } else if (entry.name.endsWith(".ts")) {
+          if (full === gatewayPath) continue;
+          const content = await readFile(full, "utf-8");
+          if (importPattern.test(content)) {
+            violators.push(path.relative(srcDir, full));
+          }
+        }
+      }
+    };
+
+    await scan(srcDir);
+
+    assert.deepEqual(
+      violators,
+      [],
+      `Direct OpenAI SDK import outside ai-gateway.ts:\n  ${violators.join("\n  ")}\n` +
+        "All OpenAI calls must go through src/lib/ai-gateway.ts.",
+    );
+  });
+});
+
+// ── 2. Helper: mirrors the status-assignment logic in all creation paths ──────
 
 function determineCreationStatus(fitLevel: string): string {
   return fitLevel === "no_bid" ? "no_bid" : "pending_review";
 }
 
-// ── ANALYSIS_ACTIVE_STATUSES guard ────────────────────────────────────────────
+// ── 3. ANALYSIS_ACTIVE_STATUSES guard ─────────────────────────────────────────
 
 describe("ANALYSIS_ACTIVE_STATUSES", () => {
   it("does not include pending_review", () => {
@@ -77,7 +130,7 @@ describe("ANALYSIS_ACTIVE_STATUSES", () => {
   });
 });
 
-// ── Creation-path status assignment ───────────────────────────────────────────
+// ── 4. Creation-path status assignment ────────────────────────────────────────
 
 describe("determineCreationStatus (all creation/import paths)", () => {
   it("assigns pending_review for strong fit", () => {
@@ -102,7 +155,7 @@ describe("determineCreationStatus (all creation/import paths)", () => {
   });
 });
 
-// ── Extraction pipeline terminal states ───────────────────────────────────────
+// ── 5. Extraction pipeline terminal states ────────────────────────────────────
 
 describe("extraction pipeline terminal states", () => {
   it("requirements_extracted is not an active status (extraction is done, not in-progress)", () => {
@@ -129,7 +182,7 @@ describe("extraction pipeline terminal states", () => {
   });
 });
 
-// ── Convert idempotency invariants ────────────────────────────────────────────
+// ── 6. Convert idempotency invariants ─────────────────────────────────────────
 
 describe("convert endpoint invariants (pure logic)", () => {
   it("a tender with an existing proposalId should not create a new proposal", () => {
