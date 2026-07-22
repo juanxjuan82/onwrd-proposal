@@ -6,7 +6,6 @@ import { db } from "@workspace/db";
 import { proposalsTable, intakeDraftsTable } from "@workspace/db";
 import { eq, and, lt } from "drizzle-orm";
 import { invokeAI } from "../lib/ai-gateway.js";
-import { Resend } from "resend";
 import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
 import {
   ParseBriefBody,
@@ -29,58 +28,6 @@ const upload = multer({
 
 const router = Router();
 
-/** Send an email to ONWRD when a new intake form is submitted. */
-async function sendIntakeNotification(
-  clientName: string,
-  industry: string,
-  proposalId: number,
-  googleDocUrl: string | null,
-) {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) {
-    console.warn("[intake] RESEND_API_KEY not set — skipping notification email");
-    return;
-  }
-
-  const from = process.env.RESEND_FROM ?? "ONWRD Proposal Desk <desk@onwrdadvisors.com>";
-  const to = ["j.aymes@onwrdadvisors.com", "s.esmeralda@onwrdadvisors.com"];
-
-  const appBase = process.env.APP_URL
-    ?? (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}/proposal-generator` : "");
-  const appUrl = appBase ? `${appBase}/proposals/${proposalId}` : null;
-
-  const ctaUrl = googleDocUrl ?? appUrl;
-  const ctaLabel = googleDocUrl ? "Open in Google Docs →" : "View Draft Proposal →";
-
-  const resend = new Resend(apiKey);
-  const { error } = await resend.emails.send({
-    from,
-    to,
-    subject: `New brief submitted — ${clientName}`,
-    html: `
-<div style="font-family:sans-serif;max-width:600px;margin:0 auto;background:#0a0a0a;color:#fff;padding:32px;border-radius:8px">
-  <img src="https://onwrdadvisors.com/wp-content/uploads/2024/01/onwrd-logo-white.png" style="height:32px;margin-bottom:24px" alt="ONWRD"/>
-  <h2 style="color:#fff;margin:0 0 4px">New client brief received</h2>
-  <p style="color:#888;margin:0 0 24px">${new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}</p>
-  <table style="width:100%;border-collapse:collapse;font-size:14px;margin-bottom:24px">
-    <tr><td style="color:#555;padding:6px 0;width:120px">Client</td><td style="color:#fff;font-weight:600">${clientName}</td></tr>
-    <tr><td style="color:#555;padding:6px 0">Industry</td><td style="color:#fff">${industry}</td></tr>
-    <tr><td style="color:#555;padding:6px 0">Proposal ID</td><td style="color:#fff">#${proposalId}</td></tr>
-    ${googleDocUrl ? `<tr><td style="color:#555;padding:6px 0">Google Doc</td><td><a href="${googleDocUrl}" style="color:#4ade80;font-size:12px;word-break:break-all">${googleDocUrl}</a></td></tr>` : ""}
-  </table>
-  <p style="color:#888;font-size:14px;margin-bottom:20px">A draft proposal has been generated and is ready for your review.</p>
-  ${ctaUrl ? `<a href="${ctaUrl}" style="display:inline-block;background:#fff;color:#000;font-weight:600;font-size:14px;padding:12px 28px;border-radius:6px;text-decoration:none">${ctaLabel}</a>` : ""}
-  ${googleDocUrl && appUrl ? `<p style="margin-top:12px;font-size:12px;color:#555">Also available in the app: <a href="${appUrl}" style="color:#555">${appUrl}</a></p>` : ""}
-  <p style="margin-top:32px;color:#333;font-size:12px">ONWRD Proposal Desk — automated proposal generation</p>
-</div>`,
-  });
-
-  if (error) {
-    console.error("[intake] Resend error:", error);
-  } else {
-    console.log(`[intake] Notification sent to ${to.join(", ")}${googleDocUrl ? " with Google Doc link" : ""}`);
-  }
-}
 
 const PROPOSAL_TEMPLATE = `ONWRD PROJECT PROPOSAL
 
@@ -781,118 +728,21 @@ router.post("/intake/draft", async (req, res) => {
 });
 
 /**
- * Public intake endpoint — generates + saves a proposal silently (status: "new"),
- * returns only { success: true } so the draft is never exposed to the client.
- * Accepts multipart/form-data (with optional briefFile) or application/json.
+ * Public intake endpoint — RETIRED (410 Gone).
+ * AI proposal generation is now handled exclusively via:
+ *   POST /api/opportunities          — create an opportunity with briefText
+ *   POST /api/opportunities/:id/generate-proposal — generate the proposal
  */
-router.post("/intake", upload.single("briefFile"), async (req, res) => {
-  const briefText: string = req.body?.briefText ?? "";
-  const clientName: string = req.body?.clientName ?? "";
-  const industry: string = req.body?.industry ?? "";
-  const draftId: number | undefined = req.body?.draftId ? Number(req.body.draftId) : undefined;
-
-  // Parse uploaded file text if present
-  let fileText = "";
-  if (req.file) {
-    try {
-      const { mimetype, originalname, buffer } = req.file;
-      if (mimetype === "application/pdf" || originalname.match(/\.pdf$/i)) {
-        const result = await pdfParse(buffer);
-        fileText = result.text?.trim() ?? "";
-        if (!fileText) {
-          res.status(400).json({ error: "The uploaded PDF has no selectable text. Please copy-paste the content into the brief field instead." });
-          return;
-        }
-      } else if (mimetype.includes("wordprocessingml") || originalname.match(/\.docx$/i)) {
-        const result = await mammoth.extractRawText({ buffer });
-        fileText = result.value?.trim() ?? "";
-      } else {
-        fileText = buffer.toString("utf-8").trim();
-      }
-    } catch (err) {
-      req.log.warn({ err }, "File parsing failed — proceeding with briefText only");
-    }
-  }
-
-  // Merge briefText and fileText
-  const combinedBrief = [briefText, fileText].filter(Boolean).join("\n\n--- Uploaded Document ---\n\n");
-
-  if (!combinedBrief || !clientName || !industry) {
-    res.status(400).json({ error: "A project brief (typed or uploaded), clientName and industry are required" });
-    return;
-  }
-
-  try {
-    const now = new Date();
-    const intakeSystemPrompt = `You are a senior proposal writer at ONWRD, a full-service marketing agency. You write precise, persuasive, senior-quality proposals.
-
-Given a project brief, extract all relevant information and produce a comprehensive, fully-populated proposal document. Every section must be written with real, specific, substantive content — not placeholders, not vague generalities.
-
-RULES:
-- Replace every {placeholder} in the template with fully written content drawn from the brief. Infer intelligently where the brief is silent.
-- Write in a confident, direct agency voice. No filler. No waffle. No generic statements.
-- Every section must be complete paragraphs or well-structured lists — never one-liners.
-- The KPI Framework (section 3.2) must include at least 4 rows with realistic metrics, baselines, and targets.
-- The Deliverables Register (section 6) must list at least 6 deliverables with purpose, owner, format, and review notes.
-- The Investment Table must include estimated hour ranges and realistic USD figures scaled to the scope.
-- Risks and Mitigation must include at least 4 risks.
-- Case Studies section MUST draw from the real ONWRD past work supplied below — do NOT invent client names, projects, or outcomes.
-- Dates to use: Today = ${formatDate(now)} | Proposal due = ${formatDate(addDays(now, 10))} | Info due from client = ${formatDate(addDays(now, 7))} | Kickoff = infer from brief or use ${formatDate(addDays(now, 21))} | Midpoint = infer | Launch = infer.
-
-${ONWRD_CASE_STUDIES}
-
-TEMPLATE TO POPULATE:
-
-${PROPOSAL_TEMPLATE}
-
-Return ONLY the completed proposal text — no JSON wrapper, no commentary.`;
-
-    const { content } = await invokeAI({
-      feature:      "proposal_generation",
-      messages:     [
-        { role: "system", content: intakeSystemPrompt },
-        { role: "user",   content: `Here is the project brief:\n\n${combinedBrief}` },
-      ],
-      maxTokens:    16000,
-      permitRetry:  true,
-      operationKey: "intake",
-    });
-
-    const [saved] = await db
-      .insert(proposalsTable)
-      .values({
-        clientName,
-        industry,
-        briefText: combinedBrief,
-        proposalContent: content,
-        status: "new",
-      })
-      .returning();
-
-    // Mark the autosaved draft as converted so it doesn't get flagged as abandoned
-    if (draftId && !Number.isNaN(draftId)) {
-      db.update(intakeDraftsTable)
-        .set({ status: "converted", proposalId: saved.id, updatedAt: new Date() })
-        .where(eq(intakeDraftsTable.id, draftId))
-        .catch(() => { /* non-critical */ });
-    }
-
-    // Respond immediately — client doesn't need to wait for email
-    res.json({ success: true });
-
-    // Fire-and-forget: email notification (no auto-export — team exports manually)
-    sendIntakeNotification(clientName, industry, saved.id, null).catch((err) =>
-      console.error("[intake] Email notification failed:", err),
-    );
-  } catch (err) {
-    req.log.error({ err }, "Error processing intake submission");
-    const status = (err as { status?: number })?.status;
-    if (status === 429) {
-      res.status(503).json({ error: "Our proposal engine is briefly overloaded — please wait 30 seconds and try again." });
-    } else {
-      res.status(500).json({ error: "Failed to process submission. Please try again." });
-    }
-  }
+router.post("/intake", upload.none(), (_req, res) => {
+  res.set("Location", "/api/opportunities");
+  res.status(410).json({
+    error:
+      "This endpoint has been retired. " +
+      "Create an opportunity via POST /api/opportunities, " +
+      "then generate a proposal via POST /api/opportunities/:id/generate-proposal.",
+    canonical: "/api/opportunities/:id/generate-proposal",
+  });
 });
+
 
 export default router;

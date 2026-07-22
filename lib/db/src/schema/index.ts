@@ -18,4 +18,5 @@ export * from "./tender-digest-settings";
 export * from "./google-drive-config";
 export * from "./ai-usage-log";
 export * from "./ai-circuit";
+export * from "./ai-daily-quota";
 export * from "./crawler-lock";
