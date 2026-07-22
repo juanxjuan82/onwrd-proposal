@@ -3,8 +3,10 @@ import {
   tenderSourcesTable,
   discoveredTendersTable,
   crawlerRunsTable,
+  crawlerLockTable,
 } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
 import { WorldBankAdapter } from "./world-bank.js";
 import { UNGMAdapter } from "./ungm.js";
 import { IDBAdapter } from "./idb.js";
@@ -40,11 +42,43 @@ interface ScoringResult {
   confidence: string;
 }
 
-// ── In-process crawl lock (prevents overlap between scheduled & manual) ─────
-let crawlInProgress = false;
+// ── DB-backed crawl lock (prevents overlap across restarts & instances) ───────
+const CRAWL_LOCK_KEY = "default";
+const LOCK_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours — 2× max expected crawl duration
+const INSTANCE_ID = randomUUID();
 
-export function isCrawlRunning(): boolean {
-  return crawlInProgress;
+async function acquireCrawlLock(): Promise<boolean> {
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + LOCK_TTL_MS);
+
+  // Delete any expired lock first (atomic read-then-delete not needed; races
+  // are resolved by the ON CONFLICT DO NOTHING in the insert below)
+  await db
+    .delete(crawlerLockTable)
+    .where(sql`${crawlerLockTable.lockKey} = ${CRAWL_LOCK_KEY} AND ${crawlerLockTable.expiresAt} < ${now}`);
+
+  const result = await db
+    .insert(crawlerLockTable)
+    .values({ lockKey: CRAWL_LOCK_KEY, acquiredAt: now, expiresAt, instanceId: INSTANCE_ID })
+    .onConflictDoNothing()
+    .returning({ lockKey: crawlerLockTable.lockKey });
+
+  return result.length > 0;
+}
+
+async function releaseCrawlLock(): Promise<void> {
+  await db
+    .delete(crawlerLockTable)
+    .where(sql`${crawlerLockTable.lockKey} = ${CRAWL_LOCK_KEY} AND ${crawlerLockTable.instanceId} = ${INSTANCE_ID}`);
+}
+
+export async function isCrawlRunning(): Promise<boolean> {
+  const now = new Date();
+  const rows = await db
+    .select({ expiresAt: crawlerLockTable.expiresAt })
+    .from(crawlerLockTable)
+    .where(sql`${crawlerLockTable.lockKey} = ${CRAWL_LOCK_KEY} AND ${crawlerLockTable.expiresAt} > ${now}`);
+  return rows.length > 0;
 }
 
 // ── Geography scoring ───────────────────────────────────────────────────────
@@ -333,11 +367,11 @@ export async function runCrawler(sourceId?: number): Promise<{
   aiFallbackCount: number;
   quotaErrorHit: boolean;
 }> {
-  // Overlap prevention — reject if a crawl is already running
-  if (crawlInProgress) {
+  // DB-backed overlap prevention — atomic across restarts and instances
+  const acquired = await acquireCrawlLock();
+  if (!acquired) {
     throw new Error("A crawl is already in progress — skipping to prevent overlap.");
   }
-  crawlInProgress = true;
 
   const sources = sourceId
     ? await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.id, sourceId))
@@ -444,7 +478,7 @@ export async function runCrawler(sourceId?: number): Promise<{
       }
     }
   } finally {
-    crawlInProgress = false;
+    await releaseCrawlLock();
   }
 
   return {

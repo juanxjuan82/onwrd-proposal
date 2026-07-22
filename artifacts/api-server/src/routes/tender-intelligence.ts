@@ -58,9 +58,8 @@ router.post("/tender-intelligence/rescore", async (req, res) => {
 });
 
 // ── Manual crawl trigger ───────────────────────────────────────────────────
-router.post("/tender-intelligence/crawl", (req, res) => {
-  // Synchronous overlap check before launching the async crawl
-  if (isCrawlRunning()) {
+router.post("/tender-intelligence/crawl", async (req, res) => {
+  if (await isCrawlRunning()) {
     res.status(409).json({ error: "A crawl is already in progress. Please wait for it to finish." });
     return;
   }

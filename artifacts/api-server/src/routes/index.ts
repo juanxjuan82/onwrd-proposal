@@ -9,6 +9,7 @@ import sectionsRouter from "./sections";
 import knowledgeRouter from "./knowledge";
 import tenderIntelligenceRouter from "./tender-intelligence";
 import driveConfigRouter from "./drive-config";
+import adminRouter from "./admin";
 
 const router: IRouter = Router();
 
@@ -22,5 +23,6 @@ router.use(sectionsRouter);
 router.use(knowledgeRouter);
 router.use(tenderIntelligenceRouter);
 router.use(driveConfigRouter);
+router.use(adminRouter);
 
 export default router;
