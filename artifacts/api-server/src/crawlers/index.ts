@@ -5,7 +5,6 @@ import {
   crawlerRunsTable,
 } from "@workspace/db";
 import { eq } from "drizzle-orm";
-import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
 import { WorldBankAdapter } from "./world-bank.js";
 import { UNGMAdapter } from "./ungm.js";
 import { IDBAdapter } from "./idb.js";
@@ -30,10 +29,6 @@ function getAdapter(adapterType: string): TenderSourceAdapter | null {
   }
 }
 
-// ── Constants ───────────────────────────────────────────────────────────────
-const AI_PROVIDER = "openai";
-const AI_CAP_PER_CRAWL = 20;
-
 // ── Shared scoring result type ──────────────────────────────────────────────
 interface ScoringResult {
   fitScore: number;
@@ -43,14 +38,6 @@ interface ScoringResult {
   geoRegion: string;
   bahamasAdvantageScore: number;
   confidence: string;
-}
-
-// ── Per-crawl telemetry & circuit-breaker state ─────────────────────────────
-interface CrawlTelemetry {
-  aiCallCount: number;
-  aiFallbackCount: number;
-  quotaCircuitOpen: boolean;
-  quotaErrorHit: boolean;
 }
 
 // ── In-process crawl lock (prevents overlap between scheduled & manual) ─────
@@ -305,150 +292,6 @@ function isBoilerplateDescription(desc: string): boolean {
   return stubPatterns.some((p) => p.test(t));
 }
 
-// ── Error classifiers ────────────────────────────────────────────────────────
-function isQuotaError(err: unknown): boolean {
-  const msg = String(err instanceof Error ? err.message : err);
-  return msg.includes("insufficient_quota") || msg.includes("exceeded your current quota");
-}
-
-function isTemporaryRateLimitError(err: unknown): boolean {
-  const msg = String(err instanceof Error ? err.message : err);
-  return (msg.includes("rate_limit") || msg.includes("rate limit") || msg.includes("too many requests"))
-    && !isQuotaError(err);
-}
-
-// ── AI scorer system prompt ──────────────────────────────────────────────────
-const SCORER_SYSTEM_PROMPT = `You evaluate procurement opportunities for ONWRD, a Bahamas-based full-service marketing and communications agency.
-
-ONWRD specialises in: marketing campaigns, branding, communications strategy, digital marketing, social media, tourism promotion, community engagement, public awareness campaigns, stakeholder engagement, creative production, and development-sector communications.
-
-Score each opportunity using this 4-component rubric (total 100 points):
-
-1. GEOGRAPHIC ALIGNMENT (max 35 pts)
-   - Bahamas: 35 | Caribbean: 28 | SIDS: 20 | Latin America: 15 | Global (multilateral/remote): 10
-
-2. CORE CAPABILITIES (max 30 pts)
-   - How well does the scope match: marketing, branding, communications strategy, PR, digital, social media, creative production?
-   - Strong match = 25-30 | Moderate = 15-24 | Weak = 5-14 | None = 0
-
-3. INDUSTRY VERTICAL (max 20 pts)
-   - Financial services or Tourism/Hospitality: 20 | Government/Ministry: 18 | NGO/Multilateral: 16 | Health/Education/Climate: 10 | Other: 5
-
-4. SCALE & FEASIBILITY (max 15 pts)
-   - Are timeline, milestones, deliverables, budget, or scope clearly defined? More structure = higher score.
-
-DISQUALIFY (return fitScore 0, SKIP) if:
-- No marketing/communications terms at all
-- Restricted to US-only or local-registered vendors
-- International with no remote delivery or multilateral backing
-
-Return ONLY valid JSON:
-{
-  "fitScore": <sum of 4 components, 0-100>,
-  "recommendation": "PURSUE" | "CONSIDER" | "SKIP",
-  "reasoning": "<2 sentences: key strength and any concern>",
-  "geographyScore": <raw geo score: bahamas=100, caribbean=75, sids=60, latam=35, global=20>,
-  "geoRegion": "bahamas" | "caribbean" | "sids" | "latam" | "global",
-  "bahamasAdvantageScore": <0-100, ONWRD's competitive edge given local presence>,
-  "confidence": "HIGH" | "MEDIUM" | "LOW"
-}
-
-PURSUE ≥60, CONSIDER 40-59, SKIP <40.`;
-
-// ── Core AI call (single attempt — retries handled by scoreOpportunity) ──────
-async function callAIScorer(opp: TenderOpportunity): Promise<ScoringResult> {
-  const completion = await openai.chat.completions.create({
-    model: AI_MODEL,
-    max_tokens: 600,
-    messages: [
-      { role: "system", content: SCORER_SYSTEM_PROMPT },
-      {
-        role: "user",
-        content: `Title: ${opp.title}\nOrganization: ${opp.organization}\nCountry: ${opp.country ?? ""}\nSector: ${opp.sector ?? ""}\nDescription: ${opp.description.slice(0, 500)}`,
-      },
-    ],
-    response_format: { type: "json_object" },
-  });
-
-  const raw = JSON.parse(completion.choices[0]?.message?.content ?? "{}");
-  return {
-    fitScore: Number(raw.fitScore ?? 0),
-    recommendation: String(raw.recommendation ?? "SKIP"),
-    reasoning: String(raw.reasoning ?? ""),
-    geographyScore: Number(raw.geographyScore ?? 20),
-    geoRegion: String(raw.geoRegion ?? "global"),
-    bahamasAdvantageScore: Number(raw.bahamasAdvantageScore ?? 0),
-    confidence: String(raw.confidence ?? "LOW"),
-  };
-}
-
-// ── Score opportunity with circuit-breaker and selective retry ───────────────
-//
-// Rules:
-//  1. Keyword scores first — SKIP immediately without any AI call.
-//  2. Boilerplate descriptions are not sent to AI (keyword result returned as-is).
-//  3. Circuit open (quota exhausted) or cap reached → keyword result returned.
-//  4. Temporary rate-limit → retry up to 2 times with backoff.
-//  5. Quota error → open circuit, no retry, keyword fallback for rest of crawl.
-//  6. Any other error → keyword fallback, circuit stays closed.
-async function scoreOpportunity(
-  opp: TenderOpportunity,
-  telemetry: CrawlTelemetry,
-): Promise<ScoringResult> {
-  // Step 1: Keyword scoring (always runs first, zero cost)
-  const keyResult = keywordScore(opp);
-
-  // Step 2: Hard SKIP — keyword engine is confident, no AI needed
-  if (keyResult.recommendation === "SKIP") return keyResult;
-
-  // Step 3: Boilerplate guard — synthetic descriptions don't help the AI
-  if (isBoilerplateDescription(opp.description)) {
-    telemetry.aiFallbackCount++;
-    return {
-      ...keyResult,
-      reasoning: keyResult.reasoning + " (keyword-only: description too short or synthetic)",
-    };
-  }
-
-  // Step 4: Circuit open or per-crawl cap reached — skip AI
-  if (telemetry.quotaCircuitOpen || telemetry.aiCallCount >= AI_CAP_PER_CRAWL) {
-    telemetry.aiFallbackCount++;
-    return keyResult;
-  }
-
-  // Step 5: Attempt AI with rate-limit retry (quota errors never retried)
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      const result = await callAIScorer(opp);
-      telemetry.aiCallCount++;
-      return result;
-    } catch (err) {
-      if (isQuotaError(err)) {
-        // Open circuit immediately — don't retry, keyword for rest of crawl
-        telemetry.quotaCircuitOpen = true;
-        telemetry.quotaErrorHit = true;
-        telemetry.aiFallbackCount++;
-        console.warn("[scoring] Quota exhausted — circuit open, keyword scoring for remainder of crawl");
-        return keyResult;
-      }
-      if (isTemporaryRateLimitError(err) && attempt < 2) {
-        const delay = (attempt + 1) * 3000;
-        console.warn(`[scoring] Rate limited (attempt ${attempt + 1}/3) — retrying in ${delay}ms`);
-        await new Promise<void>((r) => setTimeout(r, delay));
-        continue;
-      }
-      // Unknown error — fallback, circuit stays closed
-      console.warn("[scoring] AI error, using keyword fallback:", err instanceof Error ? err.message : String(err));
-      telemetry.aiFallbackCount++;
-      return keyResult;
-    }
-  }
-
-  // Retries exhausted (rate-limit) — fallback
-  telemetry.aiFallbackCount++;
-  return keyResult;
-}
-
 // ── Rescore all existing items with keyword engine ──────────────────────────
 export async function rescoreWithKeywords(): Promise<number> {
   const items = await db.select().from(discoveredTendersTable);
@@ -496,13 +339,6 @@ export async function runCrawler(sourceId?: number): Promise<{
   }
   crawlInProgress = true;
 
-  const telemetry: CrawlTelemetry = {
-    aiCallCount: 0,
-    aiFallbackCount: 0,
-    quotaCircuitOpen: false,
-    quotaErrorHit: false,
-  };
-
   const sources = sourceId
     ? await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.id, sourceId))
     : await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.active, true));
@@ -515,16 +351,12 @@ export async function runCrawler(sourceId?: number): Promise<{
       const adapter = getAdapter(source.adapterType);
       if (!adapter) continue;
 
-      // Snapshot telemetry before processing this source so per-source deltas can be recorded
-      const aiCallsBefore = telemetry.aiCallCount;
-      const aiFallbackBefore = telemetry.aiFallbackCount;
-
       const [run] = await db.insert(crawlerRunsTable).values({
-        sourceId: source.id,
+        sourceId:  source.id,
         startedAt: new Date(),
-        status: "running",
-        aiProvider: AI_PROVIDER,
-        aiModel: AI_MODEL,
+        status:    "running",
+        aiProvider: null,
+        aiModel:    null,
       }).returning();
 
       try {
@@ -550,28 +382,28 @@ export async function runCrawler(sourceId?: number): Promise<{
             if (existingByUrl.length > 0) continue;
           }
 
-          const result = await scoreOpportunity(opp, telemetry);
+          const result = keywordScore(opp);
 
           await db.insert(discoveredTendersTable).values({
-            sourceId: source.id,
-            externalId: opp.externalId ?? null,
-            title: opp.title,
-            organization: opp.organization,
-            url: opp.url ?? null,
-            deadline: opp.deadline ?? null,
-            description: opp.description,
-            country: opp.country ?? null,
-            sector: opp.sector ?? null,
-            valueAmount: opp.valueAmount ?? null,
-            rawData: opp.rawData ?? null,
-            status: "new",
-            fitScore: result.fitScore,
-            recommendation: result.recommendation,
-            scoringReasoning: result.reasoning,
-            geographyScore: result.geographyScore,
-            geoRegion: result.geoRegion,
+            sourceId:             source.id,
+            externalId:           opp.externalId ?? null,
+            title:                opp.title,
+            organization:         opp.organization,
+            url:                  opp.url ?? null,
+            deadline:             opp.deadline ?? null,
+            description:          opp.description,
+            country:              opp.country ?? null,
+            sector:               opp.sector ?? null,
+            valueAmount:          opp.valueAmount ?? null,
+            rawData:              opp.rawData ?? null,
+            status:               "new",
+            fitScore:             result.fitScore,
+            recommendation:       result.recommendation,
+            scoringReasoning:     result.reasoning,
+            geographyScore:       result.geographyScore,
+            geoRegion:            result.geoRegion,
             bahamasAdvantageScore: result.bahamasAdvantageScore,
-            confidence: result.confidence,
+            confidence:           result.confidence,
           });
 
           newCount++;
@@ -579,35 +411,35 @@ export async function runCrawler(sourceId?: number): Promise<{
         }
 
         await db.update(crawlerRunsTable).set({
-          completedAt: new Date(),
-          status: "success",
-          itemsFound: opportunities.length,
-          itemsNew: newCount,
-          aiCallCount: telemetry.aiCallCount - aiCallsBefore,
-          aiFallbackCount: telemetry.aiFallbackCount - aiFallbackBefore,
-          aiQuotaError: telemetry.quotaErrorHit,
+          completedAt:    new Date(),
+          status:         "success",
+          itemsFound:     opportunities.length,
+          itemsNew:       newCount,
+          aiCallCount:    0,
+          aiFallbackCount: 0,
+          aiQuotaError:   false,
         }).where(eq(crawlerRunsTable.id, run.id));
 
         await db.update(tenderSourcesTable).set({
-          lastCheckedAt: new Date(),
-          lastSuccessAt: new Date(),
+          lastCheckedAt:   new Date(),
+          lastSuccessAt:   new Date(),
           itemsFoundCount: source.itemsFoundCount + newCount,
-          updatedAt: new Date(),
+          updatedAt:       new Date(),
         }).where(eq(tenderSourcesTable.id, source.id));
 
       } catch (err) {
         await db.update(crawlerRunsTable).set({
-          completedAt: new Date(),
-          status: "failed",
-          errorMessage: String(err instanceof Error ? err.message : err),
-          aiCallCount: telemetry.aiCallCount - aiCallsBefore,
-          aiFallbackCount: telemetry.aiFallbackCount - aiFallbackBefore,
-          aiQuotaError: telemetry.quotaErrorHit,
+          completedAt:    new Date(),
+          status:         "failed",
+          errorMessage:   String(err instanceof Error ? err.message : err),
+          aiCallCount:    0,
+          aiFallbackCount: 0,
+          aiQuotaError:   false,
         }).where(eq(crawlerRunsTable.id, run.id));
 
         await db.update(tenderSourcesTable).set({
           lastCheckedAt: new Date(),
-          updatedAt: new Date(),
+          updatedAt:     new Date(),
         }).where(eq(tenderSourcesTable.id, source.id));
       }
     }
@@ -616,12 +448,12 @@ export async function runCrawler(sourceId?: number): Promise<{
   }
 
   return {
-    total: totalFound,
-    newItems: totalNew,
-    sources: sources.length,
-    aiCallCount: telemetry.aiCallCount,
-    aiFallbackCount: telemetry.aiFallbackCount,
-    quotaErrorHit: telemetry.quotaErrorHit,
+    total:          totalFound,
+    newItems:       totalNew,
+    sources:        sources.length,
+    aiCallCount:    0,
+    aiFallbackCount: 0,
+    quotaErrorHit:  false,
   };
 }
 

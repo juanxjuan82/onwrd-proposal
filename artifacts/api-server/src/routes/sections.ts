@@ -7,7 +7,7 @@ import {
   googleExportsTable,
 } from "@workspace/db";
 import { eq, and, sql } from "drizzle-orm";
-import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
+import { invokeAI } from "../lib/ai-gateway.js";
 import { createGoogleDoc, appendContentWithLogo, clearAndReplaceContent, moveDocToFolder } from "../lib/google-docs.js";
 import { googleDriveConfigTable } from "@workspace/db";
 
@@ -129,10 +129,8 @@ router.post("/proposals/:id/run-critic", async (req, res) => {
       .map((s) => `=== ${s.title} (${s.sectionKey}) ===\n${s.content || "[empty]"}`)
       .join("\n\n");
 
-    const completion = await openai.chat.completions.create({
-      model: AI_MODEL,
-      max_tokens: 6000,
-      response_format: { type: "json_object" },
+    const { content: raw } = await invokeAI({
+      feature: "section_regeneration",
       messages: [
         {
           role: "system",
@@ -153,9 +151,11 @@ Return JSON with a "sections" array. Each element:
           content: `Review this proposal for tender: ${proposal.clientName} — ${proposal.industry}\n\n${sectionSummary}`,
         },
       ],
+      maxTokens: 6000,
+      responseFormat: { type: "json_object" },
+      proposalId,
+      operationKey: "run-critic",
     });
-
-    const raw = completion.choices[0]?.message?.content ?? "{}";
     const data = JSON.parse(raw);
     const criticResults: { sectionKey: string; issues: string[]; severity: string }[] = data.sections ?? [];
 
@@ -475,10 +475,8 @@ router.post("/proposals/:id/ai-improve-sections", async (req, res) => {
         .map((s) => `=== ${s.title} (${s.sectionKey}) ===\nCRITIC FINDINGS:\n${s.criticFindings}\n\nCURRENT CONTENT:\n${s.content}`)
         .join("\n\n---\n\n");
 
-      const completion = await openai.chat.completions.create({
-        model: AI_MODEL,
-        max_tokens: 12000,
-        response_format: { type: "json_object" },
+      const { content: raw } = await invokeAI({
+        feature: "section_regeneration",
         messages: [
           {
             role: "system",
@@ -501,9 +499,11 @@ Return JSON with an "improvements" array. Each element:
             content: `Improve these proposal sections for client: ${proposal.clientName}\n\n${sectionPayload}`,
           },
         ],
+        maxTokens:      12000,
+        responseFormat: { type: "json_object" },
+        proposalId,
+        operationKey:   "ai-improve-sections",
       });
-
-      const raw = completion.choices[0]?.message?.content ?? "{}";
       const data = JSON.parse(raw);
       const improvements: { sectionKey: string; content: string; changesSummary: string }[] = data.improvements ?? [];
 

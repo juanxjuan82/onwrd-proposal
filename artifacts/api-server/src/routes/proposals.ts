@@ -5,7 +5,7 @@ import mammoth from "mammoth";
 import { db } from "@workspace/db";
 import { proposalsTable, intakeDraftsTable } from "@workspace/db";
 import { eq, and, lt } from "drizzle-orm";
-import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
+import { invokeAI } from "../lib/ai-gateway.js";
 import { Resend } from "resend";
 import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
 import {
@@ -627,10 +627,8 @@ router.post("/proposals/check-brief", async (req, res) => {
     return;
   }
   try {
-    const completion = await openai.chat.completions.create({
-      model: AI_MODEL,
-      temperature: 0,
-      response_format: { type: "json_object" },
+    const { content: raw } = await invokeAI({
+      feature: "proposal_check",
       messages: [
         {
           role: "system",
@@ -645,8 +643,10 @@ Key elements to check: client/organisation name, project scope or goals, deliver
         },
         { role: "user", content: text.slice(0, 6000) },
       ],
+      maxTokens:      300,
+      responseFormat: { type: "json_object" },
+      operationKey:   "check-brief",
     });
-    const raw = completion.choices[0]?.message?.content ?? "{}";
     const parsed = JSON.parse(raw) as { sufficient?: boolean; missing?: string[]; summary?: string };
     res.json({
       sufficient: parsed.sufficient ?? false,
@@ -670,9 +670,8 @@ router.post("/proposals/parse-brief", async (req, res) => {
   const now = new Date();
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: AI_MODEL,
-      max_tokens: 16000,
+    const { content } = await invokeAI({
+      feature: "proposal_generation",
       messages: [
         {
           role: "system",
@@ -709,9 +708,9 @@ Return your response as JSON with exactly these fields:
           content: `Here is the project brief:\n\n${briefText}`,
         },
       ],
+      maxTokens:    16000,
+      operationKey: "parse-brief",
     });
-
-    const content = completion.choices[0]?.message?.content ?? "";
 
     let result: {
       clientName: string;
@@ -848,31 +847,16 @@ ${PROPOSAL_TEMPLATE}
 
 Return ONLY the completed proposal text — no JSON wrapper, no commentary.`;
 
-    let completion: Awaited<ReturnType<typeof openai.chat.completions.create>> | undefined;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        completion = await openai.chat.completions.create({
-          model: AI_MODEL,
-          messages: [
-            { role: "system", content: intakeSystemPrompt },
-            { role: "user", content: `Here is the project brief:\n\n${combinedBrief}` },
-          ],
-          max_tokens: 16000,
-        });
-        break;
-      } catch (err) {
-        const isRateLimit = (err as { status?: number })?.status === 429;
-        if (isRateLimit && attempt < 2) {
-          const delay = (attempt + 1) * 3000;
-          console.warn(`[intake] AI rate limit hit, retrying in ${delay}ms (attempt ${attempt + 1})`);
-          await new Promise((r) => setTimeout(r, delay));
-          continue;
-        }
-        throw err;
-      }
-    }
-
-    const content = completion.choices[0]?.message?.content ?? "";
+    const { content } = await invokeAI({
+      feature:      "proposal_generation",
+      messages:     [
+        { role: "system", content: intakeSystemPrompt },
+        { role: "user",   content: `Here is the project brief:\n\n${combinedBrief}` },
+      ],
+      maxTokens:    16000,
+      permitRetry:  true,
+      operationKey: "intake",
+    });
 
     const [saved] = await db
       .insert(proposalsTable)

@@ -3,7 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build as esbuild } from "esbuild";
 import esbuildPluginPino from "esbuild-plugin-pino";
-import { rm } from "node:fs/promises";
+import { rm, readFile, readdir } from "node:fs/promises";
 
 // Plugins (e.g. 'esbuild-plugin-pino') may use `require` to resolve dependencies
 globalThis.require = createRequire(import.meta.url);
@@ -119,6 +119,46 @@ globalThis.__dirname = __bannerPath.dirname(globalThis.__filename);
     },
   });
 }
+
+// ── AI gateway boundary guard ─────────────────────────────────────────────────
+// Fails the build if any .ts file outside src/lib/ai-gateway.ts imports
+// directly from @workspace/integrations-openai-ai-server.
+async function checkGatewayBoundary() {
+  const srcDir      = path.resolve(artifactDir, "src");
+  const gatewayPath = path.resolve(srcDir, "lib/ai-gateway.ts");
+  const forbidden   = "@workspace/integrations-openai-ai-server";
+  const violators   = [];
+
+  const collectFiles = async (dir) => {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await collectFiles(full);
+      } else if (entry.name.endsWith(".ts")) {
+        if (full === gatewayPath) continue;
+        const content = await readFile(full, "utf-8");
+        if (content.includes(forbidden)) {
+          violators.push(path.relative(srcDir, full));
+        }
+      }
+    }
+  };
+
+  await collectFiles(srcDir);
+
+  if (violators.length > 0) {
+    console.error(
+      `[gateway-guard] ❌  Forbidden direct AI import in ${violators.length} file(s):\n` +
+      violators.map((f) => `  src/${f}`).join("\n") +
+      `\n\nAll OpenAI calls must go through src/lib/ai-gateway.ts.`,
+    );
+    process.exit(1);
+  }
+  console.info("[gateway-guard] ✓  All AI imports correctly routed through src/lib/ai-gateway.ts");
+}
+
+await checkGatewayBoundary();
 
 buildAll().catch((err) => {
   console.error(err);

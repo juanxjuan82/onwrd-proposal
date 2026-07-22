@@ -13,13 +13,13 @@ import {
   proposalStrategiesTable,
 } from "@workspace/db";
 import { eq, desc, and, inArray } from "drizzle-orm";
-import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
+import { invokeAI, type AIResult } from "../lib/ai-gateway.js";
+import { extractTenderMetadata } from "../lib/metadata-extractor.js";
 import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
 import { scoreTender } from "../lib/scoring-rules.js";
 import {
   truncateToTokenBudget,
   classifyError,
-  callWithSingleRetry,
   ANALYSIS_ACTIVE_STATUSES,
   EXTRACTION_MAX_TOKENS,
   MAX_REQUIREMENTS,
@@ -127,39 +127,37 @@ async function runExtractRequirements(tenderId: number, cancelSignal?: AbortSign
     ? AbortSignal.any([cancelSignal, timeoutSignal])
     : timeoutSignal;
 
-  let completion: Awaited<ReturnType<typeof openai.chat.completions.create>>;
+  let aiResult: AIResult;
   try {
-    completion = await callWithSingleRetry(() =>
-      openai.chat.completions.create(
+    aiResult = await invokeAI({
+      feature: "requirements_extraction",
+      messages: [
         {
-          model: AI_MODEL,
-          max_completion_tokens: EXTRACTION_MAX_TOKENS,
-          response_format: { type: "json_object" },
-          messages: [
-            {
-              role: "system",
-              content:
-                `You extract structured requirements from tender/RFP documents.\n\n` +
-                `Return ONLY a JSON object: { "requirements": [...] }\n` +
-                `Each item: { "requirementText": string, "category": string, "isMandatory": boolean }\n\n` +
-                `Rules:\n` +
-                `- Return at most ${MAX_REQUIREMENTS} distinct, actionable requirements.\n` +
-                `- Each requirementText MUST be ≤ ${MAX_REQ_CHARS} characters. Summarise if longer.\n` +
-                `- category: one of technical | budget | timeline | personnel | certifications | format | deliverable | compliance | general\n` +
-                `- isMandatory: true for must/shall/required; false for preferred/desired/optional.\n` +
-                `- Include: submission format, eligibility criteria, deliverable specs, timeline constraints, compliance items.\n` +
-                `- Skip vague or duplicate statements.\n` +
-                `- No commentary or extra keys — only the JSON object.`,
-            },
-            {
-              role: "user",
-              content: `Extract requirements from this tender.\n\nTitle: ${tender.title}\nAgency: ${tender.agency}\n\n${sourceText}`,
-            },
-          ],
+          role: "system",
+          content:
+            `You extract structured requirements from tender/RFP documents.\n\n` +
+            `Return ONLY a JSON object: { "requirements": [...] }\n` +
+            `Each item: { "requirementText": string, "category": string, "isMandatory": boolean }\n\n` +
+            `Rules:\n` +
+            `- Return at most ${MAX_REQUIREMENTS} distinct, actionable requirements.\n` +
+            `- Each requirementText MUST be ≤ ${MAX_REQ_CHARS} characters. Summarise if longer.\n` +
+            `- category: one of technical | budget | timeline | personnel | certifications | format | deliverable | compliance | general\n` +
+            `- isMandatory: true for must/shall/required; false for preferred/desired/optional.\n` +
+            `- Include: submission format, eligibility criteria, deliverable specs, timeline constraints, compliance items.\n` +
+            `- Skip vague or duplicate statements.\n` +
+            `- No commentary or extra keys — only the JSON object.`,
         },
-        { signal },
-      ),
-    );
+        {
+          role: "user",
+          content: `Extract requirements from this tender.\n\nTitle: ${tender.title}\nAgency: ${tender.agency}\n\n${sourceText}`,
+        },
+      ],
+      maxTokens:      EXTRACTION_MAX_TOKENS,
+      responseFormat: { type: "json_object" },
+      signal,
+      permitRetry:    true,
+      opportunityId:  tenderId,
+    });
   } catch (err) {
     if (cancelSignal?.aborted) {
       const e = new Error("Analysis cancelled by user"); e.name = "CancelledError"; throw e;
@@ -171,19 +169,18 @@ async function runExtractRequirements(tenderId: number, cancelSignal?: AbortSign
   }
 
   // Record token usage (accumulate across steps within one analysis)
-  const usage = completion.usage;
   await db
     .update(tendersTable)
     .set({
-      aiModelUsed: completion.model,
-      aiInputTokens:  (tender.aiInputTokens  ?? 0) + (usage?.prompt_tokens     ?? 0),
-      aiOutputTokens: (tender.aiOutputTokens ?? 0) + (usage?.completion_tokens ?? 0),
-      updatedAt: new Date(),
+      aiModelUsed:    aiResult.model,
+      aiInputTokens:  (tender.aiInputTokens  ?? 0) + (aiResult.usage?.promptTokens     ?? 0),
+      aiOutputTokens: (tender.aiOutputTokens ?? 0) + (aiResult.usage?.completionTokens ?? 0),
+      updatedAt:      new Date(),
     })
     .where(eq(tendersTable.id, tenderId));
 
   // Parse and validate response
-  const raw = completion.choices[0]?.message?.content ?? "{}";
+  const raw = aiResult.content;
   type RawReq = { requirementText?: unknown; category?: unknown; isMandatory?: unknown };
   let data: { requirements?: RawReq[] };
   try {
@@ -269,12 +266,10 @@ async function runGenerateStrategy(tenderId: number, cancelSignal?: AbortSignal)
     ? AbortSignal.any([cancelSignal, timeoutSignal])
     : timeoutSignal;
 
-  let completion: Awaited<ReturnType<typeof openai.chat.completions.create>>;
+  let raw: string;
   try {
-    completion = await openai.chat.completions.create({
-      model: AI_MODEL,
-      max_completion_tokens: 2000,
-      response_format: { type: "json_object" },
+    const stratResult = await invokeAI({
+      feature: "strategy_generation",
       messages: [
         {
           role: "system",
@@ -308,7 +303,13 @@ ${requirementsSummary}
 ${bidScore ? `Bid Score: ${bidScore.fitScore}/100 (${bidScore.fitLevel})\nScoring Reasoning: ${bidScore.reasoning}` : ""}`,
         },
       ],
-    }, { signal });
+      maxTokens:      2000,
+      responseFormat: { type: "json_object" },
+      signal,
+      permitRetry:    true,
+      opportunityId:  tenderId,
+    });
+    raw = stratResult.content;
   } catch (err) {
     if (cancelSignal?.aborted) {
       const e = new Error("Analysis cancelled by user"); e.name = "CancelledError"; throw e;
@@ -318,8 +319,6 @@ ${bidScore ? `Bid Score: ${bidScore.fitScore}/100 (${bidScore.fitLevel})\nScorin
     }
     throw err;
   }
-
-  const raw = completion.choices[0]?.message?.content ?? "{}";
   const data = JSON.parse(raw) as {
     positioning?: string;
     winThemes?: string[];
@@ -1132,8 +1131,7 @@ router.post("/opportunities/:id/resume-analysis", async (req, res) => {
       return;
     }
 
-    res.json({ message: "Resuming analysis", fromStep });
-    void autoAnalyzeOpportunity(id, fromStep);
+    res.json({ message: "Use explicit step endpoints to continue analysis", fromStep });
   } catch (err) {
     req.log.error({ err }, "Error resuming analysis");
     res.status(500).json({ error: "Failed to resume analysis" });
@@ -1303,10 +1301,8 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
 
   void (async () => {
     try {
-      const completion = await openai.chat.completions.create({
-        model:                 AI_MODEL,
-        max_tokens:            16000,
-        response_format:       { type: "json_object" },
+      const genAiResult = await invokeAI({
+        feature:        "proposal_generation",
         messages: [
           {
             role: "system",
@@ -1337,9 +1333,12 @@ Sections to write (return all 15):
 ${SECTION_DEFINITIONS.map((s) => `- ${s.key}: ${s.title}`).join("\n")}`,
           },
         ],
+        maxTokens:      16000,
+        responseFormat: { type: "json_object" },
+        proposalId:     draft.id,
       });
 
-      const raw = completion.choices[0]?.message?.content ?? "{}";
+      const raw = genAiResult.content;
       const data = JSON.parse(raw) as { sections?: { key: string; content: string }[] };
       const sections: { key: string; content: string }[] = data.sections ?? [];
 
@@ -1347,7 +1346,7 @@ ${SECTION_DEFINITIONS.map((s) => `- ${s.key}: ${s.title}`).join("\n")}`,
         .insert(proposalGenerationRunsTable)
         .values({
           proposalId:            draft.id,
-          model:                 AI_MODEL,
+          model:                 genAiResult.model,
           promptVersion:         "2.0",
           retrievedKnowledgeIds: "[]",
           status:                "completed",
@@ -1510,50 +1509,15 @@ router.post("/tenders/manual", (req, res, next) => {
       return;
     }
 
-    // Use AI to extract title, agency, etc. from the raw document text
-    const extractCompletion = await openai.chat.completions.create({
-      model: AI_MODEL,
-      max_completion_tokens: 500,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `Extract structured tender metadata from the document text. Return JSON:
-{
-  "title": string (tender/RFP title, max 200 chars),
-  "agency": string (issuing organisation, max 150 chars),
-  "description": string (scope/objective summary, max 1000 chars),
-  "category": string (e.g. "Marketing", "Communications", "IT", "Construction"),
-  "deadline": string | null (ISO date if found, else null),
-  "valueAmount": string | null (contract value if stated, else null),
-  "contactInfo": string | null
-}`,
-        },
-        {
-          role: "user",
-          content: `Extract metadata from this tender document:\n\n${rawText.slice(0, 8000)}`,
-        },
-      ],
-    });
-
-    const metaRaw  = extractCompletion.choices[0]?.message?.content ?? "{}";
-    const meta     = JSON.parse(metaRaw) as {
-      title?: string; agency?: string; description?: string; category?: string;
-      deadline?: string | null; valueAmount?: string | null; contactInfo?: string | null;
-    };
-
-    if (!meta.title || !meta.agency) {
-      res.status(400).json({ error: "Could not identify a tender title or issuing agency in the document." });
-      return;
-    }
+    const meta = extractTenderMetadata(rawText.slice(0, 8000));
 
     const [created] = await db
       .insert(tendersTable)
       .values({
-        title:       meta.title.slice(0, 200),
-        agency:      meta.agency.slice(0, 150),
-        description: meta.description?.slice(0, 2000) ?? rawText.slice(0, 500),
-        category:    meta.category ?? "General",
+        title:       (meta.title    ?? "Needs review — title not detected").slice(0, 200),
+        agency:      (meta.agency   ?? "Needs review — agency not detected").slice(0, 150),
+        description: (meta.description || rawText.slice(0, 500)).slice(0, 2000),
+        category:    meta.category,
         deadline:    meta.deadline ? new Date(meta.deadline) : null,
         valueAmount: meta.valueAmount ?? null,
         sourceUrl:   sourceUrl ?? null,
@@ -1671,52 +1635,19 @@ router.post("/tenders/extract-text", async (req, res) => {
   }
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: AI_MODEL,
-      max_completion_tokens: 600,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `Extract structured tender metadata from the pasted text. Return JSON:
-{
-  "title": string,
-  "agency": string,
-  "description": string (scope summary ≤ 800 chars),
-  "category": string,
-  "deadline": string | null (ISO date),
-  "valueAmount": string | null,
-  "contactInfo": string | null,
-  "sourceUrl": string | null
-}`,
-        },
-        { role: "user", content: text.slice(0, 6000) },
-      ],
-    });
-
-    const raw  = completion.choices[0]?.message?.content ?? "{}";
-    const data = JSON.parse(raw) as {
-      title?: string; agency?: string; description?: string; category?: string;
-      deadline?: string | null; valueAmount?: string | null;
-      contactInfo?: string | null; sourceUrl?: string | null;
-    };
-
-    if (!data.title || !data.agency) {
-      res.status(400).json({ error: "Could not identify title/agency in the text." });
-      return;
-    }
+    const meta = extractTenderMetadata(text.slice(0, 6000));
 
     const [created] = await db
       .insert(tendersTable)
       .values({
-        title:       data.title,
-        agency:      data.agency,
-        description: data.description ?? text.slice(0, 800),
-        category:    data.category    ?? "General",
-        deadline:    data.deadline    ? new Date(data.deadline) : null,
-        valueAmount: data.valueAmount ?? null,
-        sourceUrl:   data.sourceUrl   ?? null,
-        contactInfo: data.contactInfo ?? null,
+        title:       (meta.title    ?? "Needs review — title not detected").slice(0, 200),
+        agency:      (meta.agency   ?? "Needs review — agency not detected").slice(0, 150),
+        description: (meta.description || text.slice(0, 800)).slice(0, 2000),
+        category:    meta.category,
+        deadline:    meta.deadline    ? new Date(meta.deadline) : null,
+        valueAmount: meta.valueAmount ?? null,
+        sourceUrl:   null,
+        contactInfo: meta.contactInfo ?? null,
         rawText:     text,
         status:      "opportunity_found",
         recommendationScore: 0,
@@ -1785,9 +1716,8 @@ router.post("/opportunities/:id/generate-bid", async (req, res) => {
       ? `Positioning: ${strategy.positioning}\nWin Themes: ${JSON.parse(strategy.winThemes ?? "[]").join(", ")}\nMessaging: ${strategy.messagingGuidance}`
       : "";
 
-    const proposalCompletion = await openai.chat.completions.create({
-      model: AI_MODEL,
-      max_completion_tokens: 4000,
+    const { content: proposalContent } = await invokeAI({
+      feature:      "proposal_generation",
       messages: [
         {
           role: "system",
@@ -1798,9 +1728,9 @@ router.post("/opportunities/:id/generate-bid", async (req, res) => {
           content: `Write a complete bid proposal for:\n\nTitle: ${tender.title}\nAgency: ${tender.agency}\nDeadline: ${tender.deadline ? new Date(tender.deadline).toDateString() : "Not specified"}\nValue: ${tender.valueAmount ?? "Not specified"}\n\nScope:\n${tender.description}\n\nRequirements:\n${requirementsText}\n\nStrategy:\n${strategyText}`,
         },
       ],
+      maxTokens:    4000,
+      opportunityId,
     });
-
-    const proposalContent = proposalCompletion.choices[0]?.message?.content ?? "";
     const docTitle = `ONWRD Bid — ${tender.title}`.slice(0, 100);
 
     const { createGoogleDoc } = await import("../lib/google-docs.js");

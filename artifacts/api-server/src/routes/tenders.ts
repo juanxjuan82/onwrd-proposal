@@ -2,7 +2,8 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { tendersTable, proposalsTable } from "@workspace/db";
 import { eq, desc } from "drizzle-orm";
-import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
+import { invokeAI } from "../lib/ai-gateway.js";
+import { extractTenderMetadata } from "../lib/metadata-extractor.js";
 import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
 import {
   CreateTenderBody,
@@ -220,50 +221,29 @@ router.post("/tenders/extract-from-text", async (req, res) => {
   }
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: AI_MODEL,
-      max_tokens: 4000,
-      messages: [
-        {
-          role: "system",
-          content:
-            "You extract structured tender/RFP/procurement opportunity data from pasted text (typically copied from a government procurement website). Return ONLY valid JSON with these fields: title (the tender title), agency (the issuing organization), description (a comprehensive summary of the scope/requirements, 3-8 sentences), category (one of: Marketing, Advertising, Branding, Communications, Tourism, Digital, Media, Events, Production, Web, Design, IT, Construction, Consulting, General — pick the closest), deadline (ISO 8601 date string or null if not stated), valueAmount (estimated value as a string like 'BSD 250,000' or null), contactInfo (procurement contact email/phone or null). If the text does not appear to describe a tender opportunity, return {\"error\": \"not a tender\"}.",
-        },
-        { role: "user", content: text },
-      ],
-      response_format: { type: "json_object" },
-    });
-
-    const raw = completion.choices[0]?.message?.content ?? "{}";
-    const data = JSON.parse(raw);
-
-    if (data.error || !data.title || !data.agency || !data.description) {
-      res.status(400).json({
-        error:
-          "AI could not extract a tender from the pasted text. Make sure the text describes a procurement opportunity with a title, issuing agency, and scope.",
-      });
-      return;
-    }
-
-    const category = data.category || "General";
-    const score = scoreTender(data.title, data.description, category);
-    const deadline = data.deadline ? new Date(data.deadline) : null;
+    const meta        = extractTenderMetadata(text);
+    const title       = meta.title    ?? "Needs review — title not detected";
+    const agency      = meta.agency   ?? "Needs review — agency not detected";
+    const description = meta.description || text.slice(0, 800);
+    const category    = meta.category;
+    const score       = scoreTender(title, description, category);
+    const deadline    = meta.deadline ? new Date(meta.deadline) : null;
 
     const [created] = await db
       .insert(tendersTable)
       .values({
-        title: String(data.title),
-        agency: String(data.agency),
-        description: String(data.description),
+        title,
+        agency,
+        description,
         category,
-        deadline: deadline && !isNaN(deadline.getTime()) ? deadline : null,
-        valueAmount: data.valueAmount ? String(data.valueAmount) : null,
-        sourceUrl: sourceUrl ?? null,
-        contactInfo: data.contactInfo ? String(data.contactInfo) : null,
+        deadline:    deadline && !isNaN(deadline.getTime()) ? deadline : null,
+        valueAmount: meta.valueAmount ?? null,
+        sourceUrl:   sourceUrl ?? null,
+        contactInfo: meta.contactInfo ?? null,
         recommendationScore: score,
       })
       .returning();
-    res.status(201).json(created);
+    res.status(201).json({ ...created, needsReview: meta.needsReview });
   } catch (err) {
     console.error("[tender extract] failed:", err);
     res.status(500).json({ error: "Extraction failed. Please try again or add manually." });
@@ -322,9 +302,8 @@ ONWRD intends to respond to this tender. Generate a full proposal positioning ON
   // Fire AI generation in background
   (async () => {
     try {
-      const completion = await openai.chat.completions.create({
-        model: AI_MODEL,
-        max_tokens: 16000,
+      const { content } = await invokeAI({
+        feature: "proposal_generation",
         messages: [
           {
             role: "system",
@@ -333,11 +312,12 @@ ONWRD intends to respond to this tender. Generate a full proposal positioning ON
           },
           { role: "user", content: briefText },
         ],
-        response_format: { type: "json_object" },
+        maxTokens:      16000,
+        responseFormat: { type: "json_object" },
+        proposalId:     draft.id,
       });
 
-      const raw = completion.choices[0]?.message?.content ?? "{}";
-      const parsedAi = JSON.parse(raw);
+      const parsedAi = JSON.parse(content);
       await db
         .update(proposalsTable)
         .set({
