@@ -181,48 +181,36 @@ describe("concurrent runCrawler() calls", () => {
     assert.ok(threw, "runCrawler must throw when the lock is already held");
   });
 
-  it("concurrent runCrawler calls: at least one proceeds; any failure is lock-held", async () => {
-    // Fire both simultaneously. Due to DB-level SELECT FOR UPDATE:
-    //   - One acquires the lock and runs (success or internal error).
-    //   - The other may be rejected with a lock-held error if r1 still holds
-    //     the lock when r2 checks, OR r2 may succeed if r1 released first.
-    // Either outcome is acceptable; what is NOT acceptable is any other kind
-    // of failure (e.g., a DB connection error or an uncaught exception).
-    const [r1, r2] = await Promise.allSettled([
-      runCrawler(99999),
-      runCrawler(99999),
-    ]);
+  it("with lock pre-held: both concurrent runCrawler calls are rejected with lock-held error", async () => {
+    // Hold the lock before either concurrent call begins — both must be rejected.
+    const held = await acquireCrawlLock();
+    assert.equal(held, true, "precondition: lock must be acquirable before the test");
 
-    const isLockHeldError = (r: PromiseSettledResult<unknown>): boolean =>
-      r.status === "rejected" &&
-      r.reason instanceof Error &&
-      (
-        r.reason.message.includes("in progress") ||
-        r.reason.message.includes("running") ||
-        r.reason.message.includes("lock")
-      );
+    try {
+      const [r1, r2] = await Promise.allSettled([
+        runCrawler(99999),
+        runCrawler(99999),
+      ]);
 
-    const successes      = [r1, r2].filter(r => r.status === "fulfilled");
-    const lockHeldErrors = [r1, r2].filter(isLockHeldError);
-    const unexpectedErrors = [r1, r2].filter(
-      r => r.status === "rejected" && !isLockHeldError(r),
-    );
-
-    assert.equal(
-      unexpectedErrors.length,
-      0,
-      `all rejections must be lock-held errors; unexpected: ${
-        unexpectedErrors.map(r => (r as PromiseRejectedResult).reason).join(", ")
-      }`,
-    );
-    assert.ok(
-      successes.length >= 1,
-      "at least one concurrent runCrawler must succeed",
-    );
-    assert.ok(
-      successes.length + lockHeldErrors.length === 2,
-      "every result must be either a success or a lock-held rejection",
-    );
+      for (const [i, result] of ([[0, r1], [1, r2]] as const)) {
+        assert.equal(
+          result.status,
+          "rejected",
+          `call ${i + 1} must be rejected when the lock is pre-held`,
+        );
+        if (result.status === "rejected") {
+          const msg = result.reason instanceof Error
+            ? result.reason.message
+            : String(result.reason);
+          assert.ok(
+            msg.includes("in progress") || msg.includes("running") || msg.includes("lock"),
+            `call ${i + 1}: expected a lock-held error message, got: ${msg}`,
+          );
+        }
+      }
+    } finally {
+      await releaseCrawlLock();
+    }
   });
 
   it("lock is free after both concurrent crawlers settle", async () => {

@@ -207,6 +207,51 @@ describe("ai-circuit: gateway circuit/retry integration", () => {
 
       assert.equal(providerCalls, 1, "provider must be called exactly once (no retry without flag)");
     });
+
+    it("retry uses exactly 1 quota slot regardless of 2 provider attempts", async () => {
+      const today = new Date().toISOString().split("T")[0]!;
+
+      // Read global quota before.
+      const [quotaBefore] = await db
+        .select({ calls: aiDailyQuotaTable.calls })
+        .from(aiDailyQuotaTable)
+        .where(and(
+          eq(aiDailyQuotaTable.date, today),
+          eq(aiDailyQuotaTable.scope, "global"),
+        ));
+      const callsBefore = quotaBefore?.calls ?? 0;
+
+      let providerHits = 0;
+      __setOpenAICompletionForTesting(async () => {
+        providerHits++;
+        if (providerHits === 1) {
+          const err: any = new Error("rate limit exceeded");
+          err.status  = 429;
+          err.headers = { "retry-after": "0.001" };
+          throw err;
+        }
+        return makeSuccessCompletion("retry quota ok");
+      });
+
+      await invokeAI({ ...BASE_PARAMS, permitRetry: true });
+      assert.equal(providerHits, 2, "provider must be called twice (initial + retry)");
+
+      // Read global quota after.
+      const [quotaAfter] = await db
+        .select({ calls: aiDailyQuotaTable.calls })
+        .from(aiDailyQuotaTable)
+        .where(and(
+          eq(aiDailyQuotaTable.date, today),
+          eq(aiDailyQuotaTable.scope, "global"),
+        ));
+      const callsAfter = quotaAfter?.calls ?? 0;
+
+      assert.equal(
+        callsAfter - callsBefore,
+        1,
+        "despite 2 provider attempts, only 1 quota slot must be consumed (atomicReserveAndLog runs once per invokeAI call)",
+      );
+    });
   });
 
   // ── Feature-scope daily call-limit concurrency ─────────────────────────────
@@ -353,6 +398,64 @@ describe("ai-circuit: gateway circuit/retry integration", () => {
       assert.ok(logs.length > 0,       "must have at least one 'failed/AbortError' log entry");
       assert.equal(logs[0]!.status,    "failed",     "log status must be 'failed'");
       assert.equal(logs[0]!.errorCode, "AbortError", "errorCode must be 'AbortError'");
+    });
+
+    it("AbortSignal.timeout(1ms) produces a 'failed' log entry with cancellation errorCode", async () => {
+      // The mock waits 20 ms so the 1-ms timeout fires before the mock resolves.
+      // It then throws the signal's reason — a DOMException("TimeoutError").
+      // The gateway must catch this, call logFail(), and re-throw.
+      __setOpenAICompletionForTesting(async (_body: unknown, opts: Record<string, unknown> | undefined) => {
+        await new Promise<void>((r) => setTimeout(r, 20));
+        const sig = opts?.signal as AbortSignal | undefined;
+        if (sig?.aborted) {
+          throw sig.reason as Error;
+        }
+        return makeSuccessCompletion("should not reach");
+      });
+
+      const before = new Date(Date.now() - 100);
+      let threw = false;
+
+      try {
+        await invokeAI({
+          ...BASE_PARAMS,
+          messages: [{ role: "user", content: "timeout terminal status test" }],
+          signal:   AbortSignal.timeout(1),
+        });
+      } catch {
+        threw = true;
+      }
+
+      assert.ok(threw, "invokeAI must throw when the AbortSignal times out");
+
+      // logFail() is fire-and-forget — allow it to settle.
+      await new Promise((r) => setTimeout(r, 200));
+
+      // Find the most-recent failed entry written after this test started.
+      const [entry] = await db
+        .select({
+          status:    aiUsageLogTable.status,
+          errorCode: aiUsageLogTable.errorCode,
+        })
+        .from(aiUsageLogTable)
+        .where(
+          and(
+            eq(aiUsageLogTable.status, "failed"),
+            gte(aiUsageLogTable.startedAt, before),
+          ),
+        )
+        .orderBy(desc(aiUsageLogTable.id))
+        .limit(1);
+
+      assert.ok(entry, "must have a failed log entry after signal timeout");
+      assert.equal(entry.status, "failed", "log status must be 'failed'");
+      // AbortSignal.timeout() fires a DOMException named "TimeoutError".
+      // The gateway stores err.name as the errorCode, so either TimeoutError or
+      // AbortError is acceptable depending on the runtime DOMException name.
+      assert.ok(
+        entry.errorCode === "TimeoutError" || entry.errorCode === "AbortError",
+        `errorCode must be TimeoutError or AbortError, got: ${entry.errorCode}`,
+      );
     });
   });
 });

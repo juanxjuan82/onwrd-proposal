@@ -2,8 +2,9 @@
  * AI Workflow Call-Count & OperationKey Idempotency Tests
  *
  * Verifies that:
- *   1. Explicit AI workflows (e.g. extract-requirements) hit invokeAI exactly
- *      once per invocation with no extra calls.
+ *   1. Explicit AI workflows (extract-requirements, generate-strategy,
+ *      generate-proposal, run-critic) hit invokeAI exactly once per
+ *      invocation with no extra calls.
  *   2. The operationKey mechanism (AI_MAX_CALLS_PER_OPERATION) prevents
  *      duplicate invocations within a day.
  *   3. Different operationKeys don't interfere with each other.
@@ -19,6 +20,8 @@
 import http from "node:http";
 import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { db } from "@workspace/db";
+import { proposalsTable, proposalSectionsTable } from "@workspace/db";
 import app from "../app.js";
 import {
   invokeAI,
@@ -96,6 +99,44 @@ describe("ai-workflow: call-count and operationKey idempotency", () => {
     });
   }
 
+  function makeStrategyContent(): string {
+    return JSON.stringify({
+      positioning:              "Trusted Caribbean digital partner with proven regional RFP experience.",
+      winThemes:                ["Local expertise", "Proven ROI", "Regulatory compliance", "Community impact"],
+      recommendedCaseStudies:   ["Ministry of Tourism Digital Campaign"],
+      risks:                    ["Timeline", "Scope creep"],
+      messagingGuidance:        "Lead with local presence and measurable, documented outcomes.",
+    });
+  }
+
+  function makeProposalContent(): string {
+    return JSON.stringify({
+      sections: [
+        { key: "executive_summary",     content: "ONWRD is the right partner for this opportunity." },
+        { key: "company_overview",      content: "ONWRD is a full-service agency based in Nassau, Bahamas." },
+        { key: "understanding",         content: "We understand the client's requirements comprehensively." },
+        { key: "approach",              content: "Our approach is structured and evidence-based." },
+        { key: "methodology",           content: "We use proven methodologies tailored to Caribbean contexts." },
+        { key: "team",                  content: "Our team has deep regional expertise." },
+        { key: "case_studies",          content: "See Ministry of Tourism and BISX campaigns." },
+        { key: "timeline",              content: "Milestone-driven 12-week delivery plan." },
+        { key: "budget",                content: "[NEEDS ONWRD INPUT: pricing schedule in Appendix A]" },
+        { key: "evaluation",            content: "We will measure success via agreed KPIs." },
+        { key: "risk_management",       content: "Risk register attached; key mitigations outlined." },
+        { key: "compliance",            content: "All regulatory requirements are met." },
+        { key: "sustainability",        content: "Our approach supports long-term community benefit." },
+        { key: "innovation",            content: "Digital-first delivery for maximum efficiency." },
+        { key: "conclusion",            content: "We look forward to partnering on this initiative." },
+      ],
+    });
+  }
+
+  function makeCriticContent(): string {
+    return JSON.stringify({
+      sections: [{ sectionKey: "executive_summary", issues: [], severity: "clean" }],
+    });
+  }
+
   // ── Route-level call-count: extract-requirements ──────────────────────────
 
   describe("extract-requirements call count", () => {
@@ -131,7 +172,6 @@ describe("ai-workflow: call-count and operationKey idempotency", () => {
       const res1 = await fetch(`${baseUrl}/api/opportunities/${tenderId}/extract-requirements`, {
         method: "POST",
       });
-      // Allow 200 or 409 (already active) — both are acceptable non-500 results.
       assert.notEqual(res1.status, 500, "first extract call must not 500");
 
       const countAfterFirst = callCount;
@@ -141,13 +181,143 @@ describe("ai-workflow: call-count and operationKey idempotency", () => {
       });
       assert.notEqual(res2.status, 500, "second extract call must not 500");
 
-      // Each non-blocked call incurs exactly 1 AI call.
       const secondCallMade = res2.status !== 409;
       if (secondCallMade) {
         assert.equal(callCount, countAfterFirst + 1, "each extract invocation adds exactly 1 AI call");
       } else {
         assert.equal(callCount, countAfterFirst, "409-blocked call must not add any AI calls");
       }
+    });
+  });
+
+  // ── Route-level call-count: generate-strategy (async background job) ──────
+
+  describe("generate-strategy call count", () => {
+    it("POST /api/opportunities/:id/generate-strategy makes exactly 1 AI call", async () => {
+      const tenderId = await createTender();
+
+      let strategyCallCount = 0;
+      let resolveFirstCall: (() => void) | undefined;
+      const firstCallPromise = new Promise<void>((resolve) => {
+        resolveFirstCall = resolve;
+      });
+
+      __setInvokeAISpy(async (_params: InvokeAIParams): Promise<AIResult> => {
+        strategyCallCount++;
+        resolveFirstCall?.();
+        resolveFirstCall = undefined;
+        return { content: makeStrategyContent(), model: "gpt-4o-mini-mock" };
+      });
+
+      const res = await fetch(`${baseUrl}/api/opportunities/${tenderId}/generate-strategy`, {
+        method: "POST",
+      });
+
+      assert.notEqual(res.status, 500, `generate-strategy returned ${res.status}`);
+      assert.notEqual(res.status, 409, "generate-strategy must not 409 on a freshly created tender");
+
+      await Promise.race([
+        firstCallPromise,
+        new Promise<void>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("generate-strategy spy not called within 7s")),
+            7000,
+          )
+        ),
+      ]);
+
+      assert.equal(strategyCallCount, 1, "generate-strategy must invoke AI exactly once");
+    });
+  });
+
+  // ── Route-level call-count: generate-proposal (async background job) ──────
+
+  describe("generate-proposal call count", () => {
+    it("POST /api/opportunities/:id/generate-proposal makes exactly 1 AI call (all sections in one batch)", async () => {
+      const tenderId = await createTender();
+
+      let proposalCallCount = 0;
+      let resolveFirstCall: (() => void) | undefined;
+      const firstCallPromise = new Promise<void>((resolve) => {
+        resolveFirstCall = resolve;
+      });
+
+      __setInvokeAISpy(async (_params: InvokeAIParams): Promise<AIResult> => {
+        proposalCallCount++;
+        resolveFirstCall?.();
+        resolveFirstCall = undefined;
+        return { content: makeProposalContent(), model: "gpt-4o-mini-mock" };
+      });
+
+      const res = await fetch(`${baseUrl}/api/opportunities/${tenderId}/generate-proposal`, {
+        method: "POST",
+      });
+
+      assert.ok(
+        res.status === 200 || res.status === 201,
+        `generate-proposal must return 200/201, got ${res.status}`,
+      );
+
+      await Promise.race([
+        firstCallPromise,
+        new Promise<void>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("generate-proposal spy not called within 15s")),
+            15000,
+          )
+        ),
+      ]);
+
+      assert.equal(
+        proposalCallCount,
+        1,
+        "generate-proposal must make exactly 1 AI call (single batch for all 15 sections)",
+      );
+    });
+  });
+
+  // ── Route-level call-count: run-critic (synchronous) ─────────────────────
+
+  describe("section-regeneration (run-critic) call count", () => {
+    it("POST /api/proposals/:id/run-critic makes exactly 1 AI call", async () => {
+      const tenderId = await createTender();
+
+      // Insert proposal and section directly in DB to avoid race conditions
+      // with any background work from generate-proposal.
+      const [proposal] = await db
+        .insert(proposalsTable)
+        .values({
+          clientName:      "Test Agency",
+          industry:        "Infrastructure",
+          briefText:       "Test brief for run-critic route call-count test.",
+          proposalContent: "Test proposal content.",
+          status:          "proposal_drafting",
+          tenderId,
+        })
+        .returning();
+
+      await db.insert(proposalSectionsTable).values({
+        proposalId: proposal.id,
+        sectionKey: "executive_summary",
+        title:      "Executive Summary",
+        content:    "ONWRD brings extensive regional experience to infrastructure projects.",
+        status:     "completed",
+        orderIndex: 1,
+      });
+
+      let criticCallCount = 0;
+      __setInvokeAISpy(async (_params: InvokeAIParams): Promise<AIResult> => {
+        criticCallCount++;
+        return { content: makeCriticContent(), model: "gpt-4o-mini-mock" };
+      });
+
+      const criticRes = await fetch(`${baseUrl}/api/proposals/${proposal.id}/run-critic`, {
+        method: "POST",
+      });
+
+      assert.notEqual(criticRes.status, 500, `run-critic returned ${criticRes.status}`);
+      assert.notEqual(criticRes.status, 404, "proposal must be found");
+      assert.equal(criticCallCount, 1, "run-critic must invoke AI exactly once (synchronous)");
     });
   });
 
@@ -173,11 +343,9 @@ describe("ai-workflow: call-count and operationKey idempotency", () => {
       };
 
       try {
-        // First call must succeed.
         const r1 = await invokeAI(params);
         assert.equal(typeof r1.content, "string", "first call must return content");
 
-        // Second call with same operationKey must be blocked.
         let secondErr: unknown;
         try {
           await invokeAI({ ...params, messages: [{ role: "user", content: "duplicate call" }] });
@@ -247,7 +415,6 @@ describe("ai-workflow: call-count and operationKey idempotency", () => {
       const key2 = `per-key-${ts}-2`;
 
       try {
-        // Both calls use the same feature but different operationKeys — both must succeed.
         const [r1, r2] = await Promise.all([
           invokeAI({
             feature:      "requirements_extraction",
