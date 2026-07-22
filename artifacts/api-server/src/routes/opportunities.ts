@@ -496,6 +496,185 @@ async function autoAnalyzeOpportunity(
   }).where(and(eq(tendersTable.id, tenderId), eq(tendersTable.analysisRunId, runId)));
 }
 
+// ── Extraction-only pipeline ─────────────────────────────────────────────────
+// Requirements extracting → bid_scoring → requirements_extracted (or no_bid).
+// Does NOT run strategy generation — that is a separate explicit user action.
+async function runExtractionPipeline(
+  tenderId: number,
+  runId: string = crypto.randomUUID(),
+): Promise<void> {
+  const controller = new AbortController();
+  const { signal } = controller;
+
+  const [current] = await db
+    .select({ status: tendersTable.status })
+    .from(tendersTable)
+    .where(eq(tendersTable.id, tenderId));
+  if (!current) return;
+  if (isActiveStatus(current.status)) {
+    console.warn(`[extraction] Tender ${tenderId} already in status "${current.status}" — skipping`);
+    return;
+  }
+
+  activeRuns.set(tenderId, { runId, controller, step: "requirements_extracting" });
+
+  const fail = async (step: string, err: unknown): Promise<void> => {
+    activeRuns.delete(tenderId);
+    const { code } = classifyError(err);
+    console.error(
+      `[extraction] tender=${tenderId} step="${step}" code=${code}:`,
+      (err instanceof Error ? err.message : String(err)).slice(0, 200),
+    );
+    await db.update(tendersTable).set({
+      status:              "analysis_failed",
+      failedStep:          step,
+      failedErrorCode:     code,
+      analysisCompletedAt: new Date(),
+      updatedAt:           new Date(),
+    }).where(and(eq(tendersTable.id, tenderId), eq(tendersTable.analysisRunId, runId)));
+  };
+
+  await db.update(tendersTable).set({
+    status:              "requirements_extracting",
+    analysisRunId:       runId,
+    analysisStartedAt:   new Date(),
+    aiInputTokens:       0,
+    aiOutputTokens:      0,
+    analysisCompletedAt: null,
+    cancelledAt:         null,
+    failedStep:          null,
+    failedErrorCode:     null,
+    aiModelUsed:         null,
+    completedSteps:      JSON.stringify([]),
+    updatedAt:           new Date(),
+  }).where(eq(tendersTable.id, tenderId));
+
+  // ① Requirements extraction (AI)
+  if (signal.aborted) { activeRuns.delete(tenderId); return; }
+  try {
+    await runExtractRequirements(tenderId, signal);
+  } catch (err) {
+    if (signal.aborted) { activeRuns.delete(tenderId); return; }
+    await fail("requirements_extracting", err);
+    return;
+  }
+
+  const [advancedToBidScoring] = await db.update(tendersTable).set({
+    status:         "bid_scoring",
+    completedSteps: JSON.stringify(["requirements_extracting"]),
+    updatedAt:      new Date(),
+  }).where(and(
+    eq(tendersTable.id, tenderId),
+    eq(tendersTable.analysisRunId, runId),
+    eq(tendersTable.status, "requirements_extracting"),
+  )).returning({ id: tendersTable.id });
+  if (!advancedToBidScoring) { activeRuns.delete(tenderId); return; } // cancelled
+  if (signal.aborted) { activeRuns.delete(tenderId); return; }
+
+  // ② Bid scoring (deterministic — no AI)
+  activeRuns.get(tenderId)!.step = "bid_scoring";
+  let bidScore: Awaited<ReturnType<typeof runBidScoring>>;
+  try {
+    bidScore = await runBidScoring(tenderId, signal);
+  } catch (err) {
+    if (signal.aborted) { activeRuns.delete(tenderId); return; }
+    await fail("bid_scoring", err);
+    return;
+  }
+
+  const completedSteps = ["requirements_extracting", "bid_scoring"];
+  activeRuns.delete(tenderId);
+
+  if (bidScore.fitLevel === "no_bid") {
+    await db.update(tendersTable).set({
+      status:              "no_bid",
+      analysisCompletedAt: new Date(),
+      completedSteps:      JSON.stringify(completedSteps),
+      updatedAt:           new Date(),
+    }).where(and(eq(tendersTable.id, tenderId), eq(tendersTable.analysisRunId, runId)));
+    return;
+  }
+
+  await db.update(tendersTable).set({
+    status:              "requirements_extracted",
+    analysisCompletedAt: new Date(),
+    completedSteps:      JSON.stringify(completedSteps),
+    updatedAt:           new Date(),
+  }).where(and(eq(tendersTable.id, tenderId), eq(tendersTable.analysisRunId, runId)));
+}
+
+// ── Bounded strategy generation ───────────────────────────────────────────────
+// Separate explicit action — never triggered automatically.
+// requirements_extracted → strategy_generating → screened.
+async function runBoundedStrategy(
+  tenderId: number,
+  runId: string,
+): Promise<void> {
+  const controller = new AbortController();
+  const { signal } = controller;
+
+  const [current] = await db
+    .select({ status: tendersTable.status, completedSteps: tendersTable.completedSteps })
+    .from(tendersTable)
+    .where(eq(tendersTable.id, tenderId));
+  if (!current) return;
+  if (isActiveStatus(current.status)) {
+    console.warn(`[strategy] Tender ${tenderId} already in status "${current.status}" — skipping`);
+    return;
+  }
+
+  activeRuns.set(tenderId, { runId, controller, step: "strategy_generating" });
+
+  const fail = async (err: unknown): Promise<void> => {
+    activeRuns.delete(tenderId);
+    const { code } = classifyError(err);
+    console.error(
+      `[strategy] tender=${tenderId} code=${code}:`,
+      (err instanceof Error ? err.message : String(err)).slice(0, 200),
+    );
+    await db.update(tendersTable).set({
+      status:              "analysis_failed",
+      failedStep:          "strategy_generating",
+      failedErrorCode:     code,
+      analysisCompletedAt: new Date(),
+      updatedAt:           new Date(),
+    }).where(and(eq(tendersTable.id, tenderId), eq(tendersTable.analysisRunId, runId)));
+  };
+
+  await db.update(tendersTable).set({
+    status:              "strategy_generating",
+    analysisRunId:       runId,
+    analysisCompletedAt: null,
+    cancelledAt:         null,
+    failedStep:          null,
+    failedErrorCode:     null,
+    updatedAt:           new Date(),
+  }).where(eq(tendersTable.id, tenderId));
+
+  if (signal.aborted) { activeRuns.delete(tenderId); return; }
+
+  try {
+    await runGenerateStrategy(tenderId, signal);
+  } catch (err) {
+    if (signal.aborted) { activeRuns.delete(tenderId); return; }
+    await fail(err);
+    return;
+  }
+
+  activeRuns.delete(tenderId);
+
+  let completed: string[] = [];
+  try { completed = JSON.parse(current.completedSteps ?? "[]") as string[]; } catch { /* noop */ }
+  completed = [...new Set([...completed, "strategy_generating"])];
+
+  await db.update(tendersTable).set({
+    status:              "screened",
+    analysisCompletedAt: new Date(),
+    completedSteps:      JSON.stringify(completed),
+    updatedAt:           new Date(),
+  }).where(and(eq(tendersTable.id, tenderId), eq(tendersTable.analysisRunId, runId)));
+}
+
 // ── List opportunities (with latest bid score per tender) ───────────────────
 router.get("/opportunities", async (req, res) => {
   try {
@@ -555,13 +734,18 @@ router.post("/opportunities", async (req, res) => {
       })
       .returning();
 
-    // Auto-score immediately — deterministic rules, no AI call
+    // Deterministic scoring — no AI call. Sets pending_review or no_bid.
+    let finalStatus = "pending_review";
     try {
-      await applyDeterministicScore(created.id);
+      const score = await applyDeterministicScore(created.id);
+      finalStatus = score.fitLevel === "no_bid" ? "no_bid" : "pending_review";
     } catch (scoreErr) {
       req.log.warn({ err: scoreErr }, "Auto-score after create failed — retry via /score");
     }
-    res.status(201).json(created);
+    await db.update(tendersTable)
+      .set({ status: finalStatus, updatedAt: new Date() })
+      .where(eq(tendersTable.id, created.id));
+    res.status(201).json({ ...created, status: finalStatus });
   } catch (err) {
     req.log.error({ err }, "Error creating opportunity");
     res.status(500).json({ error: "Failed to create opportunity" });
@@ -724,6 +908,85 @@ router.post("/opportunities/:id/start-bid", async (req, res) => {
   }
 });
 
+// ── Convert opportunity to proposal + start extraction pipeline ───────────────
+// Idempotent — returns existing proposal if one is already linked.
+// Fires runExtractionPipeline in the background; client redirects immediately.
+router.post("/opportunities/:id/convert", async (req, res) => {
+  const id = Number(req.params.id);
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  try {
+    const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, id));
+    if (!tender) { res.status(404).json({ error: "Opportunity not found" }); return; }
+
+    // Idempotent: return existing linked proposal
+    if (tender.proposalId) {
+      const [existing] = await db
+        .select({ id: proposalsTable.id })
+        .from(proposalsTable)
+        .where(eq(proposalsTable.id, tender.proposalId));
+      if (existing) {
+        res.json({ proposalId: existing.id, tenderId: id, existing: true });
+        return;
+      }
+    }
+
+    // Belt-and-suspenders: check proposals table by tenderId (unique constraint)
+    const [existingByTender] = await db
+      .select({ id: proposalsTable.id })
+      .from(proposalsTable)
+      .where(eq(proposalsTable.tenderId, id));
+    if (existingByTender) {
+      await db.update(tendersTable)
+        .set({ proposalId: existingByTender.id, updatedAt: new Date() })
+        .where(eq(tendersTable.id, id));
+      res.json({ proposalId: existingByTender.id, tenderId: id, existing: true });
+      return;
+    }
+
+    // Block if already extracting
+    if (isActiveStatus(tender.status)) {
+      res.status(409).json({ error: `Analysis already running (${tender.status}). Wait or cancel first.` });
+      return;
+    }
+
+    // Build brief text from tender fields
+    const briefParts: string[] = [
+      `Title: ${tender.title}`,
+      `Client: ${tender.agency}`,
+      `Category: ${tender.category}`,
+    ];
+    if (tender.deadline)    briefParts.push(`Deadline: ${new Date(tender.deadline).toDateString()}`);
+    if (tender.valueAmount) briefParts.push(`Value: ${tender.valueAmount}`);
+    briefParts.push("", tender.description);
+    if (tender.rawText)     briefParts.push(`\nFull RFP:\n${tender.rawText}`);
+
+    const [proposal] = await db
+      .insert(proposalsTable)
+      .values({
+        clientName:      tender.agency,
+        industry:        tender.category,
+        status:          "draft",
+        briefText:       briefParts.join("\n"),
+        proposalContent: "",
+        tenderId:        id,
+      })
+      .returning();
+
+    await db.update(tendersTable)
+      .set({ proposalId: proposal.id, updatedAt: new Date() })
+      .where(eq(tendersTable.id, id));
+
+    // Return immediately — client navigates to proposal; extraction runs in background
+    const runId = crypto.randomUUID();
+    res.json({ proposalId: proposal.id, tenderId: id, existing: false, analysisRunId: runId });
+    void runExtractionPipeline(id, runId);
+  } catch (err) {
+    req.log.error({ err }, "Error converting opportunity");
+    res.status(500).json({ error: "Failed to convert opportunity to proposal" });
+  }
+});
+
 // ── Trigger (or re-trigger) full analysis ────────────────────────────────────
 // Returns 409 if an analysis is already running for this tender.
 router.post("/opportunities/:id/analyze", async (req, res) => {
@@ -748,7 +1011,7 @@ router.post("/opportunities/:id/analyze", async (req, res) => {
     // Generate runId here so the client can immediately use it to cancel
     const runId = crypto.randomUUID();
     res.json({ message: "Analysis started", analysisRunId: runId });
-    void autoAnalyzeOpportunity(id, "requirements_extracting", runId);
+    void runExtractionPipeline(id, runId);
   } catch (err) {
     req.log.error({ err }, "Error triggering analysis");
     res.status(500).json({ error: "Failed to start analysis" });
@@ -925,17 +1188,33 @@ router.post("/opportunities/:id/score", async (req, res) => {
   }
 });
 
-// ── Generate strategy brief (manual trigger) ──────────────────────────────
+// ── Generate strategy brief (explicit user action) ─────────────────────────
+// AI-powered; requires requirements to be available. Bounded execution
+// with timeout, abort signal, and cancellation support (same as analysis).
 router.post("/opportunities/:id/generate-strategy", async (req, res) => {
   const id = Number(req.params.id);
   if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
 
   try {
-    const strategy = await runGenerateStrategy(id);
-    res.json(strategy);
+    const [tender] = await db
+      .select({ id: tendersTable.id, status: tendersTable.status })
+      .from(tendersTable)
+      .where(eq(tendersTable.id, id));
+    if (!tender) { res.status(404).json({ error: "Opportunity not found" }); return; }
+
+    if (isActiveStatus(tender.status)) {
+      res.status(409).json({
+        error: `Analysis already running (step: ${tender.status}). Please wait.`,
+      });
+      return;
+    }
+
+    const runId = crypto.randomUUID();
+    res.json({ message: "Strategy generation started", analysisRunId: runId });
+    void runBoundedStrategy(id, runId);
   } catch (err) {
-    req.log.error({ err }, "Error generating strategy");
-    res.status(500).json({ error: "Failed to generate strategy" });
+    req.log.error({ err }, "Error starting strategy generation");
+    res.status(500).json({ error: "Failed to start strategy generation" });
   }
 });
 
@@ -1285,8 +1564,18 @@ router.post("/tenders/manual", (req, res, next) => {
       })
       .returning();
 
-    res.status(201).json(created);
-    void autoAnalyzeOpportunity(created.id);
+    // Deterministic scoring only — no AI call. Sets pending_review or no_bid.
+    let manualStatus = "pending_review";
+    try {
+      const score = await applyDeterministicScore(created.id);
+      manualStatus = score.fitLevel === "no_bid" ? "no_bid" : "pending_review";
+    } catch (scoreErr) {
+      req.log.warn({ err: scoreErr }, "[tenders/manual] auto-score failed");
+    }
+    await db.update(tendersTable)
+      .set({ status: manualStatus, updatedAt: new Date() })
+      .where(eq(tendersTable.id, created.id));
+    res.status(201).json({ ...created, status: manualStatus });
   } catch (err) {
     req.log.error({ err }, "[tenders/manual] import failed");
     res.status(500).json({ error: `Import failed: ${(err as Error).message}` });
@@ -1353,8 +1642,17 @@ router.post("/tenders/import-csv", (req, res, next) => {
         })
         .returning();
 
+      // Deterministic scoring only — no AI call
+      try {
+        const score = await applyDeterministicScore(inserted.id);
+        const csvStatus = score.fitLevel === "no_bid" ? "no_bid" : "pending_review";
+        await db.update(tendersTable)
+          .set({ status: csvStatus, updatedAt: new Date() })
+          .where(eq(tendersTable.id, inserted.id));
+      } catch (scoreErr) {
+        req.log.warn({ err: scoreErr }, "CSV auto-score failed for inserted tender");
+      }
       created++;
-      void autoAnalyzeOpportunity(inserted.id);
     }
 
     res.json({ message: `Imported ${created} tender(s)`, count: created });
@@ -1425,8 +1723,18 @@ router.post("/tenders/extract-text", async (req, res) => {
       })
       .returning();
 
-    res.status(201).json(created);
-    void autoAnalyzeOpportunity(created.id);
+    // Deterministic scoring only — no AI call. Sets pending_review or no_bid.
+    let extractStatus = "pending_review";
+    try {
+      const score = await applyDeterministicScore(created.id);
+      extractStatus = score.fitLevel === "no_bid" ? "no_bid" : "pending_review";
+    } catch (scoreErr) {
+      req.log.warn({ err: scoreErr }, "[extract-text] auto-score failed");
+    }
+    await db.update(tendersTable)
+      .set({ status: extractStatus, updatedAt: new Date() })
+      .where(eq(tendersTable.id, created.id));
+    res.status(201).json({ ...created, status: extractStatus });
   } catch (err) {
     req.log.error({ err }, "Text extraction failed");
     res.status(500).json({ error: "Text extraction failed" });

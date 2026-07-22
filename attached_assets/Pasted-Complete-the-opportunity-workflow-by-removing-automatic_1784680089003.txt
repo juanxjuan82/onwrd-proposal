@@ -1,0 +1,116 @@
+Complete the opportunity workflow by removing automatic AI analysis from every creation and import path.
+
+Current problem:
+
+`autoAnalyzeOpportunity()` is still called automatically from:
+
+* `POST /opportunities`
+* `POST /tenders/manual`
+* `POST /tenders/import-csv`
+* `POST /tenders`
+
+This means merely importing, crawling, or creating an opportunity immediately spends AI credits on requirement extraction and strategy generation without user confirmation.
+
+Implement the following trigger model:
+
+1. Creation and import must not use AI
+
+For every creation, upload, CSV import, and crawler ingestion path:
+
+* Save the opportunity and its source text.
+* Run only the existing deterministic qualification scoring.
+* Do not call OpenAI.
+* Set an appropriate reviewable status such as `pending_review` or `screened`.
+* Return control to the user immediately.
+* Ensure batch imports cannot silently launch one AI pipeline per row.
+
+Crawling, importing, parsing supported files, deterministic scoring, and pursue/pass recommendations must not invoke an AI model.
+
+2. Add one explicit conversion action
+
+Use one primary action such as:
+
+**Analyze & Create Proposal**
+
+When clicked:
+
+* Check whether the opportunity already has a proposal.
+* If one exists, open it instead of creating another.
+* Otherwise, atomically create one canonical proposal workspace.
+* Link the opportunity and proposal records.
+* Remove the opportunity from the active Opportunities queue by marking it converted/analyzing.
+* Redirect immediately to `/proposals/:proposalId`.
+* Start the existing bounded requirement-extraction job from the proposal workspace.
+
+Protect this action with idempotency and concurrency controls so double-clicks cannot create duplicate proposals or analysis jobs.
+
+3. Keep AI stages separate
+
+The initial Analyze action should run only requirement extraction.
+
+Do not automatically generate a strategy brief as part of extraction.
+
+After requirements are available, provide a separate optional action:
+
+**Generate Strategy Brief — uses AI**
+
+Display a short usage disclosure before starting it. Retain the existing timeout, progress, cancellation, retry, and recovery protections.
+
+Bid scoring and pursue/pass recommendations must remain deterministic and must never call AI.
+
+4. Update the queues
+
+The active Opportunities queue should show opportunities still awaiting a decision.
+
+Once Analyze & Create Proposal begins:
+
+* Remove that opportunity from the active queue.
+* Make it available under a Converted or History filter.
+* Provide an Open Proposal action for converted records.
+* Do not show duplicate-extraction warnings; open the existing proposal instead.
+
+5. Update the proposal workspace
+
+While requirements are being extracted, show:
+
+* Current extraction stage
+* Elapsed time
+* Cancel Analysis
+* Timeout/failure recovery
+* Retry when appropriate
+
+Cancelling must preserve the proposal workspace and must not automatically return the opportunity to the active queue.
+
+6. Remove automatic calls
+
+Search the entire repository for every invocation of `autoAnalyzeOpportunity()`.
+
+After this change, it should only be reachable through an explicit, authenticated user action. Remove all fire-and-forget calls from opportunity creation, import, CSV, and crawler flows.
+
+If the full multi-stage helper no longer matches the workflow, replace it with separate bounded jobs for:
+
+* Requirement extraction
+* Optional strategy generation
+
+7. Tests
+
+Add tests proving:
+
+* Manual creation makes zero AI calls
+* File/URL import makes zero AI calls
+* CSV import makes zero AI calls per row
+* Crawling makes zero AI calls
+* Deterministic scoring still runs
+* Analyze & Create Proposal creates exactly one proposal
+* Clicking it twice opens the existing proposal
+* The opportunity leaves the active queue once converted
+* Initial analysis runs requirement extraction only
+* Strategy generation requires a separate explicit action
+* Cancel and timeout stop additional AI calls
+
+Run the relevant tests and report:
+
+* Every automatic AI invocation removed
+* The final number of AI calls in each user-initiated workflow
+* Status transitions from opportunity creation through proposal conversion
+* Files and schema fields changed

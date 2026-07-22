@@ -87,18 +87,23 @@ function statusIcon(status: string) {
 
 function statusLabel(status: string) {
   const labels: Record<string, string> = {
-    opportunity_found: "Found",
-    analysing: "Analysing…",
-    requirements_extracted: "Requirements Extracted",
-    screened: "Screened",
-    analysis_failed: "Analysis Failed",
-    no_bid: "No Bid",
-    bid_started: "Bid Started",
-    proposal_drafting: "Drafting",
-    needs_onwrd_input: "Needs Input",
-    ready_for_review: "Ready for Review",
-    approved_for_export: "Approved",
-    exported_to_drive: "Exported",
+    opportunity_found:       "Found",
+    pending_review:          "Pending Review",
+    analysing:               "Analysing…",
+    requirements_extracting: "Extracting…",
+    bid_scoring:             "Scoring…",
+    strategy_generating:     "Generating Strategy…",
+    requirements_extracted:  "Requirements Extracted",
+    screened:                "Screened",
+    analysis_failed:         "Analysis Failed",
+    analysis_cancelled:      "Cancelled",
+    no_bid:                  "No Bid",
+    bid_started:             "Bid Started",
+    proposal_drafting:       "Drafting",
+    needs_onwrd_input:       "Needs Input",
+    ready_for_review:        "Ready for Review",
+    approved_for_export:     "Approved",
+    exported_to_drive:       "Exported",
   };
   return labels[status] ?? status;
 }

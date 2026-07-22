@@ -17,7 +17,6 @@ import {
 } from "lucide-react";
 import {
   useGetTender,
-  useGenerateProposalFromTender,
   getListTendersQueryKey,
   getGetTenderQueryKey,
   getListProposalsQueryKey,
@@ -39,9 +38,9 @@ const ANALYSIS_IN_PROGRESS = new Set([
   "strategy_generating",
 ]);
 
-// Records stuck in these legacy statuses are displayed as recoverable
-// failures rather than spinning indefinitely.
-const STUCK_STATES = new Set(["analysing", "requirements_extracted"]);
+// Records stuck in this legacy status are displayed as recoverable failures.
+// NOTE: "requirements_extracted" is now a valid terminal state (not stuck).
+const STUCK_STATES = new Set(["analysing"]);
 
 const STEP_LABELS: Record<string, string> = {
   requirements_extracting: "Extracting requirements",
@@ -88,7 +87,6 @@ export default function OpportunityDetail() {
   const tenderId = Number(id);
   const [, setLocation] = useLocation();
   const { data: tender, isLoading } = useGetTender(tenderId);
-  const generate = useGenerateProposalFromTender();
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -99,9 +97,11 @@ export default function OpportunityDetail() {
   const pollStartRef = useRef<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [pollTimedOut, setPollTimedOut] = useState(false);
-  const [reanalyzing, setReanalyzing] = useState(false);
-  const [cancelling, setCancelling]  = useState(false);
-  const [resuming, setResuming]      = useState(false);
+  const [reanalyzing, setReanalyzing]           = useState(false);
+  const [cancelling, setCancelling]             = useState(false);
+  const [resuming, setResuming]                 = useState(false);
+  const [converting, setConverting]             = useState(false);
+  const [generatingStrategy, setGeneratingStrategy] = useState(false);
 
   // Parse completed steps from DB JSON string
   const completedSteps: string[] = (() => {
@@ -141,19 +141,50 @@ export default function OpportunityDetail() {
 
   // ── Actions ───────────────────────────────────────────────────────────────
 
-  const handleGenerate = async () => {
+  const handleConvert = async () => {
+    setConverting(true);
     try {
-      const proposal = await generate.mutateAsync({ id: tenderId });
+      const res = await fetch(`${BASE}/api/opportunities/${tenderId}/convert`, { method: "POST" });
+      const body = (await res.json().catch(() => ({}))) as {
+        proposalId?: number;
+        existing?: boolean;
+        analysisRunId?: string;
+        error?: string;
+      };
+      if (!res.ok) {
+        toast({ title: "Failed to create proposal", description: body.error ?? "Unknown error", variant: "destructive" });
+        return;
+      }
       queryClient.invalidateQueries({ queryKey: getListTendersQueryKey() });
-      queryClient.invalidateQueries({ queryKey: getGetTenderQueryKey(tenderId) });
       queryClient.invalidateQueries({ queryKey: getListProposalsQueryKey() });
       toast({
-        title: "Proposal draft started",
-        description: "AI is generating the proposal in the background. Refresh in ~30 seconds.",
+        title: body.existing ? "Proposal already exists" : "Proposal workspace created",
+        description: "Extracting requirements in the background…",
       });
-      setLocation(`/proposals/${proposal.id}`);
-    } catch (e) {
-      toast({ title: "Generation failed", description: String(e), variant: "destructive" });
+      if (body.proposalId) setLocation(`/proposals/${body.proposalId}`);
+    } finally {
+      setConverting(false);
+    }
+  };
+
+  const handleGenerateStrategy = async () => {
+    setGeneratingStrategy(true);
+    try {
+      const res = await fetch(`${BASE}/api/opportunities/${tenderId}/generate-strategy`, { method: "POST" });
+      const body = (await res.json().catch(() => ({}))) as { analysisRunId?: string; error?: string };
+      if (!res.ok) {
+        toast({ title: "Failed to start strategy", description: body.error ?? "Unknown error", variant: "destructive" });
+        return;
+      }
+      toast({
+        title: "Strategy generation started",
+        description: "AI is drafting the strategy brief. This page will update automatically.",
+      });
+      pollStartRef.current = Date.now();
+      setPollTimedOut(false);
+      void queryClient.invalidateQueries({ queryKey: getGetTenderQueryKey(tenderId) });
+    } finally {
+      setGeneratingStrategy(false);
     }
   };
 
@@ -455,6 +486,21 @@ export default function OpportunityDetail() {
         </div>
       )}
 
+      {/* ── Requirements extracted — ready for strategy ──────────────────── */}
+      {tender.status === "requirements_extracted" && (
+        <div className="mb-6 p-4 border border-green-500/30 rounded-lg bg-green-500/5">
+          <div className="flex items-start gap-3">
+            <CheckCircle2 className="w-5 h-5 text-green-500 shrink-0 mt-0.5" />
+            <div>
+              <p className="text-sm font-medium text-foreground">Requirements extracted</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                AI has extracted requirements and scored the bid fit. Use <strong>Generate Strategy Brief</strong> to produce a strategy for the proposal writers, or open the linked proposal to begin drafting.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Metadata grid ────────────────────────────────────────────────── */}
       <div className="grid sm:grid-cols-3 gap-4 mb-6 p-4 border rounded-lg bg-card">
         {tender.deadline && (
@@ -510,37 +556,36 @@ export default function OpportunityDetail() {
         {tender.proposalId ? (
           <Button asChild variant="default" data-testid="button-view-proposal">
             <Link href={`/proposals/${tender.proposalId}`} className="flex items-center gap-2">
-              <FileText className="w-4 h-4" /> View Generated Proposal
+              <FileText className="w-4 h-4" /> Open Proposal
             </Link>
           </Button>
         ) : (
           <Button
-            onClick={handleGenerate}
-            disabled={generate.isPending || isAnalysing}
-            data-testid="button-generate-proposal"
+            onClick={() => void handleConvert()}
+            disabled={converting || isAnalysing}
+            data-testid="button-analyze-create"
           >
-            {generate.isPending
-              ? <><Loader2 className="w-4 h-4 mr-1 animate-spin" /> Generating…</>
-              : <><Sparkles className="w-4 h-4 mr-1" /> Generate Proposal</>
+            {converting
+              ? <><Loader2 className="w-4 h-4 mr-1 animate-spin" /> Creating…</>
+              : <><Sparkles className="w-4 h-4 mr-1" /> Analyze &amp; Create Proposal</>
             }
           </Button>
         )}
 
-        {!isAnalysing && !isStuck &&
-          tender.status !== "analysis_failed" &&
-          tender.status !== "analysis_cancelled" && (
-            <Button
-              variant="outline"
-              onClick={() => void handleReanalyze()}
-              disabled={reanalyzing}
-              data-testid="button-reanalyze"
-            >
-              {reanalyzing
-                ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Starting…</>
-                : <><RefreshCw className="w-3 h-3 mr-1" /> Re-analyse</>
-              }
-            </Button>
-          )}
+        {/* Generate Strategy Brief — only when extraction is done and no strategy yet */}
+        {(tender.status === "requirements_extracted") && !isAnalysing && (
+          <Button
+            variant="outline"
+            onClick={() => void handleGenerateStrategy()}
+            disabled={generatingStrategy}
+            data-testid="button-generate-strategy"
+          >
+            {generatingStrategy
+              ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Generating…</>
+              : <><Sparkles className="w-3 h-3 mr-1" /> Generate Strategy Brief</>
+            }
+          </Button>
+        )}
       </div>
     </div>
   );
