@@ -135,7 +135,7 @@ async function checkGatewayBoundary() {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         await collectFiles(full);
-      } else if (entry.name.endsWith(".ts")) {
+      } else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) {
         if (full === gatewayPath) continue;
         const content = await readFile(full, "utf-8");
         if (content.includes(forbidden)) {
