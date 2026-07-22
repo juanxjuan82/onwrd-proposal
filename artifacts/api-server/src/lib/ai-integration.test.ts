@@ -131,7 +131,7 @@ describe("gateway spy: zero AI calls on automatic paths", () => {
     let count = 0;
     __setInvokeAISpy(async (_p: InvokeAIParams): Promise<AIResult> => {
       count++;
-      return { content: "spy", inputTokens: 0, outputTokens: 0, logId: 0 };
+      return { content: "spy", model: "mock" };
     });
 
     try {
@@ -147,6 +147,33 @@ describe("gateway spy: zero AI calls on automatic paths", () => {
     }
 
     assert.equal(count, 1, "spy must intercept exactly one invokeAI call");
+  });
+});
+
+// ── Concurrent crawl lock (two simultaneous runCrawler calls) ─────────────────
+
+describe("concurrent runCrawler() calls", () => {
+  before(clearLock);
+  after(clearLock);
+
+  it("two concurrent calls both complete without throwing", async () => {
+    // Both start nearly simultaneously; only one acquires the DB lock.
+    // The other sees the lock held and exits cleanly (returns, not throws).
+    const [r1, r2] = await Promise.allSettled([
+      runCrawler(99999),
+      runCrawler(99999),
+    ]);
+
+    assert.equal(r1.status, "fulfilled", "first concurrent runCrawler must not throw");
+    assert.equal(r2.status, "fulfilled", "second concurrent runCrawler must not throw (exits early)");
+  });
+
+  it("lock is free after both concurrent crawlers complete", async () => {
+    await Promise.allSettled([runCrawler(99999), runCrawler(99999)]);
+
+    const ok = await acquireCrawlLock();
+    assert.equal(ok, true, "lock must be free after both concurrent crawlers complete");
+    await releaseCrawlLock();
   });
 });
 

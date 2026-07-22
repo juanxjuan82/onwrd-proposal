@@ -213,7 +213,12 @@ async function atomicReserveAndLog(opts: {
   // Scopes locked — always in the same order to avoid deadlock
   const scopes = ["global", `feature:${feature}`];
   if (operationKey) scopes.push(`op:${operationKey}`);
-  scopes.sort(); // deterministic order
+  scopes.sort(); // deterministic order — also avoids SELECT FOR UPDATE deadlocks
+
+  // Build an IN-list SQL fragment for all scope values.
+  // Drizzle expands a raw JS array as a row-constructor tuple (v1, v2) which
+  // is invalid inside ANY().  Using sql.join produces valid IN ($1, $2, …).
+  const inScopes = sql.join(scopes.map((s) => sql`${s}`), sql`, `);
 
   return db.transaction(async (tx) => {
     // 1. Ensure counter rows exist (ON CONFLICT DO NOTHING is safe to run
@@ -230,7 +235,7 @@ async function atomicReserveAndLog(opts: {
     const locked = await tx.execute<{ scope: string; calls: number; tokens: number }>(sql`
       SELECT scope, calls, tokens
       FROM ai_daily_quota
-      WHERE date = ${today} AND scope = ANY(${scopes})
+      WHERE date = ${today} AND scope IN (${inScopes})
       ORDER BY scope
       FOR UPDATE
     `);
@@ -261,7 +266,7 @@ async function atomicReserveAndLog(opts: {
           : !tokenOk
             ? "token_limit"
             : `op_limit:${operationKey}`;
-      const [limitRow] = await tx.execute<{ id: number }>(sql`
+      const limitResult = await tx.execute<{ id: number }>(sql`
         INSERT INTO ai_usage_log
           (request_id, feature, opportunity_id, proposal_id, operation_key,
            status, completed_at, error_code)
@@ -270,6 +275,7 @@ async function atomicReserveAndLog(opts: {
            'limit_exceeded', NOW(), ${errorCode})
         RETURNING id
       `);
+      const limitRow = limitResult.rows[0];
       return { logId: Number(limitRow!.id), allowed: false, globalOk, featureOk, tokenOk, opOk, estimatedTokens: 0 };
     }
 
@@ -279,7 +285,7 @@ async function atomicReserveAndLog(opts: {
     await tx.execute(sql`
       UPDATE ai_daily_quota
       SET calls = calls + 1, updated_at = NOW()
-      WHERE date = ${today} AND scope = ANY(${scopes})
+      WHERE date = ${today} AND scope IN (${inScopes})
     `);
     await tx.execute(sql`
       UPDATE ai_daily_quota
@@ -288,13 +294,14 @@ async function atomicReserveAndLog(opts: {
     `);
 
     // 4. Insert pending log row
-    const [logRow] = await tx.execute<{ id: number }>(sql`
+    const logResult = await tx.execute<{ id: number }>(sql`
       INSERT INTO ai_usage_log
         (request_id, feature, opportunity_id, proposal_id, operation_key, status)
       VALUES
         (${requestId}, ${feature}, ${oppVal}, ${propVal}, ${opVal}, 'pending')
       RETURNING id
     `);
+    const logRow = logResult.rows[0];
 
     return {
       logId:           Number(logRow!.id),
@@ -488,12 +495,39 @@ let _invokeAISpy: ((params: InvokeAIParams) => Promise<AIResult>) | null = null;
 
 /**
  * FOR TESTING ONLY — swap in a test double for every invokeAI() call.
+ * The gateway's circuit, quota, and DB logic are all bypassed.
  * Pass null to restore the real implementation.
  */
 export function __setInvokeAISpy(
   spy: ((params: InvokeAIParams) => Promise<AIResult>) | null,
 ): void {
   _invokeAISpy = spy;
+}
+
+// ── OpenAI completion mock (test only) ───────────────────────────────────────
+// Replaces openai.chat.completions.create inside callOnce().
+// The gateway still runs all surrounding logic: circuit, quota, DB writes.
+// Always null in production. Import __setOpenAICompletionForTesting only in *.test.ts files.
+export type MinimalCompletion = {
+  choices: Array<{ message: { content: string | null } }>;
+  model: string;
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+};
+let _mockCompletionFn:
+  | ((body: Record<string, unknown>, opts?: { signal?: AbortSignal }) => Promise<MinimalCompletion>)
+  | null = null;
+
+/**
+ * FOR TESTING ONLY — replace openai.chat.completions.create inside invokeAI().
+ * The gateway still runs all logic (circuit, quota, DB writes) around this call.
+ * Pass null to restore real OpenAI calls.
+ */
+export function __setOpenAICompletionForTesting(
+  fn:
+    | ((body: Record<string, unknown>, opts?: { signal?: AbortSignal }) => Promise<MinimalCompletion>)
+    | null,
+): void {
+  _mockCompletionFn = fn;
 }
 
 // ── Core gateway function ─────────────────────────────────────────────────────
@@ -586,13 +620,16 @@ export async function invokeAI(params: InvokeAIParams): Promise<AIResult> {
     .join(" ");
 
   const callOnce = async (): Promise<AIResult> => {
-    const completion = await openai.chat.completions.create(
+    const createFn =
+      _mockCompletionFn ??
+      openai.chat.completions.create.bind(openai.chat.completions);
+    const completion = await createFn(
       {
         model:      AI_MODEL,
         max_tokens: maxTokens,
         ...(responseFormat ? { response_format: responseFormat } : {}),
         messages,
-      },
+      } as Record<string, unknown>,
       signal ? { signal } : undefined,
     );
     const u = completion.usage;

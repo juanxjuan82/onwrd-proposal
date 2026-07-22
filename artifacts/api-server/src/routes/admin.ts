@@ -182,7 +182,7 @@ router.get("/ai/diagnostics", async (_req, res) => {
     let commitSha: string | null = process.env.COMMIT_SHA ?? null;
     if (!commitSha) {
       try {
-        commitSha = execSync("git rev-parse --short HEAD", { timeout: 2_000 }).toString().trim();
+        commitSha = execSync("git rev-parse HEAD", { timeout: 2_000 }).toString().trim();
       } catch {
         commitSha = null;
       }

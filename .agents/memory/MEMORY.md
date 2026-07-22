@@ -7,3 +7,6 @@
 - [AI gateway pattern](ai-gateway-pattern.md) — single permitted openai importer; all AI calls route through invokeAI(); build guard in build.mjs enforces this at compile time.
 - [Deterministic metadata extractor](metadata-extractor.md) — tender imports use extractTenderMetadata() (no AI); returns needsReview flag when title/agency undetected.
 - [DB-backed circuit & usage log](db-circuit-usage.md) — ai_circuit (id=1 singleton), ai_usage_log, crawler_lock tables; 30s circuit cache, 60s count cache; isCrawlRunning() is now async
+- [Drizzle tx.execute quirks](drizzle-tx-execute.md) — with node-postgres driver, tx.execute() returns QueryResult (not iterable); use .rows[0] not array destructuring. JS arrays in sql`` become row-constructor tuples—use sql.join for IN clauses instead of ANY(${array}).
+- [node:test file isolation](node-test-file-isolation.md) — top-level before/after hooks scope to ROOT suite across all files; when multiple files run in one process, wrap all hooks and suites in a file-level describe for correct per-file isolation.
+- [Gateway spy hooks](gateway-spy-hooks.md) — __setInvokeAISpy short-circuits all gateway logic; __setOpenAICompletionForTesting mocks only the OpenAI HTTP call while keeping circuit/quota/DB logic live. Both are null in production.
