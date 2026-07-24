@@ -1,0 +1,132 @@
+Fix the proposal-generation workflow and document-content synchronization on the current feature branch.
+
+Preserve task #23’s Google handoff state machine and task #24’s navigation/intake changes. Do not change OAuth, Picker, scoring rules, AI models, prompts beyond the section-output formatting contract, or proposal/opportunity creation behavior.
+
+PROBLEMS CONFIRMED
+
+1. proposal-detail.tsx’s Extract Requirements button calls:
+   POST /api/opportunities/:id/analyze
+
+That endpoint runs the combined extraction/scoring/strategy pipeline. The button must instead call:
+   POST /api/opportunities/:id/extract-requirements
+
+The new proposal UI must not call /analyze.
+
+2. Generated proposal sections and proposals.proposalContent are separate, drifting representations.
+
+3. Updating or AI-improving a section does not rebuild proposalContent.
+
+4. The AI prompt asks every section to include Markdown headings, while the assembler and Google export prepend “## {section title}”. This creates duplicate headings.
+
+REQUIRED WORKFLOW
+
+The proposal workspace must expose these explicit sequential actions:
+
+1. Extract Requirements
+   - Extract structured requirements only.
+   - Do not generate strategy.
+   - Do not generate proposal prose.
+   - Do not modify proposalContent or proposal sections.
+
+2. Generate Strategy
+   - Generate the internal response strategy only.
+   - Do not modify proposalContent or proposal sections.
+
+3. Generate Draft
+   - Generate the client-facing proposal sections.
+   - Use the existing requirements and strategy.
+   - Populate the proposal preview automatically when generation completes.
+
+Show completion/readiness state for each step. Refetch the relevant data after each operation. Generate Strategy must require extracted requirements, and Generate Draft must require a completed strategy. Provide a clear explanation when an action is unavailable.
+
+CANONICAL CONTENT MODEL
+
+For proposals containing generated section records:
+
+- proposal_sections is the canonical editable source.
+- Replace the editable “Full Document” view with a read-only “Full Proposal Preview”.
+- Assemble this preview from the current ordered sections.
+- The user must not need to open the Sections tab to make generated content appear.
+- Automatically refresh and display the preview as generation progresses and completes.
+- Editing or AI-improving a section must immediately update the assembled preview.
+- Google export must use the same assembled content.
+
+For blank/freeform proposals with zero section records:
+
+- Preserve the existing editable proposalContent workflow.
+- Do not force blank proposals into section-based editing.
+
+SHARED ASSEMBLER
+
+Create one shared proposal-content assembly utility. It must be used by:
+
+- Proposal generation when storing the proposalContent snapshot
+- Section update and AI-improvement paths
+- Full Proposal Preview
+- Google Docs export
+
+Implement helpers equivalent to:
+
+- normalizeSectionBody(title, content)
+- assembleProposalFromSections(sections)
+
+normalizeSectionBody must:
+
+- Remove only a matching leading Markdown heading that repeats the section title.
+- Match #, ##, or ### headings case-insensitively.
+- Tolerate harmless numbering and trailing punctuation.
+- Preserve legitimate internal subheadings and all body formatting.
+- Not remove a leading heading that does not match the section title.
+
+assembleProposalFromSections must add exactly one:
+
+   ## {section title}
+
+before each normalized section body.
+
+AI OUTPUT CONTRACT
+
+Change the proposal-generation prompt so each section’s `content` contains BODY ONLY:
+
+- Never repeat the section title.
+- Never begin with the section’s own #/##/### heading.
+- Internal subheadings are allowed and should normally use ###.
+- Markdown bold, lists, tables, and internal headings remain supported.
+
+Normalize existing stored content during assembly/render/export so existing duplicated data is displayed correctly without requiring a destructive migration.
+
+GOOGLE EXPORT CONSISTENCY
+
+The Google document must contain exactly the same section titles and body ordering as Full Proposal Preview.
+
+Do not add a second heading around already assembled content.
+
+Do not change the one-document handoff behavior, pending_first_write recovery, authentication ordering, or zero-mutation behavior for completed/legacy handoffs.
+
+TESTS
+
+Add behavioral tests proving:
+
+1. Extract Requirements calls only /extract-requirements.
+2. Extract Requirements does not generate strategy or proposal prose.
+3. Generate Strategy does not modify proposalContent or proposal sections.
+4. Generate Draft creates sections and automatically populates Full Proposal Preview.
+5. AI content beginning with “## Executive Summary” produces exactly one Executive Summary heading.
+6. Matching headings with #, ##, ###, numbering, case differences, and trailing punctuation are normalized.
+7. Nonmatching and internal subheadings are preserved.
+8. Editing a section updates the assembled preview/snapshot.
+9. AI-improving a section updates the assembled preview/snapshot.
+10. Google export content matches the Full Proposal Preview.
+11. Existing duplicated stored headings render/export only once.
+12. Blank proposals with no sections retain the freeform editor.
+13. All existing #23 handoff and #24 workflow tests remain passing.
+
+Run:
+
+- frontend typecheck
+- API typecheck
+- complete API test suite twice
+- frontend production build
+- API production build
+
+Do not push until all checks pass. Report the commit SHA, exact changed files, test totals, and raw typecheck/build exit codes.

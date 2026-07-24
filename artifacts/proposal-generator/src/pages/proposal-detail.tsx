@@ -21,6 +21,7 @@ import { Badge } from "@/components/ui/badge";
 import { ExternalLink, Loader2, ArrowLeft, Trash2, CheckCircle2, Eye, Pencil, Sparkles, AlertCircle, ShieldCheck, Clock, AlertTriangle, Share2, RotateCcw } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { assembleProposalFromSections } from "@workspace/proposal-content";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import {
   AlertDialog,
@@ -110,7 +111,13 @@ function SectionsPanel({ proposalId }: { proposalId: number }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content, status }),
       });
-      if (!r.ok) throw new Error("Failed to update section");
+      if (!r.ok) {
+        const body = await r.json().catch(() => ({}) as object) as { error?: string };
+        if (body.error === "google_doc_canonical") {
+          throw new Error("This proposal is in Google Docs. Edit it there instead.");
+        }
+        throw new Error("Failed to update section");
+      }
       return r.json();
     },
     onSuccess: () => {
@@ -125,8 +132,11 @@ function SectionsPanel({ proposalId }: { proposalId: number }) {
     mutationFn: async () => {
       const r = await fetch(`${BASE}/api/proposals/${proposalId}/run-critic`, { method: "POST" });
       if (!r.ok) {
-        const e = await r.json().catch(() => ({}));
-        throw new Error((e as { error?: string }).error ?? "Critic failed");
+        const body = await r.json().catch(() => ({}) as object) as { error?: string };
+        if (body.error === "google_doc_canonical") {
+          throw new Error("This proposal is in Google Docs. Edit it there instead.");
+        }
+        throw new Error(body.error ?? "Critic failed");
       }
       return r.json();
     },
@@ -146,8 +156,11 @@ function SectionsPanel({ proposalId }: { proposalId: number }) {
     mutationFn: async () => {
       const r = await fetch(`${BASE}/api/proposals/${proposalId}/ai-improve-sections`, { method: "POST" });
       if (!r.ok) {
-        const e = await r.json().catch(() => ({}));
-        throw new Error((e as { error?: string }).error ?? "Auto-improve failed");
+        const body = await r.json().catch(() => ({}) as object) as { error?: string };
+        if (body.error === "google_doc_canonical") {
+          throw new Error("This proposal is in Google Docs. Edit it there instead.");
+        }
+        throw new Error(body.error ?? "Auto-improve failed");
       }
       return r.json();
     },
@@ -414,10 +427,11 @@ export default function ProposalDetail() {
   const id = Number(params?.id);
   const [, setLocation] = useLocation();
   const [previewMode, setPreviewMode] = useState(false);
-  const [activeTab, setActiveTab] = useState<"content" | "sections">("content");
-  const [extracting, setExtracting]                   = useState(false);
-  const [generatingStrategy, setGeneratingStrategy]   = useState(false);
-  const [generatingDraft, setGeneratingDraft]         = useState(false);
+  const [activeTab, setActiveTab] = useState<"preview" | "sections">("preview");
+  const [extracting, setExtracting]                     = useState(false);
+  const [generatingStrategy, setGeneratingStrategy]     = useState(false);
+  const [generatingDraft, setGeneratingDraft]           = useState(false);
+  const [strategyPending, setStrategyPending]           = useState(false);
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -426,7 +440,7 @@ export default function ProposalDetail() {
   const deleteProposal = useDeleteProposal();
   const exportToDocs = useExportToGoogleDocs();
 
-  const { data: sections } = useQuery<ProposalSection[]>({
+  const { data: sections, isSuccess: sectionsLoaded } = useQuery<ProposalSection[]>({
     queryKey: ["proposal-sections", id],
     queryFn: async () => {
       const r = await fetch(`${BASE}/api/proposals/${id}/sections`);
@@ -445,7 +459,28 @@ export default function ProposalDetail() {
     },
   });
 
-  const hasSections = sections && sections.length > 0;
+  // Derived from proposal — drives the readiness query below
+  const linkedTenderId = (proposal as Record<string, unknown> | undefined)?.tenderId as number | null | undefined;
+
+  const { data: readiness } = useQuery<{
+    tenderStatus: string;
+    isActive: boolean;
+    requirementsCount: number;
+    requirementsComplete: boolean;
+    strategyComplete: boolean;
+  } | null>({
+    queryKey: ["opportunity-readiness", linkedTenderId],
+    queryFn: async () => {
+      if (!linkedTenderId) return null;
+      const r = await fetch(`${BASE}/api/opportunities/${linkedTenderId}/readiness`);
+      if (!r.ok) return null;
+      return r.json();
+    },
+    enabled: !!linkedTenderId,
+    refetchInterval: strategyPending ? 3000 : false,
+  });
+
+  const hasSections = sectionsLoaded && sections && sections.length > 0;
 
   const form = useForm<ProposalFormValues>({
     resolver: zodResolver(proposalSchema),
@@ -499,6 +534,15 @@ export default function ProposalDetail() {
     }, 2500);
     return () => clearInterval(poll);
   }, [isDrafting, id, queryClient]);
+
+  // ── Clear strategy-pending flag when readiness confirms strategy is done ──
+  useEffect(() => {
+    if (strategyPending && readiness?.strategyComplete) {
+      setStrategyPending(false);
+    }
+  }, [strategyPending, readiness?.strategyComplete]);
+
+  const isFreeform = sectionsLoaded && (!sections || sections.length === 0) && !isDrafting;
 
   const handleSave = (values: ProposalFormValues) => {
     updateProposal.mutate({
@@ -569,19 +613,18 @@ export default function ProposalDetail() {
     });
   };
 
-  const linkedTenderId = (proposal as Record<string, unknown> | undefined)?.tenderId as number | null | undefined;
-
   const handleExtractRequirements = async () => {
     if (!linkedTenderId) return;
     setExtracting(true);
     try {
-      const res = await fetch(`${BASE}/api/opportunities/${linkedTenderId}/analyze`, { method: "POST" });
+      const res = await fetch(`${BASE}/api/opportunities/${linkedTenderId}/extract-requirements`, { method: "POST" });
       const body = (await res.json().catch(() => ({}))) as { error?: string };
       if (!res.ok) {
         toast({ title: "Failed to start extraction", description: body.error ?? "Unknown error", variant: "destructive" });
         return;
       }
-      toast({ title: "Extracting requirements…", description: "AI is analysing the RFP. Open the linked Opportunity to see progress." });
+      toast({ title: "Extracting requirements…", description: "AI is analysing the RFP — requirements will appear in the Opportunity." });
+      void queryClient.invalidateQueries({ queryKey: ["opportunity-readiness", linkedTenderId] });
     } finally {
       setExtracting(false);
     }
@@ -598,6 +641,7 @@ export default function ProposalDetail() {
         return;
       }
       toast({ title: "Generating strategy…", description: "AI is building the strategy brief." });
+      setStrategyPending(true);
     } finally {
       setGeneratingStrategy(false);
     }
@@ -750,24 +794,73 @@ export default function ProposalDetail() {
             <p className="text-sm text-muted-foreground flex-1 min-w-0">
               Linked to Opportunity <span className="text-foreground font-medium">#{linkedTenderId}</span>
             </p>
-            <Button size="sm" variant="outline" onClick={() => void handleExtractRequirements()} disabled={extracting} data-testid="button-extract-requirements">
-              {extracting
-                ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Extracting…</>
-                : <><Sparkles className="w-3 h-3 mr-1" /> Extract Requirements</>
-              }
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => void handleGenerateStrategy()} disabled={generatingStrategy} data-testid="button-generate-strategy">
-              {generatingStrategy
-                ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Generating…</>
-                : <><Sparkles className="w-3 h-3 mr-1" /> Generate Strategy</>
-              }
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => void handleGenerateDraft()} disabled={generatingDraft || isDrafting} data-testid="button-generate-draft">
-              {generatingDraft || isDrafting
-                ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> {isDrafting ? "Generating…" : "Drafting…"}</>
-                : <><Sparkles className="w-3 h-3 mr-1" /> Generate Draft</>
-              }
-            </Button>
+            {(() => {
+              const isHandoffDone =
+                proposal.syncStatus === "handoff_complete" ||
+                (!!proposal.googleFileId &&
+                  proposal.syncStatus !== "pending_first_write" &&
+                  proposal.syncStatus !== "handoff_in_progress");
+              return (
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void handleExtractRequirements()}
+                    disabled={extracting || isHandoffDone}
+                    data-testid="button-extract-requirements"
+                    title={isHandoffDone ? "Proposal is in Google Docs" : undefined}
+                  >
+                    {extracting ? (
+                      <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Extracting…</>
+                    ) : readiness?.requirementsComplete ? (
+                      <><CheckCircle2 className="w-3 h-3 mr-1 text-green-400" /> Requirements Extracted</>
+                    ) : (
+                      <><Sparkles className="w-3 h-3 mr-1" /> Extract Requirements</>
+                    )}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void handleGenerateStrategy()}
+                    disabled={generatingStrategy || strategyPending || !readiness?.requirementsComplete || isHandoffDone}
+                    data-testid="button-generate-strategy"
+                    title={
+                      isHandoffDone ? "Proposal is in Google Docs" :
+                      !readiness?.requirementsComplete ? "Extract requirements first" :
+                      undefined
+                    }
+                  >
+                    {generatingStrategy || strategyPending ? (
+                      <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> {strategyPending ? "Generating…" : "Starting…"}</>
+                    ) : readiness?.strategyComplete ? (
+                      <><CheckCircle2 className="w-3 h-3 mr-1 text-green-400" /> Strategy Complete</>
+                    ) : (
+                      <><Sparkles className="w-3 h-3 mr-1" /> Generate Strategy</>
+                    )}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void handleGenerateDraft()}
+                    disabled={generatingDraft || isDrafting || !readiness?.strategyComplete || isHandoffDone}
+                    data-testid="button-generate-draft"
+                    title={
+                      isHandoffDone ? "Proposal is in Google Docs" :
+                      !readiness?.strategyComplete ? "Generate a strategy first" :
+                      undefined
+                    }
+                  >
+                    {generatingDraft || isDrafting ? (
+                      <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> {isDrafting ? "Generating…" : "Drafting…"}</>
+                    ) : hasSections ? (
+                      <><CheckCircle2 className="w-3 h-3 mr-1 text-green-400" /> Draft Generated</>
+                    ) : (
+                      <><Sparkles className="w-3 h-3 mr-1" /> Generate Draft</>
+                    )}
+                  </Button>
+                </>
+              );
+            })()}
           </div>
           {proposal?.proposalContent?.startsWith("Generation failed") && (
             <div className="flex items-center gap-2 mt-2 text-sm text-destructive" data-testid="generation-failure-banner">
@@ -826,15 +919,15 @@ export default function ProposalDetail() {
             <div className="flex rounded-md border overflow-hidden text-sm w-fit">
               <button
                 type="button"
-                onClick={() => setActiveTab("content")}
+                onClick={() => setActiveTab("preview")}
                 className={`flex items-center gap-1.5 px-4 py-2 transition-colors ${
-                  activeTab === "content"
+                  activeTab === "preview"
                     ? "bg-primary text-primary-foreground"
                     : "bg-background text-muted-foreground hover:bg-accent"
                 }`}
               >
-                <Pencil className="w-3.5 h-3.5" />
-                Full Document
+                <Eye className="w-3.5 h-3.5" />
+                Full Proposal Preview
               </button>
               <button
                 type="button"
@@ -856,10 +949,43 @@ export default function ProposalDetail() {
             </div>
           )}
 
-          {/* Sections panel */}
+          {/* Content area — preview / sections / freeform */}
           {hasSections && activeTab === "sections" ? (
             <SectionsPanel proposalId={id} />
-          ) : (
+          ) : hasSections ? (
+            /* Full Proposal Preview — read-only, assembled from sections */
+            <div className="bg-card border rounded-lg overflow-hidden flex flex-col">
+              <div className="bg-muted p-4 border-b flex items-center justify-between">
+                <Label className="font-semibold text-foreground">Full Proposal Preview</Label>
+                <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-7 object-contain" />
+              </div>
+              <div
+                className="min-h-[600px] p-8 font-sans text-base leading-relaxed prose prose-sm max-w-none
+                  [&_table]:w-full [&_table]:border-collapse [&_table]:text-sm
+                  [&_th]:border [&_th]:border-border [&_th]:bg-muted [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:font-semibold
+                  [&_td]:border [&_td]:border-border [&_td]:px-3 [&_td]:py-2 [&_td]:align-top
+                  [&_tr:nth-child(even)_td]:bg-muted/30"
+              >
+                {isDrafting ? (
+                  <div className="flex items-center gap-3 text-muted-foreground">
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Generating proposal sections…</span>
+                  </div>
+                ) : sections && sections.some((s) => s.content && s.content.trim()) ? (
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {assembleProposalFromSections(
+                      sections
+                        .filter((s) => s.content && s.content.trim())
+                        .map((s) => ({ title: s.title, content: s.content, orderIndex: s.orderIndex }))
+                    )}
+                  </ReactMarkdown>
+                ) : (
+                  <p className="text-muted-foreground">No content yet. Generate a draft from an Opportunity.</p>
+                )}
+              </div>
+            </div>
+          ) : isFreeform ? (
+            /* Freeform editor — proposal not linked to sections */
             <div className="bg-card border rounded-lg overflow-hidden flex flex-col">
               <div className="bg-muted p-4 border-b flex items-center justify-between">
                 <Label className="font-semibold text-foreground">Document Content</Label>
@@ -924,9 +1050,17 @@ export default function ProposalDetail() {
                 )}
               />
             </div>
+          ) : (
+            /* Loading state — sections fetch in flight or isDrafting with no sections yet */
+            <div className="bg-card border rounded-lg min-h-[200px] flex items-center justify-center">
+              <div className="flex items-center gap-3 text-muted-foreground">
+                <Loader2 className="w-4 h-4 animate-spin" />
+                <span>Loading…</span>
+              </div>
+            </div>
           )}
 
-          {activeTab === "content" && (
+          {activeTab === "preview" && (
             <div className="pt-4 space-y-3">
               {/* ── Google Doc status panel ─────────────────────────────────── */}
               {(() => {

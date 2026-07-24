@@ -15,3 +15,4 @@ Use Node.js built-in `node:test` with tsx for TypeScript support. Do NOT add vit
 - No `expect()` — use `assert.equal`, `assert.ok`, `assert.rejects`, etc.
 - For functions that have internal delays (e.g. retry sleeps), add an optional `delayMs = default` parameter and pass `0` in tests to avoid real sleeps — no fake timers needed
 - tsx binary also available at `/home/runner/workspace/node_modules/.pnpm/node_modules/.bin/tsx` if needed in scripts
+- **Path resolution in test files at `src/lib/` depth:** `__dirname` resolves to the `src/lib/` directory; reaching the workspace root requires 4 levels up (`path.resolve(__dirname, "../../../..")`), not 3 — otherwise the constructed paths double-nest the `artifacts/` segment

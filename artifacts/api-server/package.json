@@ -8,7 +8,7 @@
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx/esm --test src/routes/opportunities.test.ts src/routes/proposal-generation.test.ts src/lib/scoring-rules.test.ts src/lib/crawler-eligibility.test.ts src/lib/google-docs-export.test.ts src/lib/google-docs-drive.test.ts src/lib/no-auto-ai.test.ts src/lib/ai-gateway.test.ts src/lib/ai-integration.test.ts src/lib/ai-circuit.test.ts src/lib/ai-route.test.ts src/lib/ai-workflow.test.ts src/lib/workflow-nav.test.ts",
+    "test": "node --import tsx/esm --test src/routes/opportunities.test.ts src/routes/proposal-generation.test.ts src/lib/scoring-rules.test.ts src/lib/crawler-eligibility.test.ts src/lib/google-docs-export.test.ts src/lib/google-docs-drive.test.ts src/lib/no-auto-ai.test.ts src/lib/ai-gateway.test.ts src/lib/ai-integration.test.ts src/lib/ai-circuit.test.ts src/lib/ai-route.test.ts src/lib/ai-workflow.test.ts src/lib/workflow-nav.test.ts src/lib/proposal-workflow.test.ts",
     "backfill-discoveries": "node --import tsx/esm src/scripts/backfill-discoveries.ts",
     "reconcile-crawler-opportunities": "node --import tsx/esm src/scripts/reconcile-crawler-opportunities.ts"
   },
@@ -21,6 +21,7 @@
     "@workspace/api-zod": "workspace:*",
     "@workspace/db": "workspace:*",
     "@workspace/integrations-openai-ai-server": "workspace:*",
+    "@workspace/proposal-content": "workspace:*",
     "connect-pg-simple": "^10.0.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2",

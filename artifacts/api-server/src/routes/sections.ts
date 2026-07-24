@@ -11,8 +11,38 @@ import { invokeAI } from "../lib/ai-gateway.js";
 import { appendContentWithLogo, createGoogleDocInFolder, resetIncompleteDoc } from "../lib/google-docs.js";
 import { getValidGoogleAccessToken, GoogleAuthError } from "../lib/google-auth.js";
 import { googleDriveConfigTable } from "@workspace/db";
+import { assembleProposalFromSections } from "@workspace/proposal-content";
 
 const router = Router();
+
+// ── Shared type for Drizzle transactions ──────────────────────────────────
+type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+// ── Immutability guard helper ─────────────────────────────────────────────
+// Returns a 409-ready payload when the proposal has a canonical Google Doc,
+// or null if mutations are still permitted.
+function googleDocCanonicalPayload(proposal: {
+  syncStatus: string | null;
+  googleFileId: string | null;
+  googleDocUrl: string | null;
+}): { error: string; googleDocUrl: string | null } | null {
+  const isHandoffComplete = proposal.syncStatus === "handoff_complete";
+  const isLegacyLinked =
+    !!proposal.googleFileId &&
+    proposal.syncStatus !== "pending_first_write" &&
+    proposal.syncStatus !== "handoff_in_progress" &&
+    !isHandoffComplete;
+
+  if (isHandoffComplete || isLegacyLinked) {
+    const googleDocUrl =
+      proposal.googleDocUrl ??
+      (proposal.googleFileId
+        ? `https://docs.google.com/document/d/${proposal.googleFileId}/edit`
+        : null);
+    return { error: "google_doc_canonical", googleDocUrl };
+  }
+  return null;
+}
 
 // ── List sections for a proposal ──────────────────────────────────────────
 router.get("/proposals/:id/sections", async (req, res) => {
@@ -46,47 +76,77 @@ router.put("/proposals/:id/sections/:sectionId", async (req, res) => {
 
   const { content, status } = req.body as { content?: string; status?: string };
 
+  // ── Immutability guard ─────────────────────────────────────────────────
+  const [proposal] = await db
+    .select({
+      syncStatus:   proposalsTable.syncStatus,
+      googleFileId: proposalsTable.googleFileId,
+      googleDocUrl: proposalsTable.googleDocUrl,
+    })
+    .from(proposalsTable)
+    .where(eq(proposalsTable.id, proposalId));
+
+  if (!proposal) {
+    res.status(404).json({ error: "Proposal not found" });
+    return;
+  }
+
+  const blocked = googleDocCanonicalPayload(proposal);
+  if (blocked) {
+    res.status(409).json(blocked);
+    return;
+  }
+
   try {
-    const updateData: Record<string, unknown> = { updatedAt: new Date() };
-    if (content !== undefined) updateData.content = content;
-    if (status !== undefined) updateData.status = status;
+    const updated = await db.transaction(async (tx: DbTx) => {
+      const updateData: Record<string, unknown> = { updatedAt: new Date() };
+      if (content !== undefined) updateData.content = content;
+      if (status !== undefined) updateData.status = status;
+      if (status === "approved") updateData.approvedAt = new Date();
 
-    if (status === "approved") {
-      updateData.approvedAt = new Date();
-    }
-
-    const [updated] = await db
-      .update(proposalSectionsTable)
-      .set(updateData)
-      .where(
-        and(
-          eq(proposalSectionsTable.id, sectionId),
-          eq(proposalSectionsTable.proposalId, proposalId)
+      const [updated] = await tx
+        .update(proposalSectionsTable)
+        .set(updateData)
+        .where(
+          and(
+            eq(proposalSectionsTable.id, sectionId),
+            eq(proposalSectionsTable.proposalId, proposalId)
+          )
         )
-      )
-      .returning();
+        .returning();
+
+      if (!updated) return null;
+
+      if (status === "approved") {
+        await tx.insert(proposalReviewEventsTable).values({
+          proposalId,
+          sectionId,
+          eventType: "section_approved",
+          notes: null,
+        });
+      }
+
+      // Rebuild proposalContent snapshot atomically when content changes
+      if (content !== undefined) {
+        const allSections = await tx
+          .select()
+          .from(proposalSectionsTable)
+          .where(eq(proposalSectionsTable.proposalId, proposalId))
+          .orderBy(proposalSectionsTable.orderIndex);
+
+        const assembled = assembleProposalFromSections(allSections);
+        await tx
+          .update(proposalsTable)
+          .set({ proposalContent: assembled, dirtySince: new Date(), updatedAt: new Date() })
+          .where(eq(proposalsTable.id, proposalId));
+      }
+
+      return updated;
+    });
 
     if (!updated) {
       res.status(404).json({ error: "Section not found" });
       return;
-    }
-
-    if (status === "approved") {
-      await db.insert(proposalReviewEventsTable).values({
-        proposalId,
-        sectionId,
-        eventType: "section_approved",
-        notes: null,
-      });
-    }
-
-    // Dirty tracking: if content was updated, mark the parent proposal as having
-    // un-synced changes (only meaningful when the proposal has been exported).
-    if (content !== undefined) {
-      db.update(proposalsTable)
-        .set({ dirtySince: new Date() })
-        .where(eq(proposalsTable.id, proposalId))
-        .catch(() => {});
     }
 
     res.json(updated);
@@ -111,6 +171,13 @@ router.post("/proposals/:id/run-critic", async (req, res) => {
 
   if (!proposal) {
     res.status(404).json({ error: "Proposal not found" });
+    return;
+  }
+
+  // ── Immutability guard ─────────────────────────────────────────────────
+  const blocked = googleDocCanonicalPayload(proposal);
+  if (blocked) {
+    res.status(409).json(blocked);
     return;
   }
 
@@ -315,7 +382,7 @@ router.post("/proposals/:id/export", async (req, res) => {
   }
 
   // ── 2a. Draft readiness — evaluated BEFORE auth or any Google API call ────
-  // Avoids triggering OAuth flows for proposals that aren’t ready to export.
+  // Avoids triggering OAuth flows for proposals that aren't ready to export.
   const DRAFTING_PLACEHOLDER = /generating proposal sections/i;
   const hasMeaningfulContent = (text: string | null | undefined): boolean =>
     !!(text?.trim()) && !DRAFTING_PLACEHOLDER.test(text.trim());
@@ -331,7 +398,7 @@ router.post("/proposals/:id/export", async (req, res) => {
 
   let exportContent: string;
   if (meaningfulSections.length > 0) {
-    exportContent = meaningfulSections.map((s) => `## ${s.title}\n\n${s.content}`).join("\n\n---\n\n");
+    exportContent = assembleProposalFromSections(meaningfulSections);
   } else if (hasMeaningfulContent(proposal.proposalContent)) {
     exportContent = proposal.proposalContent!;
   } else {
@@ -542,6 +609,13 @@ router.post("/proposals/:id/ai-improve-sections", async (req, res) => {
     return;
   }
 
+  // ── Immutability guard ─────────────────────────────────────────────────
+  const blocked = googleDocCanonicalPayload(proposal);
+  if (blocked) {
+    res.status(409).json(blocked);
+    return;
+  }
+
   const sections = await db
     .select()
     .from(proposalSectionsTable)
@@ -615,6 +689,21 @@ Return JSON with an "improvements" array. Each element:
             eq(proposalSectionsTable.proposalId, proposalId)
           ));
       }
+
+      // Rebuild proposalContent atomically after all section improvements
+      await db.transaction(async (tx: DbTx) => {
+        const allSections = await tx
+          .select()
+          .from(proposalSectionsTable)
+          .where(eq(proposalSectionsTable.proposalId, proposalId))
+          .orderBy(proposalSectionsTable.orderIndex);
+
+        const assembled = assembleProposalFromSections(allSections);
+        await tx
+          .update(proposalsTable)
+          .set({ proposalContent: assembled, dirtySince: new Date(), updatedAt: new Date() })
+          .where(eq(proposalsTable.id, proposalId));
+      });
     } catch (err) {
       console.error("[ai-improve-sections] failed:", err);
     }

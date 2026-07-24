@@ -1,0 +1,56 @@
+Apply these final corrections, then proceed to Build mode.
+
+1. ENFORCE POST-HANDOFF IMMUTABILITY IN THE API
+
+Do not rely only on disabled frontend controls.
+
+Before every app-side content mutation, load the proposal and reject the request with HTTP 409 and code "google_doc_canonical" when it is:
+
+- syncStatus === "handoff_complete"; or
+- a legacy-linked proposal, defined as googleFileId present while syncStatus is neither "pending_first_write" nor "handoff_in_progress".
+
+Apply this backend guard to:
+
+- PUT /api/proposals/:id/sections/:sectionId
+- AI-improve endpoints
+- critic/rewrite endpoints
+- POST /api/opportunities/:id/generate-proposal when targeting an existing proposal
+
+Return the stored googleDocUrl where available so the frontend can offer Open Google Doc.
+
+Do not block pending_first_write retries or alter task #23’s handoff endpoint behavior.
+
+2. CREATE A REAL SHARED WORKSPACE PACKAGE
+
+There is currently no lib/shared workspace package.
+
+Either create a properly configured package such as @workspace/proposal-content with:
+
+- package.json
+- tsconfig.json
+- src/index.ts
+- src/proposal-assembler.ts
+- package exports
+- dependencies added to both API and proposal-generator package.json files
+
+or use an existing package that is already imported by both applications and is appropriate for pure domain logic.
+
+Both applications must import the same implementation. No copied frontend version is permitted.
+
+3. EXPAND THE TEST REQUIREMENTS
+
+Keep the listed normalization/content tests, but also add behavioral coverage proving:
+
+- Generate Strategy remains blocked until persisted requirements exist.
+- Generate Draft remains blocked until persisted strategy exists.
+- A browser refresh reconstructs all three readiness/completion states from persisted backend data.
+- Immediate polling after the asynchronous strategy endpoint does not mistake the pre-transition status for completion.
+- Completed handoff section PUT returns 409 google_doc_canonical.
+- Legacy-linked section mutation returns 409 google_doc_canonical.
+- AI-improve, critic/rewrite and regeneration are also rejected after handoff.
+- pending_first_write is not incorrectly treated as a completed/legacy handoff.
+- Completed and legacy-linked handoff requests continue returning the stored URL with zero Google API mutations.
+
+The final test count may exceed 13. Accuracy is more important than retaining an arbitrary test count. Update “Done looks like” to say all specified behavioral tests rather than exactly 13.
+
+All existing #23 and #24 tests must remain passing. Both typechecks and both builds must exit 0.

@@ -1,0 +1,45 @@
+You returned the previous #32 plan without applying the authoritative corrections. Do not build yet.
+
+Rewrite the plan and visibly incorporate every correction below:
+
+1. Remove “shared assembler logic mirrored in the frontend.”
+   Use one pure TypeScript implementation imported by both frontend and backend.
+
+2. Replace every reference to “PATCH section” with the actual existing route:
+   PUT /api/proposals/:id/sections/:sectionId
+
+3. Define persisted readiness:
+   - Requirements complete when requirement records exist and extraction is terminal.
+   - Strategy complete when persisted strategy exists and generation is terminal.
+   - Draft complete when meaningful section content exists and generation is terminal.
+   HTTP acceptance alone does not equal completion. Poll/refetch persisted state.
+
+4. Make every section content mutation and proposalContent rebuild transactional.
+   Include manual PUT, AI improve, critic/rewrite, and initial generation.
+   Do not silently catch snapshot-update failures.
+
+5. Preserve #23:
+   - Before handoff, proposal_sections is canonical.
+   - At first handoff, Google export must exactly match the assembled preview.
+   - After handoff_complete or for legacy-linked proposals, Google Docs is canonical.
+   - Disable app section editing, AI improve, critic/rewrite, and regeneration after handoff.
+   - Keep Open Google Doc as the primary action.
+   - Zero subsequent Google mutations.
+
+6. Do not identify a proposal as freeform merely because sections are still loading.
+   Show the freeform editor only after section loading completes, there are zero sections, and section generation is not running.
+
+7. Explicitly define normalization:
+   - Inspect only the first meaningful line.
+   - Strip one matching leading #, ##, or ### heading.
+   - Match case-insensitively.
+   - Tolerate numbering and trailing punctuation.
+   - Preserve nonmatching and internal headings.
+   - Never remove more than one heading.
+
+8. Enumerate the 13 behavioral tests individually rather than referring to unspecified tests.
+
+9. Remove the exit-2 allowance.
+   Both frontend and API typechecks must exit 0 because that is the current verified baseline.
+
+Return the complete revised #32 plan. Explicitly include these corrections in Done looks like, Steps, and Tests. Do not switch to Build mode and do not change code yet.

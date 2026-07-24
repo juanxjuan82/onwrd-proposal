@@ -16,6 +16,7 @@ import { eq, desc, and, inArray, sql } from "drizzle-orm";
 import { invokeAI, type AIResult } from "../lib/ai-gateway.js";
 import { extractTenderMetadata } from "../lib/metadata-extractor.js";
 import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
+import { assembleProposalFromSections } from "@workspace/proposal-content";
 import { applyDeterministicScore } from "../lib/apply-deterministic-score.js";
 import {
   truncateToTokenBudget,
@@ -1083,6 +1084,48 @@ router.post("/opportunities/:id/score", async (req, res) => {
   }
 });
 
+// ── Opportunity readiness — prerequisites for proposal workflow steps ────────
+// Returns persisted facts about requirements, strategy, and tender state.
+// No mutations — safe to poll frequently.
+router.get("/opportunities/:id/readiness", async (req, res) => {
+  const id = Number(req.params.id);
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  try {
+    const [tender] = await db
+      .select({ status: tendersTable.status })
+      .from(tendersTable)
+      .where(eq(tendersTable.id, id));
+
+    if (!tender) { res.status(404).json({ error: "Opportunity not found" }); return; }
+
+    const [reqCount] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(tenderRequirementsTable)
+      .where(eq(tenderRequirementsTable.tenderId, id));
+
+    const [strategy] = await db
+      .select({ id: proposalStrategiesTable.id })
+      .from(proposalStrategiesTable)
+      .where(eq(proposalStrategiesTable.tenderId, id))
+      .orderBy(desc(proposalStrategiesTable.createdAt))
+      .limit(1);
+
+    const requirementsCount = reqCount?.count ?? 0;
+
+    res.json({
+      tenderStatus:         tender.status,
+      isActive:             isActiveStatus(tender.status),
+      requirementsCount,
+      requirementsComplete: requirementsCount > 0,
+      strategyComplete:     !!strategy,
+    });
+  } catch (err) {
+    req.log.error({ err }, "Error getting opportunity readiness");
+    res.status(500).json({ error: "Failed to get readiness" });
+  }
+});
+
 // ── Generate strategy brief (explicit user action) ─────────────────────────
 // AI-powered; requires requirements to be available. Bounded execution
 // with timeout, abort signal, and cancellation support (same as analysis).
@@ -1212,7 +1255,7 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
 
       // 2. Acquire the row lock — blocks concurrent requests until we commit
       const lockedResult = await tx.execute(sql`
-        SELECT id, status, updated_at
+        SELECT id, status, updated_at, sync_status, google_file_id, google_doc_url
         FROM proposals
         WHERE tender_id = ${id}
         FOR UPDATE
@@ -1221,6 +1264,9 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
         id: number;
         status: string;
         updated_at: string | null;
+        sync_status: string | null;
+        google_file_id: string | null;
+        google_doc_url: string | null;
       } | undefined;
 
       if (!locked) throw new Error("Proposal row missing after concurrent-safe insert");
@@ -1230,6 +1276,27 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
         const e = new Error("MISMATCH");
         (e as NodeJS.ErrnoException).code = "MISMATCH";
         throw e;
+      }
+
+      // 3.5. Block regeneration when proposal is already a canonical Google Doc.
+      //      Once a proposal is in Google Docs it is the source of truth.
+      {
+        const isHandoffComplete = locked.sync_status === "handoff_complete";
+        const isLegacyLinked =
+          !!locked.google_file_id &&
+          locked.sync_status !== "pending_first_write" &&
+          locked.sync_status !== "handoff_in_progress" &&
+          !isHandoffComplete;
+        if (isHandoffComplete || isLegacyLinked) {
+          const e = new Error("GOOGLE_DOC_CANONICAL") as NodeJS.ErrnoException & { googleDocUrl?: string };
+          e.code = "GOOGLE_DOC_CANONICAL";
+          e.googleDocUrl =
+            locked.google_doc_url ??
+            (locked.google_file_id
+              ? `https://docs.google.com/document/d/${locked.google_file_id}/edit`
+              : undefined);
+          throw e;
+        }
       }
 
       // 4. Active-generation check with stale-recovery timeout
@@ -1301,6 +1368,15 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
       });
       return;
     }
+    if ((err as NodeJS.ErrnoException).code === "GOOGLE_DOC_CANONICAL") {
+      const e = err as NodeJS.ErrnoException & { googleDocUrl?: string };
+      res.status(409).json({
+        error:       "google_doc_canonical",
+        code:        "google_doc_canonical",
+        googleDocUrl: e.googleDocUrl,
+      });
+      return;
+    }
     req.log.error({ err }, "Error in generate-proposal transaction");
     res.status(500).json({ error: "Failed to start proposal generation" });
     return;
@@ -1329,7 +1405,7 @@ ${ONWRD_CASE_STUDIES}
 
 Return JSON with a "sections" array. Each element:
 - key: the section key
-- content: the full written section content (use markdown — headings with ##, bold with **, bullets with -)`,
+- content: the section BODY ONLY — do NOT start with the section title as a heading. Internal subheadings should use ### (level 3 only). Use markdown bold with ** and bullets with -.`,
           },
           {
             role: "user",
@@ -1362,11 +1438,12 @@ ${SECTION_DEFINITIONS.map((s) => `- ${s.key}: ${s.title}`).join("\n")}`,
         })
         .returning();
 
-      let combinedContent = "";
+      let hasBlockedSections = false;
       for (const sectionDef of SECTION_DEFINITIONS) {
         const generated = sections.find((s) => s.key === sectionDef.key);
         const content    = generated?.content ?? `[NEEDS ONWRD INPUT: ${sectionDef.title} section not generated]`;
         const hasBlocker = content.includes("[NEEDS ONWRD INPUT");
+        if (hasBlocker) hasBlockedSections = true;
         const status     = hasBlocker ? "blocked_missing_input" : "drafted";
 
         await db
@@ -1376,15 +1453,20 @@ ${SECTION_DEFINITIONS.map((s) => `- ${s.key}: ${s.title}`).join("\n")}`,
             eq(proposalSectionsTable.proposalId, draft.id),
             eq(proposalSectionsTable.sectionKey, sectionDef.key),
           ));
-
-        combinedContent += `## ${sectionDef.title}\n\n${content}\n\n`;
       }
 
-      const hasBlockedSections = sections.some((s) => s.content?.includes("[NEEDS ONWRD INPUT"));
+      // Rebuild proposalContent atomically from the freshly written sections.
+      // Uses the shared assembler so proposalContent always mirrors sections exactly.
+      const updatedSections = await db
+        .select()
+        .from(proposalSectionsTable)
+        .where(eq(proposalSectionsTable.proposalId, draft.id))
+        .orderBy(proposalSectionsTable.orderIndex);
+
       await db
         .update(proposalsTable)
         .set({
-          proposalContent: combinedContent.trim(),
+          proposalContent: assembleProposalFromSections(updatedSections),
           status:          hasBlockedSections ? "needs_onwrd_input" : "ready_for_review",
           updatedAt:       new Date(),
         })

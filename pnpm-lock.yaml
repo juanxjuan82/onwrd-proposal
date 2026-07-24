@@ -200,6 +200,9 @@ importers:
       '@workspace/integrations-openai-ai-server':
         specifier: workspace:*
         version: link:../../lib/integrations-openai-ai-server
+      '@workspace/proposal-content':
+        specifier: workspace:*
+        version: link:../../lib/proposal-content
       connect-pg-simple:
         specifier: ^10.0.0
         version: 10.0.0
@@ -592,6 +595,9 @@ importers:
       '@workspace/api-client-react':
         specifier: workspace:*
         version: link:../../lib/api-client-react
+      '@workspace/proposal-content':
+        specifier: workspace:*
+        version: link:../../lib/proposal-content
       class-variance-authority:
         specifier: 'catalog:'
         version: 0.7.1
@@ -721,6 +727,8 @@ importers:
       p-retry:
         specifier: ^7.1.1
         version: 7.1.1
+
+  lib/proposal-content: {}
 
   scripts:
     devDependencies:
