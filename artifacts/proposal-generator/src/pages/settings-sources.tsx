@@ -92,7 +92,7 @@ export default function SettingsSources() {
       if (!r.ok) throw new Error("Failed");
       return r.json();
     },
-    enabled: tab === "profiles",
+    enabled: (tab as string) === "profiles",
   });
 
   const toggleSource = useMutation({
@@ -322,7 +322,7 @@ export default function SettingsSources() {
         </div>
       )}
 
-      {tab === "profiles" && (
+      {(tab as string) === "profiles" && (
         <div className="space-y-3">
           {profiles.map((p) => (
             <div key={p.id} className="p-4 rounded-lg border border-border bg-card">

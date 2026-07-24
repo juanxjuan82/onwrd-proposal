@@ -516,7 +516,7 @@ export default function ProposalDetail() {
       onError: (error) => {
         toast({
           title: "Save failed",
-          description: error.error || "Could not save changes.",
+          description: (error as { error?: string }).error || "Could not save changes.",
           variant: "destructive"
         });
       }
@@ -643,7 +643,7 @@ export default function ProposalDetail() {
       onError: (error) => {
         toast({
           title: "Delete failed",
-          description: error.error || "Could not delete proposal.",
+          description: (error as { error?: string }).error || "Could not delete proposal.",
           variant: "destructive"
         });
       }

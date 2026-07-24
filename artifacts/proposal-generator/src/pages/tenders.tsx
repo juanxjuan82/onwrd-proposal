@@ -188,7 +188,7 @@ function AddTenderDialog() {
         agency: form.agency,
         description: form.description,
         category: form.category || "General",
-        deadline: form.deadline ? new Date(form.deadline) : null,
+        deadline: form.deadline ? new Date(form.deadline).toISOString() : null,
         valueAmount: form.valueAmount || null,
         sourceUrl: form.sourceUrl || null,
         contactInfo: form.contactInfo || null,
