@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { useLocation } from "wouter";
+import { useLocation, useSearch } from "wouter";
 import { useForm, Controller } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
@@ -189,7 +189,11 @@ export default function NewProposal() {
   const [briefText, setBriefText] = useState("");
   const [isExporting, setIsExporting] = useState(false);
   const [previewMode, setPreviewMode] = useState(false);
-  const [mode, setMode] = useState<"form" | "paste">("form");
+  const search = useSearch();
+  const [mode, setMode] = useState<"form" | "paste">(() => {
+    const m = new URLSearchParams(search).get("mode");
+    return m === "paste" || m === "import" ? "paste" : "form";
+  });
   const [pasteText, setPasteText] = useState("");
   const [pasteFile, setPasteFile] = useState<File | null>(null);
   const [pasteFileExtracting, setPasteFileExtracting] = useState(false);

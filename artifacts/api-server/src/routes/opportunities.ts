@@ -12,11 +12,11 @@ import {
   proposalGenerationRunsTable,
   proposalStrategiesTable,
 } from "@workspace/db";
-import { eq, desc, and, inArray } from "drizzle-orm";
+import { eq, desc, and, inArray, sql } from "drizzle-orm";
 import { invokeAI, type AIResult } from "../lib/ai-gateway.js";
 import { extractTenderMetadata } from "../lib/metadata-extractor.js";
 import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
-import { scoreTender } from "../lib/scoring-rules.js";
+import { applyDeterministicScore } from "../lib/apply-deterministic-score.js";
 import {
   truncateToTokenBudget,
   classifyError,
@@ -65,43 +65,6 @@ function isActiveStatus(status: string): status is AnalysisActiveStatus {
   return (ANALYSIS_ACTIVE_STATUSES as readonly string[]).includes(status);
 }
 
-// ── Deterministic scoring — no AI call ───────────────────────────────────────
-// Applied immediately on tender create/update and as the pipeline bid_scoring step.
-async function applyDeterministicScore(tenderId: number) {
-  const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, tenderId));
-  if (!tender) throw new Error("Tender not found");
-
-  const result = scoreTender({
-    title:       tender.title,
-    agency:      tender.agency,
-    category:    tender.category,
-    description: tender.description,
-    deadline:    tender.deadline ?? null,
-    valueAmount: tender.valueAmount ?? null,
-    rawText:     tender.rawText ?? null,
-    contactInfo: tender.contactInfo ?? null,
-  });
-
-  const [bidScore] = await db
-    .insert(bidScoresTable)
-    .values({
-      tenderId,
-      fitScore:          result.fitScore,
-      fitLevel:          result.fitLevel,
-      reasoning:         result.reasoning,
-      flags:             JSON.stringify(result.flags),
-      completenessScore: result.completenessScore,
-      missingFields:     JSON.stringify(result.missingFields),
-    })
-    .returning();
-
-  await db.update(tendersTable).set({
-    recommendationScore: result.fitScore,
-    updatedAt:           new Date(),
-  }).where(eq(tendersTable.id, tenderId));
-
-  return bidScore;
-}
 
 // ── Step 1: Extract requirements ─────────────────────────────────────────────
 async function runExtractRequirements(tenderId: number, cancelSignal?: AbortSignal) {
@@ -233,7 +196,7 @@ async function runExtractRequirements(tenderId: number, cancelSignal?: AbortSign
 // Instant rules-based evaluation; cancelSignal is accepted for pipeline
 // compatibility but not used (scoring is synchronous, < 5 ms).
 async function runBidScoring(tenderId: number, _cancelSignal?: AbortSignal) {
-  return applyDeterministicScore(tenderId);
+  return applyDeterministicScore(db, tenderId);
 }
 
 // ── Step 3: Generate strategy brief ─────────────────────────────────────────
@@ -728,6 +691,7 @@ router.post("/opportunities", async (req, res) => {
         sourceUrl:   sourceUrl   ?? null,
         contactInfo: contactInfo ?? null,
         rawText:     rawText     ?? null,
+        sourceType:  "manual",
         status:      "opportunity_found",
         recommendationScore: 0,
       })
@@ -736,7 +700,7 @@ router.post("/opportunities", async (req, res) => {
     // Deterministic scoring — no AI call. Sets pending_review or no_bid.
     let finalStatus = "pending_review";
     try {
-      const score = await applyDeterministicScore(created.id);
+      const score = await applyDeterministicScore(db, created.id);
       finalStatus = score.fitLevel === "no_bid" ? "no_bid" : "pending_review";
     } catch (scoreErr) {
       req.log.warn({ err: scoreErr }, "Auto-score after create failed — retry via /score");
@@ -824,7 +788,7 @@ router.put("/opportunities/:id", async (req, res) => {
 
     // Re-score with updated metadata (deterministic, instant)
     try {
-      await applyDeterministicScore(id);
+      await applyDeterministicScore(db, id);
     } catch (scoreErr) {
       req.log.warn({ err: scoreErr }, "Auto-score after update failed");
     }
@@ -976,13 +940,83 @@ router.post("/opportunities/:id/convert", async (req, res) => {
       .set({ proposalId: proposal.id, updatedAt: new Date() })
       .where(eq(tendersTable.id, id));
 
-    // Return immediately — client navigates to proposal; extraction runs in background
-    const runId = crypto.randomUUID();
-    res.json({ proposalId: proposal.id, tenderId: id, existing: false, analysisRunId: runId });
-    void runExtractionPipeline(id, runId);
+    res.json({ proposalId: proposal.id, tenderId: id, existing: false });
   } catch (err) {
     req.log.error({ err }, "Error converting opportunity");
     res.status(500).json({ error: "Failed to convert opportunity to proposal" });
+  }
+});
+
+// ── Pursue: find-or-create proposal, mark tender bid_started (idempotent) ────
+// SELECT FOR UPDATE the tender row so concurrent callers cannot race past the
+// existence check and create duplicate proposals.
+router.post("/opportunities/:id/pursue", async (req, res) => {
+  const id = Number(req.params.id);
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  try {
+    type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+    const proposalId = await db.transaction(async (tx: DbTx) => {
+      const lockResult = await tx.execute(
+        sql`SELECT id, title, agency, category, description, deadline,
+                   value_amount, raw_text
+            FROM tenders WHERE id = ${id} FOR UPDATE`,
+      );
+      const tender = lockResult.rows[0] as {
+        id: number; title: string; agency: string; category: string;
+        description: string; deadline: string | null;
+        value_amount: string | null; raw_text: string | null;
+      } | undefined;
+      if (!tender) {
+        const e = new Error("NOT_FOUND");
+        (e as NodeJS.ErrnoException).code = "NOT_FOUND";
+        throw e;
+      }
+
+      const existResult = await tx.execute(
+        sql`SELECT id FROM proposals WHERE tender_id = ${id} ORDER BY id LIMIT 1`,
+      );
+      const existing = existResult.rows[0] as { id: number } | undefined;
+
+      if (existing) {
+        await tx.execute(
+          sql`UPDATE tenders SET status = 'bid_started', updated_at = NOW() WHERE id = ${id}`,
+        );
+        return existing.id;
+      }
+
+      const briefParts: string[] = [tender.title, `Agency: ${tender.agency}`];
+      if (tender.deadline)     briefParts.push(`Deadline: ${tender.deadline.slice(0, 10)}`);
+      if (tender.value_amount) briefParts.push(`Value: ${tender.value_amount}`);
+      briefParts.push("", tender.description);
+      if (tender.raw_text)     briefParts.push(`\nFull RFP:\n${tender.raw_text}`);
+
+      const [proposal] = await tx
+        .insert(proposalsTable)
+        .values({
+          clientName:      tender.agency,
+          industry:        tender.category,
+          status:          "draft",
+          briefText:       briefParts.join("\n"),
+          proposalContent: "",
+          tenderId:        id,
+        })
+        .returning({ id: proposalsTable.id });
+
+      await tx.execute(
+        sql`UPDATE tenders SET proposal_id = ${proposal.id}, status = 'bid_started', updated_at = NOW() WHERE id = ${id}`,
+      );
+      return proposal.id;
+    });
+
+    res.json({ proposalId });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "NOT_FOUND") {
+      res.status(404).json({ error: "Opportunity not found" });
+      return;
+    }
+    req.log.error({ err }, "Error pursuing opportunity");
+    res.status(500).json({ error: "Failed to pursue opportunity" });
   }
 });
 
@@ -1531,7 +1565,7 @@ router.post("/tenders/manual", (req, res, next) => {
     // Deterministic scoring only — no AI call. Sets pending_review or no_bid.
     let manualStatus = "pending_review";
     try {
-      const score = await applyDeterministicScore(created.id);
+      const score = await applyDeterministicScore(db, created.id);
       manualStatus = score.fitLevel === "no_bid" ? "no_bid" : "pending_review";
     } catch (scoreErr) {
       req.log.warn({ err: scoreErr }, "[tenders/manual] auto-score failed");
@@ -1601,6 +1635,7 @@ router.post("/tenders/import-csv", (req, res, next) => {
           sourceUrl:   cells[idx("sourceurl")]?.trim()    || null,
           contactInfo: cells[idx("contactinfo")]?.trim()  || null,
           deadline:    deadline && !isNaN(deadline.getTime()) ? deadline : null,
+          sourceType:  "csv",
           status:      "opportunity_found",
           recommendationScore: 0,
         })
@@ -1608,7 +1643,7 @@ router.post("/tenders/import-csv", (req, res, next) => {
 
       // Deterministic scoring only — no AI call
       try {
-        const score = await applyDeterministicScore(inserted.id);
+        const score = await applyDeterministicScore(db, inserted.id);
         const csvStatus = score.fitLevel === "no_bid" ? "no_bid" : "pending_review";
         await db.update(tendersTable)
           .set({ status: csvStatus, updatedAt: new Date() })
@@ -1649,6 +1684,7 @@ router.post("/tenders/extract-text", async (req, res) => {
         sourceUrl:   null,
         contactInfo: meta.contactInfo ?? null,
         rawText:     text,
+        sourceType:  "pasted_text",
         status:      "opportunity_found",
         recommendationScore: 0,
       })
@@ -1657,7 +1693,7 @@ router.post("/tenders/extract-text", async (req, res) => {
     // Deterministic scoring only — no AI call. Sets pending_review or no_bid.
     let extractStatus = "pending_review";
     try {
-      const score = await applyDeterministicScore(created.id);
+      const score = await applyDeterministicScore(db, created.id);
       extractStatus = score.fitLevel === "no_bid" ? "no_bid" : "pending_review";
     } catch (scoreErr) {
       req.log.warn({ err: scoreErr }, "[extract-text] auto-score failed");

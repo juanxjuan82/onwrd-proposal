@@ -1,5 +1,7 @@
 import { pgTable, text, serial, timestamp, integer, jsonb } from "drizzle-orm/pg-core";
 
+import { tendersTable } from "./tenders";
+
 export const discoveredTendersTable = pgTable("discovered_tenders", {
   id: serial("id").primaryKey(),
   sourceId: integer("source_id").notNull(),
@@ -21,6 +23,9 @@ export const discoveredTendersTable = pgTable("discovered_tenders", {
   geoRegion: text("geo_region"),
   bahamasAdvantageScore: integer("bahamas_advantage_score"),
   confidence: text("confidence"),
+  opportunityId: integer("opportunity_id").references(() => tendersTable.id, {
+    onDelete: "set null",
+  }),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });

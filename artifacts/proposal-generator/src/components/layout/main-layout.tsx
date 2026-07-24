@@ -1,81 +1,37 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link, useLocation } from "wouter";
 import {
-  Plus, LayoutDashboard, Briefcase, Target, BookOpen,
-  Settings, Inbox, HelpCircle, X, FileText,
+  Plus, Target, LayoutDashboard, BookOpen, Settings,
+  HelpCircle, X, Upload, FileText, Pencil, Link2, ChevronDown,
 } from "lucide-react";
 
-const NAV_ITEMS = [
-  {
-    href: "/",
-    exact: true,
-    icon: LayoutDashboard,
-    label: "Proposals",
-    help: "All active proposals — draft, in progress, and exported.",
-  },
-  {
-    href: "/new",
-    exact: true,
-    icon: Plus,
-    label: "New Proposal",
-    help: "Start a proposal from a brief, or import an RFP document.",
-  },
-  {
-    href: "/opportunities",
-    exact: false,
-    icon: Target,
-    label: "Opportunities",
-    help: "Incoming tenders to score and decide: pursue or pass.",
-  },
-  {
-    href: "/tenders",
-    exact: false,
-    icon: Briefcase,
-    label: "Tenders",
-    help: "Full pipeline of every discovered tender — raw finds through analysis.",
-  },
-  {
-    href: "/inbox",
-    exact: false,
-    icon: Inbox,
-    label: "Inbox",
-    help: "New tender matches from the automated daily crawl, pending review.",
-  },
-  {
-    href: "/knowledge",
-    exact: false,
-    icon: BookOpen,
-    label: "Knowledge",
-    help: "Company documents the AI uses to shape proposals.",
-  },
-  {
-    href: "/settings",
-    exact: false,
-    icon: Settings,
-    label: "Settings",
-    help: "Google Docs integration, crawler sources, and document import.",
-  },
-];
-
-const SETTINGS_SUB_ITEMS = [
-  { href: "/settings",         exact: true,  label: "Google Docs" },
-  { href: "/settings/sources", exact: false, label: "Sources" },
-  { href: "/settings/import",  exact: false, label: "Import RFP" },
-];
+const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
 export function MainLayout({ children }: { children: React.ReactNode }) {
-  const [location] = useLocation();
+  const [location, navigate] = useLocation();
   const [showHelp, setShowHelp] = useState<boolean>(() => {
     try { return localStorage.getItem("onwrd_show_help") !== "false"; } catch { return true; }
   });
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [showIntakeModal, setShowIntakeModal] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     try { localStorage.setItem("onwrd_show_help", showHelp ? "true" : "false"); } catch { /* ignore */ }
   }, [showHelp]);
 
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handle = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", handle);
+    return () => document.removeEventListener("mousedown", handle);
+  }, [menuOpen]);
+
   const inSettings = location.startsWith("/settings");
 
-  const isActive = (href: string, exact: boolean) =>
+  const isActive = (href: string, exact = false) =>
     exact ? location === href : location.startsWith(href);
 
   const navClass = (active: boolean) =>
@@ -87,17 +43,45 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
 
   const subNavClass = (active: boolean) =>
     `pl-8 pr-4 py-1.5 text-xs font-medium transition-colors block border-l-[3px] ${
-      active
-        ? "text-white border-[#0000FF]"
-        : "text-[#555] border-transparent hover:text-[#999]"
+      active ? "text-white border-[#0000FF]" : "text-[#555] border-transparent hover:text-[#999]"
     }`;
+
+  const intakeUrl = `${window.location.origin}${BASE}/intake`;
+
+  const menuItems: { label: string; icon: React.ElementType; action: () => void }[] = [
+    {
+      label: "Import RFP",
+      icon: Upload,
+      action: () => { navigate("/new?mode=import"); setMenuOpen(false); },
+    },
+    {
+      label: "Paste RFP Text",
+      icon: FileText,
+      action: () => { navigate("/new?mode=paste"); setMenuOpen(false); },
+    },
+    {
+      label: "Add Opportunity Manually",
+      icon: Pencil,
+      action: () => { navigate("/new?mode=manual"); setMenuOpen(false); },
+    },
+    {
+      label: "Create Blank Proposal",
+      icon: LayoutDashboard,
+      action: () => { navigate("/new?mode=blank"); setMenuOpen(false); },
+    },
+    {
+      label: "Prospect Intake Link",
+      icon: Link2,
+      action: () => { setMenuOpen(false); setShowIntakeModal(true); },
+    },
+  ];
 
   return (
     <div className="min-h-screen bg-black text-white flex flex-col md:flex-row">
       <aside className="w-full md:w-[220px] border-r border-[#222222] bg-black flex-shrink-0 flex flex-col">
         <div className="px-6 py-8 flex flex-col flex-1">
           {/* Logo */}
-          <div className="mb-12">
+          <div className="mb-8">
             <img
               src="/onwrd-logo-white.png"
               alt="ONWRD"
@@ -105,41 +89,117 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
             />
           </div>
 
-          {/* Nav */}
-          <nav className="space-y-0.5 -mx-6 flex-1">
-            {NAV_ITEMS.map(({ href, exact, icon: Icon, label, help }) => {
-              const active = isActive(href, exact);
-              return (
-                <div key={href}>
-                  <Link href={href} className={navClass(active)}>
-                    <div className="flex items-center gap-3">
-                      <Icon className="w-5 h-5 flex-shrink-0" />
-                      <span>{label}</span>
-                    </div>
-                    {showHelp && (
-                      <p className="mt-0.5 ml-8 text-[11px] font-normal leading-snug text-[#555] whitespace-normal">
-                        {help}
-                      </p>
-                    )}
-                  </Link>
+          {/* + New dropdown */}
+          <div className="relative mb-6" ref={menuRef}>
+            <button
+              onClick={() => setMenuOpen(v => !v)}
+              className="w-full flex items-center justify-between gap-2 px-4 py-2.5 rounded-md bg-[#0000FF] hover:bg-[#0000dd] text-white text-sm font-medium transition-colors"
+            >
+              <span className="flex items-center gap-2">
+                <Plus className="w-4 h-4" />
+                New
+              </span>
+              <ChevronDown
+                className={`w-3.5 h-3.5 transition-transform ${menuOpen ? "rotate-180" : ""}`}
+              />
+            </button>
+            {menuOpen && (
+              <div className="absolute left-0 right-0 top-full mt-1 z-50 bg-[#111] border border-[#333] rounded-md shadow-2xl overflow-hidden">
+                {menuItems.map(({ label, icon: Icon, action }) => (
+                  <button
+                    key={label}
+                    onClick={action}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-[#ccc] hover:text-white hover:bg-[#1a1a1a] transition-colors text-left"
+                  >
+                    <Icon className="w-3.5 h-3.5 flex-shrink-0 text-[#666]" />
+                    {label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
 
-                  {/* Settings sub-items — shown when in /settings section */}
-                  {href === "/settings" && inSettings && (
-                    <div className="mb-1">
-                      {SETTINGS_SUB_ITEMS.map((sub) => (
-                        <Link
-                          key={sub.href}
-                          href={sub.href}
-                          className={subNavClass(isActive(sub.href, sub.exact))}
-                        >
-                          {sub.label}
-                        </Link>
-                      ))}
-                    </div>
-                  )}
+          {/* Nav */}
+          <nav className="-mx-6 flex-1 space-y-0">
+            {/* WORKFLOW section */}
+            <div className="px-4 pb-1">
+              <span className="text-[10px] font-semibold uppercase tracking-widest text-[#444]">
+                Workflow
+              </span>
+            </div>
+
+            <Link href="/opportunities" className={navClass(isActive("/opportunities"))}>
+              <div className="flex items-center gap-3">
+                <Target className="w-5 h-5 flex-shrink-0" />
+                <span>Opportunities</span>
+              </div>
+              {showHelp && (
+                <p className="mt-0.5 ml-8 text-[11px] font-normal leading-snug text-[#555] whitespace-normal">
+                  Score, enrich and decide — then pursue or pass.
+                </p>
+              )}
+            </Link>
+
+            <Link href="/" className={navClass(location === "/")}>
+              <div className="flex items-center gap-3">
+                <LayoutDashboard className="w-5 h-5 flex-shrink-0" />
+                <span>Proposals</span>
+              </div>
+              {showHelp && (
+                <p className="mt-0.5 ml-8 text-[11px] font-normal leading-snug text-[#555] whitespace-normal">
+                  In progress, ready to share, and team review.
+                </p>
+              )}
+            </Link>
+
+            {/* WORKSPACE section */}
+            <div className="px-4 pb-1 pt-4">
+              <span className="text-[10px] font-semibold uppercase tracking-widest text-[#444]">
+                Workspace
+              </span>
+            </div>
+
+            <Link href="/knowledge" className={navClass(isActive("/knowledge"))}>
+              <div className="flex items-center gap-3">
+                <BookOpen className="w-5 h-5 flex-shrink-0" />
+                <span>Knowledge</span>
+              </div>
+              {showHelp && (
+                <p className="mt-0.5 ml-8 text-[11px] font-normal leading-snug text-[#555] whitespace-normal">
+                  Company documents the AI uses to shape proposals.
+                </p>
+              )}
+            </Link>
+
+            <div>
+              <Link href="/settings" className={navClass(inSettings)}>
+                <div className="flex items-center gap-3">
+                  <Settings className="w-5 h-5 flex-shrink-0" />
+                  <span>Settings</span>
                 </div>
-              );
-            })}
+                {showHelp && (
+                  <p className="mt-0.5 ml-8 text-[11px] font-normal leading-snug text-[#555] whitespace-normal">
+                    Google Docs integration and crawler sources.
+                  </p>
+                )}
+              </Link>
+              {inSettings && (
+                <div className="mb-1">
+                  <Link
+                    href="/settings"
+                    className={subNavClass(location === "/settings")}
+                  >
+                    Google Docs
+                  </Link>
+                  <Link
+                    href="/settings/sources"
+                    className={subNavClass(isActive("/settings/sources"))}
+                  >
+                    Sources
+                  </Link>
+                </div>
+              )}
+            </div>
           </nav>
 
           {/* Help toggle */}
@@ -165,6 +225,46 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
       </aside>
 
       <main className="flex-1 overflow-auto bg-black">{children}</main>
+
+      {/* Prospect Intake share modal */}
+      {showIntakeModal && (
+        <div
+          className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4"
+          onClick={() => setShowIntakeModal(false)}
+        >
+          <div
+            className="bg-[#111] border border-[#333] rounded-xl p-6 max-w-md w-full shadow-2xl"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-white font-semibold text-base">Prospect Intake Link</h2>
+              <button
+                onClick={() => setShowIntakeModal(false)}
+                className="text-[#555] hover:text-white transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-[#888] text-sm mb-4">
+              Share this link with prospects to capture their brief and automatically create an opportunity in the pipeline.
+            </p>
+            <div className="flex gap-2">
+              <input
+                readOnly
+                value={intakeUrl}
+                className="flex-1 bg-[#1a1a1a] border border-[#333] rounded-md px-3 py-2 text-sm text-white font-mono select-all"
+                onFocus={e => e.target.select()}
+              />
+              <button
+                onClick={() => { navigator.clipboard.writeText(intakeUrl).catch(() => {}); }}
+                className="px-3 py-2 bg-[#0000FF] hover:bg-[#0000dd] text-white text-xs rounded-md font-medium transition-colors whitespace-nowrap"
+              >
+                Copy
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

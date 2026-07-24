@@ -1,0 +1,59 @@
+This revision still contradicts the authoritative corrections. Update the plan itself before Build:
+
+1. Intake transaction ordering is still wrong
+The plan still says:
+“INSERT opportunity ... then upsert intake draft using submissionKey.”
+
+Replace it with:
+- Inside the transaction, INSERT/UPSERT intake_draft by submissionKey first
+- SELECT the resulting draft FOR UPDATE
+- If opportunityId exists, return {success:true}
+- Only then create and score the Opportunity
+- Update the locked draft with opportunityId
+- Commit
+
+The idempotency key must be claimed before creating the Opportunity.
+
+2. Remove scoring from Pursue
+The plan still says applyDeterministicScore is called by the pursue endpoint. Remove this everywhere.
+
+Pursue must not re-score the Opportunity or create another bid_scores row. Scoring occurs when an Opportunity is created.
+
+3. Make Pursue concurrent-safe explicitly
+Replace “find existing proposal or insert new” with:
+- Verify the Opportunity exists
+- Attempt INSERT proposal using the unique tenderId/opportunity link with ON CONFLICT DO NOTHING
+- Fetch the canonical linked Proposal
+- Update the Opportunity to In Progress
+- Commit
+- Both concurrent requests return the same proposalId
+
+A transaction around select-then-insert is not sufficient.
+
+4. Correct the crawler backfill
+The plan still filters status = 'active', which is not a current discovered-tender status.
+
+Replace it with:
+- opportunityId IS NULL
+- status IN ('new', 'saved')
+- Exclude status = 'dismissed'
+
+5. Define every sourceType value
+Require these exact stored values:
+crawler
+rfp_upload
+url
+pasted_text
+manual
+csv
+prospect_intake
+
+Legacy null values display as “Legacy”; do not infer a source.
+
+6. Correct the crawler file location
+The existing implementation is:
+artifacts/api-server/src/routes/tender-intelligence.ts
+
+Do not list artifacts/api-server/src/crawlers/tender-intelligence.ts unless Build first confirms that file actually exists. A new routes/discovered-tenders.ts may be created and registered intentionally.
+
+Update all affected sections: Corrections/Overrides, Done Looks Like, Steps, Tests, and Relevant Files. Then return the corrected final plan. Do not start Build yet.

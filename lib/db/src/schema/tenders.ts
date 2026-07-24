@@ -13,6 +13,7 @@ export const tendersTable = pgTable("tenders", {
   deadline: timestamp("deadline", { withTimezone: true }),
   valueAmount: text("value_amount"),
   sourceUrl: text("source_url"),
+  sourceType: text("source_type"),
   contactInfo: text("contact_info"),
   rawText: text("raw_text"),
   status: text("status").notNull().default("opportunity_found"),

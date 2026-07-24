@@ -16,6 +16,7 @@ import { CTOAdapter } from "./cto.js";
 import { CARICOMAdapter } from "./caricom.js";
 import { EUCaribbeanAdapter } from "./eu-caribbean.js";
 import { type TenderSourceAdapter, type TenderOpportunity } from "./base-adapter.js";
+import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
 
 function getAdapter(adapterType: string): TenderSourceAdapter | null {
   switch (adapterType) {
@@ -420,7 +421,7 @@ export async function runCrawler(sourceId?: number): Promise<{
 
           const result = keywordScore(opp);
 
-          await db.insert(discoveredTendersTable).values({
+          const [discovery] = await db.insert(discoveredTendersTable).values({
             sourceId:             source.id,
             externalId:           opp.externalId ?? null,
             title:                opp.title,
@@ -440,7 +441,15 @@ export async function runCrawler(sourceId?: number): Promise<{
             geoRegion:            result.geoRegion,
             bahamasAdvantageScore: result.bahamasAdvantageScore,
             confidence:           result.confidence,
-          });
+          }).returning({ id: discoveredTendersTable.id });
+
+          // Promote to canonical Opportunity — best-effort, non-fatal per discovery
+          try {
+            await promoteDiscoveredTender(discovery.id);
+          } catch (promErr) {
+            const msg = promErr instanceof Error ? promErr.message : String(promErr);
+            console.warn(`[crawler] promote id=${discovery.id} failed: ${msg.slice(0, 80)}`);
+          }
 
           newCount++;
           totalNew++;

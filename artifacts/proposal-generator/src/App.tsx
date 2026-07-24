@@ -21,6 +21,13 @@ import SettingsImport from "./pages/settings-import";
 
 const queryClient = new QueryClient();
 
+// Generic redirect for legacy URL paths
+function Redirect({ to }: { to: string }) {
+  const [, setLocation] = useLocation();
+  useEffect(() => { setLocation(to, { replace: true }); }, [to, setLocation]);
+  return null;
+}
+
 // Redirect legacy /tenders/:id URLs to the canonical /opportunities/:id route.
 function TenderDetailRedirect() {
   const { id } = useParams<{ id: string }>();
@@ -44,16 +51,16 @@ function Router() {
             <Route path="/" component={Home} />
             <Route path="/new" component={NewProposal} />
             <Route path="/proposals/:id" component={ProposalDetail} />
-            <Route path="/tenders" component={Tenders} />
-            {/* Legacy /tenders/:id URLs redirect to canonical /opportunities/:id */}
+            {/* Legacy routes → canonical */}
             <Route path="/tenders/:id" component={TenderDetailRedirect} />
+            <Route path="/tenders" component={() => <Redirect to="/opportunities" />} />
+            <Route path="/inbox" component={() => <Redirect to="/opportunities" />} />
+            <Route path="/settings/import" component={() => <Redirect to="/new?mode=import" />} />
             <Route path="/opportunities" component={Opportunities} />
             <Route path="/opportunities/:id" component={OpportunityDetail} />
             <Route path="/knowledge" component={Knowledge} />
-            <Route path="/inbox" component={OpportunityInbox} />
             <Route path="/settings" component={SettingsGoogle} />
             <Route path="/settings/sources" component={SettingsSources} />
-            <Route path="/settings/import" component={SettingsImport} />
             <Route component={NotFound} />
           </Switch>
         </MainLayout>

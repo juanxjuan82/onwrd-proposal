@@ -2,7 +2,8 @@
 - [Analysis pipeline design](analysis-pipeline.md) — extraction is a single AI call (not a loop); step statuses, 45k-char truncation, 90s abort, quota-never-retry pattern
 - [Test runner choice](test-runner.md) — vitest blocked by package firewall; use node:test + tsx (already in workspace catalog); test script in package.json lists files explicitly
 - [drizzle-kit push blocked](drizzle-kit-push.md) — drizzle-kit push hangs on interactive prompt; use direct SQL for schema changes
-- [Scoring architecture](scoring-architecture.md) — bid scoring is deterministic (scoring-rules.ts), not AI; applyDeterministicScore() is the single entry point used by both API routes and the pipeline step
+- [Scoring architecture](scoring-architecture.md) — bid scoring is deterministic (scoring-rules.ts), not AI; applyDeterministicScore(executor, tenderId) takes db or tx as first arg for atomic transactions
+- [Drizzle tx type annotation](drizzle-tx-type.md) — type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0]; annotate transaction callback params with (tx: DbTx) to avoid TS7006
 - [Pre-existing TS errors](preexisting-ts-errors.md) — sections.ts and tenders.ts have implicit-any + unbuilt .d.ts errors predating this work; pnpm typecheck exit 2 is not a regression
 - [AI gateway pattern](ai-gateway-pattern.md) — single permitted openai importer; all AI calls route through invokeAI(); build guard in build.mjs enforces this at compile time.
 - [Deterministic metadata extractor](metadata-extractor.md) — tender imports use extractTenderMetadata() (no AI); returns needsReview flag when title/agency undetected.

@@ -1,0 +1,48 @@
+Proceed to Build mode for #24, with these authoritative corrections:
+
+1. Fix prospect-intake concurrency ordering
+Inside the transaction, claim the unique submissionKey before creating an Opportunity:
+- INSERT/UPSERT the intake_draft using submissionKey
+- SELECT that draft FOR UPDATE
+- If opportunityId already exists, commit and return { success: true }
+- Otherwise create the Opportunity, score it, and update the locked draft with opportunityId
+Do not create the Opportunity before claiming the idempotency key; concurrent submissions could otherwise create duplicates.
+
+2. Make Pursue truly concurrent-safe
+Do not rely on transaction isolation around a select-then-insert sequence.
+- Preserve/enforce the unique constraint on proposals.tenderId
+- Use INSERT ... ON CONFLICT DO NOTHING, then fetch the canonical proposal
+- Both concurrent requests must return the same proposalId
+- Do not call applyDeterministicScore from Pursue; the Opportunity was scored at creation, and Pursue must not add duplicate bid_scores rows
+
+3. Correct crawler backfill eligibility
+The current discovered-tender statuses are new, saved, and dismissed—not active.
+Backfill:
+- WHERE opportunityId IS NULL
+- Include eligible statuses new and saved
+- Exclude dismissed records
+- Set sourceType = "crawler"
+- Use the same promoteDiscoveredTender service as the live crawler and API endpoint
+
+4. Set sourceType explicitly for every creation route
+Use these exact stable values:
+- crawler
+- rfp_upload
+- url
+- pasted_text
+- manual
+- csv
+- prospect_intake
+
+Legacy rows with null sourceType should display a neutral “Legacy” badge or a clearly defined fallback; do not guess incorrectly.
+
+5. Use the actual crawler route locations
+The existing tender-intelligence implementation is under:
+artifacts/api-server/src/routes/tender-intelligence.ts
+
+Do not assume src/crawlers/tender-intelligence.ts exists. Creating routes/discovered-tenders.ts is acceptable if intentionally extracting and registering the new promote route; otherwise add it to the existing tender-intelligence router.
+
+6. Preserve #23 exactly
+Do not alter Google OAuth, Picker, Drive configuration, document creation, or handoff state-machine behavior. Team Review must open the stored Google Doc URL directly with zero Google API mutations.
+
+Implement the complete #24 plan with these corrections, run the schema push and crawler backfill safely, then run the entire test suite, both type-checks, and both production builds. Report changed files, migration/backfill results, test totals, and any remaining pre-existing failures.

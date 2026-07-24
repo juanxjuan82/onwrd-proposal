@@ -42,6 +42,7 @@ interface Opportunity {
   deadline?: string | null;
   valueAmount?: string | null;
   sourceUrl?: string | null;
+  sourceType?: string | null;
   contactInfo?: string | null;
   description: string;
   rawText?: string | null;
@@ -108,23 +109,37 @@ function statusLabel(status: string) {
   return labels[status] ?? status;
 }
 
-function sourceLabel(opp: Opportunity) {
-  return opp.sourceUrl ? "Scraper" : "Manual";
+interface SourceMeta { label: string; icon: React.ReactNode; cls: string; title: string }
+
+function resolveSource(opp: Opportunity): SourceMeta {
+  const st = opp.sourceType ?? (opp.sourceUrl ? "crawler" : "manual");
+  switch (st) {
+    case "crawler":
+      return { label: "Scraped",   icon: <Globe className="w-2.5 h-2.5" />,       cls: "border-blue-900/50 bg-blue-950/30 text-blue-400",    title: opp.sourceUrl ?? "Web crawler" };
+    case "url":
+      return { label: "URL Import", icon: <ExternalLink className="w-2.5 h-2.5" />, cls: "border-sky-900/50 bg-sky-950/30 text-sky-400",       title: opp.sourceUrl ?? "URL import" };
+    case "rfp_upload":
+      return { label: "Uploaded",   icon: <Upload className="w-2.5 h-2.5" />,       cls: "border-violet-900/50 bg-violet-950/30 text-violet-400", title: "RFP file upload" };
+    case "pasted_text":
+      return { label: "Pasted",     icon: <FileText className="w-2.5 h-2.5" />,     cls: "border-violet-900/50 bg-violet-950/30 text-violet-400", title: "Pasted RFP text" };
+    case "csv":
+      return { label: "CSV",        icon: <FileText className="w-2.5 h-2.5" />,     cls: "border-violet-900/50 bg-violet-950/30 text-violet-400", title: "CSV import" };
+    case "prospect_intake":
+      return { label: "Prospect",   icon: <Zap className="w-2.5 h-2.5" />,          cls: "border-emerald-900/50 bg-emerald-950/30 text-emerald-400", title: "Prospect intake form" };
+    default:
+      return { label: "Manual",     icon: <Upload className="w-2.5 h-2.5" />,       cls: "border-violet-900/50 bg-violet-950/30 text-violet-400", title: "Manually added" };
+  }
 }
 
 function SourceBadge({ opp }: { opp: Opportunity }) {
-  const isCrawled = Boolean(opp.sourceUrl);
+  const { label, icon, cls, title } = resolveSource(opp);
   return (
     <span
-      title={isCrawled ? `Source: ${opp.sourceUrl}` : "Manually uploaded"}
-      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
-        isCrawled
-          ? "border-blue-900/50 bg-blue-950/30 text-blue-400"
-          : "border-violet-900/50 bg-violet-950/30 text-violet-400"
-      }`}
+      title={title}
+      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${cls}`}
     >
-      {isCrawled ? <Globe className="w-2.5 h-2.5" /> : <Upload className="w-2.5 h-2.5" />}
-      {sourceLabel(opp)}
+      {icon}
+      {label}
     </span>
   );
 }
@@ -201,14 +216,14 @@ function useCreateOpportunity() {
   });
 }
 
-function useStartBid(id: number) {
+function usePursue(id: number) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (): Promise<{ proposalId: number; tenderId: number; existing: boolean }> => {
-      const r = await fetch(`${BASE}/api/opportunities/${id}/start-bid`, { method: "POST" });
+    mutationFn: async (): Promise<{ proposalId: number }> => {
+      const r = await fetch(`${BASE}/api/opportunities/${id}/pursue`, { method: "POST" });
       if (!r.ok) {
         const e = await r.json().catch(() => ({}));
-        throw new Error((e as { error?: string }).error ?? "Failed to start bid");
+        throw new Error((e as { error?: string }).error ?? "Failed to pursue opportunity");
       }
       return r.json();
     },
@@ -282,19 +297,19 @@ function EnrichDrawer({
   const { toast } = useToast();
   const update = useUpdateOpportunity(opp.id);
   const rescore = useRescoreOpportunity(opp.id);
-  const startBid = useStartBid(opp.id);
+  const pursue = usePursue(opp.id);
 
   const handleStartBid = async () => {
     try {
-      const result = await startBid.mutateAsync();
+      const result = await pursue.mutateAsync();
       toast({
-        title: result.existing ? "Proposal already exists" : "Bid workspace created",
-        description: "Opening the tender analysis page…",
+        title: "Bid workspace created",
+        description: "Opening the proposal workspace…",
       });
       onClose();
-      setLocation(`/opportunities/${opp.id}`);
+      setLocation(`/proposals/${result.proposalId}`);
     } catch (err) {
-      toast({ title: "Failed to start bid", description: (err as Error).message, variant: "destructive" });
+      toast({ title: "Failed to pursue opportunity", description: (err as Error).message, variant: "destructive" });
     }
   };
 
@@ -654,40 +669,79 @@ function CreateDialog({
 }
 
 // ── Main page ────────────────────────────────────────────────────────────────
+type FilterTab = "new" | "reviewing" | "in_progress" | "no_bid" | "all";
+
+const FILTER_TABS: { key: FilterTab; label: string; test: (o: Opportunity) => boolean }[] = [
+  {
+    key: "new",
+    label: "New",
+    test: (o) => o.status === "opportunity_found" || o.status === "pending_review",
+  },
+  {
+    key: "reviewing",
+    label: "Reviewing",
+    test: (o) =>
+      ["analysing", "requirements_extracting", "bid_scoring", "strategy_generating",
+        "requirements_extracted", "screened", "analysis_failed", "analysis_cancelled"].includes(o.status),
+  },
+  {
+    key: "in_progress",
+    label: "In Progress",
+    test: (o) =>
+      ["bid_started", "proposal_drafting", "needs_onwrd_input",
+        "ready_for_review", "approved_for_export", "exported_to_drive"].includes(o.status),
+  },
+  { key: "no_bid", label: "No Bid", test: (o) => o.status === "no_bid" },
+  { key: "all",    label: "All",    test: () => true },
+];
+
 export default function Opportunities() {
   const { data: opportunities, isLoading } = useOpportunities();
-  const [showConverted, setShowConverted] = useState(false);
+  const [filterTab, setFilterTab] = useState<FilterTab>("all");
   const [selected, setSelected] = useState<Opportunity | null>(null);
 
-  const all       = opportunities ?? [];
-  const converted = all.filter((o) => o.status === "bid_started");
-  const active    = showConverted ? all : all.filter((o) => o.status !== "bid_started");
+  const all = opportunities ?? [];
+
+  const tabCounts = Object.fromEntries(
+    FILTER_TABS.map((t) => [t.key, all.filter(t.test).length]),
+  ) as Record<FilterTab, number>;
+
+  const active = all.filter(FILTER_TABS.find((t) => t.key === filterTab)!.test);
 
   return (
     <div className="p-8 max-w-6xl mx-auto">
-      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-8 gap-4">
-        <div>
-          <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">Review Desk</h1>
-          <p className="text-muted-foreground">Score, enrich, and decide — then pursue or pass.</p>
-        </div>
-        {converted.length > 0 && (
-          <Button
-            variant="outline"
-            size="sm"
-            className="text-xs gap-1.5"
-            onClick={() => setShowConverted((v) => !v)}
-          >
-            {showConverted ? "Hide converted" : `Show converted (${converted.length})`}
-          </Button>
-        )}
+      <div className="mb-6">
+        <h1 className="text-3xl font-bold text-white mb-1 tracking-tight">Opportunities</h1>
+        <p className="text-muted-foreground text-sm">Score, enrich, and decide — then pursue or pass.</p>
       </div>
 
-      {/* Legend */}
-      <div className="flex items-center gap-4 text-xs text-muted-foreground mb-4">
-        <span className="flex items-center gap-1.5"><Globe className="w-3 h-3 text-blue-400" />Scraper</span>
-        <span className="flex items-center gap-1.5"><Upload className="w-3 h-3 text-violet-400" />Manual</span>
-        <span className="flex items-center gap-1.5 ml-4"><AlertTriangle className="w-3 h-3 text-amber-400" />Brief &lt; 70</span>
-        <span className="ml-auto text-xs">{active.length} shown · {all.length} total</span>
+      {/* Filter tabs */}
+      <div className="flex gap-1 mb-5 border-b pb-0">
+        {FILTER_TABS.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setFilterTab(t.key)}
+            className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
+              filterTab === t.key
+                ? "border-primary text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {t.label}
+            {tabCounts[t.key] > 0 && (
+              <span className={`ml-0.5 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
+                filterTab === t.key
+                  ? "bg-primary/20 text-primary"
+                  : "bg-muted text-muted-foreground"
+              }`}>
+                {tabCounts[t.key]}
+              </span>
+            )}
+          </button>
+        ))}
+        <span className="ml-auto self-center text-xs text-muted-foreground pr-1">
+          {active.length} / {all.length}
+        </span>
       </div>
 
       {isLoading ? (
@@ -700,16 +754,16 @@ export default function Opportunities() {
             <Target className="w-6 h-6 text-primary" />
           </div>
           <h3 className="text-lg font-medium text-foreground mb-2">
-            {all.length > 0 ? "All opportunities have been converted" : "No opportunities yet"}
+            {all.length === 0 ? "No opportunities yet" : `No ${FILTER_TABS.find((t) => t.key === filterTab)?.label.toLowerCase()} opportunities`}
           </h3>
           <p className="text-muted-foreground mb-6 max-w-sm mx-auto">
-            {all.length > 0
-              ? "Opportunities you've pursued are in their proposal workspaces."
-              : "Import an RFP or connect a tender source to begin scoring."}
+            {all.length === 0
+              ? "Import an RFP or connect a tender source to begin scoring."
+              : "Switch to All to see everything, or use the + New menu to add one."}
           </p>
-          {all.length > 0 && (
-            <Button variant="outline" size="sm" onClick={() => setShowConverted(true)}>
-              Show converted
+          {all.length === 0 && (
+            <Button asChild variant="outline" size="sm">
+              <a href="/new?mode=import">Import RFP</a>
             </Button>
           )}
         </div>

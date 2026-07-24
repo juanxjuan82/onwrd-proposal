@@ -9,6 +9,7 @@ import {
 } from "@workspace/db";
 import { eq, desc, and, gte } from "drizzle-orm";
 import { runCrawler, rescoreWithKeywords, isCrawlRunning } from "../crawlers/index.js";
+import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
 
 const router = Router();
 
@@ -129,6 +130,24 @@ router.patch("/discovered-tenders/:id", async (req, res) => {
     .returning();
   if (!updated) { res.status(404).json({ error: "Not found" }); return; }
   res.json(updated);
+});
+
+// ── Promote discovered tender to canonical Opportunity ─────────────────────
+// Idempotent: if opportunityId is already set, returns it without a second insert.
+// Concurrent callers are serialised by SELECT FOR UPDATE inside the service.
+router.post("/discovered-tenders/:id/promote", async (req, res) => {
+  const id = Number(req.params.id);
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+  try {
+    const result = await promoteDiscoveredTender(id);
+    res.json(result);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "NOT_FOUND") {
+      res.status(404).json({ error: "Discovered tender not found" });
+      return;
+    }
+    res.status(500).json({ error: "Failed to promote discovered tender" });
+  }
 });
 
 // ── Search Profiles ────────────────────────────────────────────────────────

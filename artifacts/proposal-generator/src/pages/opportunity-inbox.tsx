@@ -138,31 +138,14 @@ export default function OpportunityInbox() {
   const startBid = async (item: DiscoveredTender) => {
     setStartingBid(item.id);
     try {
-      // Mark as saved in inbox
-      await fetch(`${BASE}/api/discovered-tenders/${item.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "saved" }),
-      });
-      // Create opportunity from tender data
-      const r = await fetch(`${BASE}/api/opportunities`, {
+      const r = await fetch(`${BASE}/api/discovered-tenders/${item.id}/promote`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title: item.title,
-          agency: item.organization,
-          description: item.description,
-          category: item.sector ?? "General",
-          deadline: item.deadline ?? undefined,
-          valueAmount: item.valueAmount ?? undefined,
-          sourceUrl: item.url ?? undefined,
-          rawText: item.description,
-        }),
       });
-      if (!r.ok) throw new Error("Failed to create opportunity");
-      const opp = await r.json() as { id: number };
+      if (!r.ok) throw new Error("Failed to promote");
+      const result = await r.json() as { opportunityId: number };
       qc.invalidateQueries({ queryKey: ["discovered-tenders"] });
-      navigate(`/opportunities/${opp.id}`);
+      navigate(`/opportunities/${result.opportunityId}`);
     } catch {
       toast({ title: "Could not start bid", variant: "destructive" });
     } finally {

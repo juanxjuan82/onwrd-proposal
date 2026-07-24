@@ -150,6 +150,7 @@ export default function Intake() {
   const [busy, setBusy] = useState(false);
   const [submitErr, setSubmitErr] = useState<string|null>(null);
   const [briefFile, setBriefFile] = useState<File | null>(null);
+  const [submissionKey] = useState(() => crypto.randomUUID());
   const [draftId, setDraftId] = useState<number | null>(null);
   const [autosaved, setAutosaved] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -193,7 +194,7 @@ export default function Intake() {
         const resp = await fetch(`${BASE}/api/intake/draft`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ firstName, lastName, jobTitle, email, phone, preferredContact }),
+          body: JSON.stringify({ submissionKey, firstName, lastName, jobTitle, email, phone, preferredContact }),
         });
         if (resp.ok) {
           const data = await resp.json() as { id: number };
@@ -221,6 +222,7 @@ export default function Intake() {
       formData.append("clientName", v.orgName);
       formData.append("industry", wo(v.industry, v.industryOther));
       if (briefFile) formData.append("briefFile", briefFile);
+      formData.append("submissionKey", submissionKey);
       if (draftId) formData.append("draftId", String(draftId));
 
       const r = await fetch(`${BASE}/api/intake`, { method: "POST", body: formData });

@@ -1,0 +1,11 @@
+Implement #24 using the plan below, with these corrections overriding conflicting language:
+
+Submission idempotency: Generate a random UUID when /intake loads. Persist and submit it as submissionKey. Add a unique nullable submissionKey column to intake_drafts. Never derive idempotency from email, project type or time buckets.
+Transactional scoring: Refactor applyDeterministicScore to accept the active database executor—db or tx. Every read, bid-score insert and Opportunity score update must use the provided executor. Prospect intake and crawler promotion must call it with tx.
+Crawler normalization: Keep discovered_tenders as raw crawler/audit records, but promote eligible discoveries server-side into canonical Opportunities. Implement one shared transactional promoteDiscoveredTender service. The crawler calls it after storing/scoring an eligible discovery; POST /api/discovered-tenders/:id/promote uses the same service for legacy/manual cases. Set sourceType = "crawler" and link discovered_tenders.opportunityId. The Opportunities page queries canonical Opportunities only. Add an idempotent manual backfill command for existing active, non-dismissed discoveries without opportunityId. Do not run the production backfill automatically.
+Schema: discovered_tenders.opportunityId must be an actual nullable FK to tenders.id. Add intake_drafts.opportunityId and unique intake_drafts.submissionKey.
+Proposal workspace: Move the visible Extract Requirements action into proposal-detail.tsx after Pursue. Opportunities must contain no AI actions. Preserve all completed #23 Google handoff behavior in that file.
+Required files: Include proposal-detail.tsx, opportunity-inbox.tsx, tender-intelligence.ts, discovered-tenders.ts, the crawler orchestration file, and any shared promotion/scoring service.
+No client-side promotion: Remove the existing discovered-tender PATCH followed by Opportunity POST. Promotion must be one server-side atomic operation.
+
+Do not restate the plan. Implement it, run all tests/type-checks/builds, and do not deploy or merge automatically.
