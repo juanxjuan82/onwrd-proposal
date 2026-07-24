@@ -666,11 +666,11 @@ router.get("/opportunities", async (req, res) => {
 router.post("/opportunities", async (req, res) => {
   const {
     title, agency, description, category,
-    deadline, valueAmount, sourceUrl, contactInfo, rawText,
+    deadline, valueAmount, sourceUrl, contactInfo, rawText, sourceType,
   } = req.body as {
     title: string; agency: string; description: string; category?: string;
     deadline?: string; valueAmount?: string; sourceUrl?: string;
-    contactInfo?: string; rawText?: string;
+    contactInfo?: string; rawText?: string; sourceType?: string;
   };
 
   if (!title || !agency || !description) {
@@ -691,7 +691,7 @@ router.post("/opportunities", async (req, res) => {
         sourceUrl:   sourceUrl   ?? null,
         contactInfo: contactInfo ?? null,
         rawText:     rawText     ?? null,
-        sourceType:  "manual",
+        sourceType:  sourceType  ?? "manual",
         status:      "opportunity_found",
         recommendationScore: 0,
       })
@@ -1716,73 +1716,16 @@ router.delete("/opportunities/:id", async (req, res) => {
   res.status(204).end();
 });
 
-// ── Generate bid proposal (Google Doc) ────────────────────────────────────
-router.post("/opportunities/:id/generate-bid", async (req, res) => {
-  const opportunityId = Number(req.params.id);
-  if (isNaN(opportunityId)) { res.status(400).json({ error: "Invalid id" }); return; }
-
-  try {
-    const [tender] = await db
-      .select()
-      .from(tendersTable)
-      .where(eq(tendersTable.id, opportunityId));
-    if (!tender) { res.status(404).json({ error: "Tender not found" }); return; }
-
-    const requirements = await db
-      .select()
-      .from(tenderRequirementsTable)
-      .where(eq(tenderRequirementsTable.tenderId, opportunityId))
-      .orderBy(tenderRequirementsTable.orderIndex);
-
-    const [strategy] = await db
-      .select()
-      .from(proposalStrategiesTable)
-      .where(eq(proposalStrategiesTable.tenderId, opportunityId))
-      .orderBy(desc(proposalStrategiesTable.createdAt))
-      .limit(1);
-
-    const requirementsText =
-      requirements.length > 0
-        ? requirements
-            .map((r, i) => `${i + 1}. [${r.category}${r.isMandatory ? ", MANDATORY" : ""}] ${r.requirementText}`)
-            .join("\n")
-        : "No specific requirements extracted.";
-
-    const strategyText = strategy
-      ? `Positioning: ${strategy.positioning}\nWin Themes: ${JSON.parse(strategy.winThemes ?? "[]").join(", ")}\nMessaging: ${strategy.messagingGuidance}`
-      : "";
-
-    const { content: proposalContent } = await invokeAI({
-      feature:      "proposal_generation",
-      messages: [
-        {
-          role: "system",
-          content: `You are a senior proposal writer at ONWRD. Write a complete bid proposal as a structured document. Use clear headings and professional language. ${ONWRD_CASE_STUDIES}`,
-        },
-        {
-          role: "user",
-          content: `Write a complete bid proposal for:\n\nTitle: ${tender.title}\nAgency: ${tender.agency}\nDeadline: ${tender.deadline ? new Date(tender.deadline).toDateString() : "Not specified"}\nValue: ${tender.valueAmount ?? "Not specified"}\n\nScope:\n${tender.description}\n\nRequirements:\n${requirementsText}\n\nStrategy:\n${strategyText}`,
-        },
-      ],
-      maxTokens:    4000,
-      opportunityId,
-    });
-    const docTitle = `ONWRD Bid — ${tender.title}`.slice(0, 100);
-
-    const { createGoogleDoc } = await import("../lib/google-docs.js");
-    const { docId, docUrl } = await createGoogleDoc(docTitle, proposalContent);
-
-    await db
-      .update(tendersTable)
-      .set({ status: "bid_started", googleDocId: docId, googleDocUrl: docUrl, updatedAt: new Date() })
-      .where(eq(tendersTable.id, opportunityId));
-
-    res.json({ docId, docUrl, title: docTitle });
-  } catch (err) {
-    req.log.error({ err }, "[generate-bid] Error generating bid proposal");
-    const message = err instanceof Error ? err.message : "Unknown error";
-    res.status(500).json({ error: `Failed to generate bid proposal: ${message}` });
-  }
+// ── Generate bid proposal (DEPRECATED) ────────────────────────────────────
+// This endpoint previously created a Google Doc directly from the opportunity.
+// It is replaced by the canonical pursue → proposal workflow:
+//   POST /opportunities/:id/pursue  → creates a Proposal row
+//   POST /proposals/:id/...         → AI generation steps on the Proposal
+// Kept as 410 Gone to surface clear errors if any old client still calls it.
+router.post("/opportunities/:id/generate-bid", (_req, res) => {
+  res.status(410).json({
+    error: "This endpoint is removed. Use POST /opportunities/:id/pursue to create a proposal, then use the proposal AI endpoints for generation.",
+  });
 });
 
 export default router;

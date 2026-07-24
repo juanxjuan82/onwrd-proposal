@@ -1,0 +1,25 @@
+Continue fixing branch replit/workflow-navigation-intake-consolidation at commit 72e12fa. Do not merge or deploy.
+
+Address every blocker from the independent review:
+
+1. Import X in main-layout.tsx.
+2. Replace every stale startBid reference with the pursue mutation.
+3. Implement all four /new modes properly:
+   - import: file or URL → canonical Opportunity
+   - paste: pasted text → canonical Opportunity
+   - manual: manual Opportunity form
+   - blank: direct Proposal only
+4. Remove Analyze, Extract Requirements, Generate Strategy and other AI actions from Opportunity Detail. Opportunity Detail gets Pursue and No Bid only.
+5. Add Extract Requirements, Generate Strategy and Generate Draft to Proposal Detail using the linked tenderId.
+6. Change public intake to upload.single("briefFile"), safely parse PDF/DOCX/TXT up to 20 MB, append extracted text to rawText, and do not persist the binary.
+7. Send the ONWRD notification after the intake transaction commits. Duplicate submissions must not send duplicate notifications.
+8. Set exact sourceType values for file and URL imports: rfp_upload and url.
+9. Render null sourceType as Legacy—never infer Manual or Crawler.
+10. Remove or safely deprecate the broken generate-bid Google Docs path. It must not bypass #23 or call removed createGoogleDoc.
+11. Make Team Review use the same legacy-linked predicate as #23, including googleFileId without requiring googleDocUrl.
+12. Add the backfill-discoveries package script.
+13. Add the promised #24 tests for navigation, all source types, intake file submission, same-email/different-key isolation, duplicate and concurrent intake, concurrent Pursue, promotion, lifecycle tabs and legacy Team Review.
+14. Rebase onto current main while preserving docs/PROJECT_DEBRIEF.md.
+15. Remove unrelated pasted prompt assets from the PR unless they are intentionally required documentation.
+
+Run the root typecheck, API tests with a real isolated PostgreSQL test database, API build and frontend build. Return exact command outputs and the new commit SHA. Do not claim completion while any check fails.

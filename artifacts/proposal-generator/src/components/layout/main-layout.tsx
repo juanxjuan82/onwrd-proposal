@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { Link, useLocation } from "wouter";
 import {
   Plus, Target, LayoutDashboard, BookOpen, Settings,
-  Upload, FileText, Pencil, Link2, ChevronDown,
+  Upload, FileText, Pencil, Link2, ChevronDown, X,
 } from "lucide-react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");

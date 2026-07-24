@@ -112,12 +112,13 @@ function statusLabel(status: string) {
 interface SourceMeta { label: string; icon: React.ReactNode; cls: string; title: string }
 
 function resolveSource(opp: Opportunity): SourceMeta {
-  const st = opp.sourceType ?? (opp.sourceUrl ? "crawler" : "manual");
-  switch (st) {
+  const LEGACY = { label: "Legacy", icon: <Clock className="w-2.5 h-2.5" />, cls: "border-zinc-700/50 bg-zinc-900/30 text-zinc-500", title: "Pre-sourceType record" };
+  if (!opp.sourceType) return LEGACY;
+  switch (opp.sourceType) {
     case "crawler":
-      return { label: "Scraped",   icon: <Globe className="w-2.5 h-2.5" />,       cls: "border-blue-900/50 bg-blue-950/30 text-blue-400",    title: opp.sourceUrl ?? "Web crawler" };
+      return { label: "Scraped",    icon: <Globe className="w-2.5 h-2.5" />,       cls: "border-blue-900/50 bg-blue-950/30 text-blue-400",       title: opp.sourceUrl ?? "Web crawler" };
     case "url":
-      return { label: "URL Import", icon: <ExternalLink className="w-2.5 h-2.5" />, cls: "border-sky-900/50 bg-sky-950/30 text-sky-400",       title: opp.sourceUrl ?? "URL import" };
+      return { label: "URL Import", icon: <ExternalLink className="w-2.5 h-2.5" />, cls: "border-sky-900/50 bg-sky-950/30 text-sky-400",          title: opp.sourceUrl ?? "URL import" };
     case "rfp_upload":
       return { label: "Uploaded",   icon: <Upload className="w-2.5 h-2.5" />,       cls: "border-violet-900/50 bg-violet-950/30 text-violet-400", title: "RFP file upload" };
     case "pasted_text":
@@ -127,7 +128,7 @@ function resolveSource(opp: Opportunity): SourceMeta {
     case "prospect_intake":
       return { label: "Prospect",   icon: <Zap className="w-2.5 h-2.5" />,          cls: "border-emerald-900/50 bg-emerald-950/30 text-emerald-400", title: "Prospect intake form" };
     default:
-      return { label: "Manual",     icon: <Upload className="w-2.5 h-2.5" />,       cls: "border-violet-900/50 bg-violet-950/30 text-violet-400", title: "Manually added" };
+      return LEGACY;
   }
 }
 
@@ -493,9 +494,9 @@ function EnrichDrawer({
           <Button
             className="w-full bg-emerald-600 hover:bg-emerald-500 text-white gap-2 text-sm"
             onClick={handleStartBid}
-            disabled={startBid.isPending}
+            disabled={pursue.isPending}
           >
-            {startBid.isPending
+            {pursue.isPending
               ? <><Loader2 className="w-4 h-4 animate-spin" /> Opening workspace…</>
               : <><Zap className="w-4 h-4" /> Pursue this Opportunity</>
             }
@@ -508,14 +509,14 @@ function EnrichDrawer({
               size="sm"
               className="gap-1.5 text-xs"
               onClick={handleRescore}
-              disabled={rescore.isPending || update.isPending || startBid.isPending}
+              disabled={rescore.isPending || update.isPending || pursue.isPending}
             >
               {rescore.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
               Re-score
             </Button>
             <div className="flex items-center gap-2">
               <Button variant="ghost" size="sm" className="text-xs" onClick={onClose}>Cancel</Button>
-              <Button size="sm" className="text-xs gap-1.5" onClick={handleSave} disabled={update.isPending || rescore.isPending || startBid.isPending}>
+              <Button size="sm" className="text-xs gap-1.5" onClick={handleSave} disabled={update.isPending || rescore.isPending || pursue.isPending}>
                 {update.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}
                 Save Changes
               </Button>

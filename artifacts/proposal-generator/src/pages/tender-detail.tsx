@@ -97,11 +97,11 @@ export default function OpportunityDetail() {
   const pollStartRef = useRef<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [pollTimedOut, setPollTimedOut] = useState(false);
-  const [reanalyzing, setReanalyzing]           = useState(false);
-  const [cancelling, setCancelling]             = useState(false);
-  const [resuming, setResuming]                 = useState(false);
-  const [converting, setConverting]             = useState(false);
-  const [generatingStrategy, setGeneratingStrategy] = useState(false);
+  const [reanalyzing, setReanalyzing] = useState(false);
+  const [cancelling, setCancelling]   = useState(false);
+  const [resuming, setResuming]       = useState(false);
+  const [pursuing, setPursuing]       = useState(false);
+  const [noBidding, setNoBidding]     = useState(false);
 
   // Parse completed steps from DB JSON string
   const completedSteps: string[] = (() => {
@@ -141,50 +141,52 @@ export default function OpportunityDetail() {
 
   // ── Actions ───────────────────────────────────────────────────────────────
 
-  const handleConvert = async () => {
-    setConverting(true);
+  const handlePursue = async () => {
+    setPursuing(true);
     try {
-      const res = await fetch(`${BASE}/api/opportunities/${tenderId}/convert`, { method: "POST" });
+      const res = await fetch(`${BASE}/api/opportunities/${tenderId}/pursue`, { method: "POST" });
       const body = (await res.json().catch(() => ({}))) as {
         proposalId?: number;
         existing?: boolean;
-        analysisRunId?: string;
         error?: string;
       };
       if (!res.ok) {
-        toast({ title: "Failed to create proposal", description: body.error ?? "Unknown error", variant: "destructive" });
+        toast({ title: "Failed to pursue", description: body.error ?? "Unknown error", variant: "destructive" });
         return;
       }
       queryClient.invalidateQueries({ queryKey: getListTendersQueryKey() });
       queryClient.invalidateQueries({ queryKey: getListProposalsQueryKey() });
-      toast({
-        title: body.existing ? "Proposal already exists" : "Proposal workspace created",
-        description: "Extracting requirements in the background…",
-      });
+      toast({ title: body.existing ? "Proposal already exists" : "Proposal workspace created" });
       if (body.proposalId) setLocation(`/proposals/${body.proposalId}`);
     } finally {
-      setConverting(false);
+      setPursuing(false);
     }
   };
 
-  const handleGenerateStrategy = async () => {
-    setGeneratingStrategy(true);
+  const handleNoBid = async () => {
+    setNoBidding(true);
     try {
-      const res = await fetch(`${BASE}/api/opportunities/${tenderId}/generate-strategy`, { method: "POST" });
-      const body = (await res.json().catch(() => ({}))) as { analysisRunId?: string; error?: string };
+      const res = await fetch(`${BASE}/api/opportunities/${tenderId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: tender?.title ?? "",
+          agency: tender?.agency ?? "",
+          category: tender?.category ?? "",
+          description: tender?.description ?? "",
+          status: "no_bid",
+        }),
+      });
       if (!res.ok) {
-        toast({ title: "Failed to start strategy", description: body.error ?? "Unknown error", variant: "destructive" });
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        toast({ title: "Failed to mark No Bid", description: body.error ?? "Unknown error", variant: "destructive" });
         return;
       }
-      toast({
-        title: "Strategy generation started",
-        description: "AI is drafting the strategy brief. This page will update automatically.",
-      });
-      pollStartRef.current = Date.now();
-      setPollTimedOut(false);
       void queryClient.invalidateQueries({ queryKey: getGetTenderQueryKey(tenderId) });
+      void queryClient.invalidateQueries({ queryKey: getListTendersQueryKey() });
+      toast({ title: "Marked as No Bid" });
     } finally {
-      setGeneratingStrategy(false);
+      setNoBidding(false);
     }
   };
 
@@ -328,19 +330,6 @@ export default function OpportunityDetail() {
                 {elapsed > 0 ? `${elapsed}s elapsed` : "Starting…"} — auto-refreshing every 3 s
               </p>
             </div>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => void handleCancel()}
-              disabled={cancelling || !tenderExt?.analysisRunId}
-              className="shrink-0"
-              data-testid="button-cancel-analysis"
-            >
-              {cancelling
-                ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Cancelling…</>
-                : <><XCircle className="w-3 h-3 mr-1" /> Cancel</>
-              }
-            </Button>
           </div>
 
           {/* Completed steps progress */}
@@ -389,22 +378,6 @@ export default function OpportunityDetail() {
                 </p>
               )}
             </div>
-            <div className="flex gap-2 shrink-0">
-              {completedSteps.length > 0 && (
-                <Button size="sm" variant="outline" onClick={() => void handleResume()} disabled={resuming} data-testid="button-resume-stuck">
-                  {resuming
-                    ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Resuming…</>
-                    : <><PlayCircle className="w-3 h-3 mr-1" /> Resume</>
-                  }
-                </Button>
-              )}
-              <Button size="sm" variant="outline" onClick={() => void handleReanalyze()} disabled={reanalyzing} data-testid="button-reanalyze-stuck">
-                {reanalyzing
-                  ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Starting…</>
-                  : <><RefreshCw className="w-3 h-3 mr-1" /> Re-analyse</>
-                }
-              </Button>
-            </div>
           </div>
         </div>
       )}
@@ -428,22 +401,6 @@ export default function OpportunityDetail() {
                 </p>
               )}
             </div>
-            <div className="flex gap-2 shrink-0">
-              {completedSteps.length > 0 && (
-                <Button size="sm" variant="outline" onClick={() => void handleResume()} disabled={resuming}>
-                  {resuming
-                    ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Resuming…</>
-                    : <><PlayCircle className="w-3 h-3 mr-1" /> Resume</>
-                  }
-                </Button>
-              )}
-              <Button size="sm" variant="outline" onClick={() => void handleReanalyze()} disabled={reanalyzing}>
-                {reanalyzing
-                  ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Starting…</>
-                  : <><RefreshCw className="w-3 h-3 mr-1" /> Retry</>
-                }
-              </Button>
-            </div>
           </div>
         </div>
       )}
@@ -466,22 +423,6 @@ export default function OpportunityDetail() {
                 </p>
               )}
             </div>
-            <div className="flex gap-2 shrink-0">
-              {completedSteps.length > 0 && (
-                <Button size="sm" variant="outline" onClick={() => void handleResume()} disabled={resuming}>
-                  {resuming
-                    ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Resuming…</>
-                    : <><PlayCircle className="w-3 h-3 mr-1" /> Resume</>
-                  }
-                </Button>
-              )}
-              <Button size="sm" variant="outline" onClick={() => void handleReanalyze()} disabled={reanalyzing}>
-                {reanalyzing
-                  ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Starting…</>
-                  : <><RefreshCw className="w-3 h-3 mr-1" /> Re-analyse from scratch</>
-                }
-              </Button>
-            </div>
           </div>
         </div>
       )}
@@ -494,7 +435,7 @@ export default function OpportunityDetail() {
             <div>
               <p className="text-sm font-medium text-foreground">Requirements extracted</p>
               <p className="text-xs text-muted-foreground mt-0.5">
-                AI has extracted requirements and scored the bid fit. Use <strong>Generate Strategy Brief</strong> to produce a strategy for the proposal writers, or open the linked proposal to begin drafting.
+                AI has extracted requirements and scored the bid fit. Pursue this opportunity to open a proposal workspace and begin drafting.
               </p>
             </div>
           </div>
@@ -561,28 +502,27 @@ export default function OpportunityDetail() {
           </Button>
         ) : (
           <Button
-            onClick={() => void handleConvert()}
-            disabled={converting || isAnalysing}
-            data-testid="button-analyze-create"
+            onClick={() => void handlePursue()}
+            disabled={pursuing || tender.status === "no_bid"}
+            data-testid="button-pursue"
           >
-            {converting
-              ? <><Loader2 className="w-4 h-4 mr-1 animate-spin" /> Creating…</>
-              : <><Sparkles className="w-4 h-4 mr-1" /> Analyze &amp; Create Proposal</>
+            {pursuing
+              ? <><Loader2 className="w-4 h-4 mr-1 animate-spin" /> Creating workspace…</>
+              : <><Zap className="w-4 h-4 mr-1" /> Pursue this Opportunity</>
             }
           </Button>
         )}
 
-        {/* Generate Strategy Brief — only when extraction is done and no strategy yet */}
-        {(tender.status === "requirements_extracted") && !isAnalysing && (
+        {tender.status !== "no_bid" && !tender.proposalId && (
           <Button
             variant="outline"
-            onClick={() => void handleGenerateStrategy()}
-            disabled={generatingStrategy}
-            data-testid="button-generate-strategy"
+            onClick={() => void handleNoBid()}
+            disabled={noBidding}
+            data-testid="button-no-bid"
           >
-            {generatingStrategy
-              ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Generating…</>
-              : <><Sparkles className="w-3 h-3 mr-1" /> Generate Strategy Brief</>
+            {noBidding
+              ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Updating…</>
+              : "No Bid"
             }
           </Button>
         )}

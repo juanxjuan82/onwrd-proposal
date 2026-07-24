@@ -415,6 +415,9 @@ export default function ProposalDetail() {
   const [, setLocation] = useLocation();
   const [previewMode, setPreviewMode] = useState(false);
   const [activeTab, setActiveTab] = useState<"content" | "sections">("content");
+  const [extracting, setExtracting]                   = useState(false);
+  const [generatingStrategy, setGeneratingStrategy]   = useState(false);
+  const [generatingDraft, setGeneratingDraft]         = useState(false);
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -533,6 +536,64 @@ export default function ProposalDetail() {
     });
   };
 
+  const linkedTenderId = (proposal as Record<string, unknown> | undefined)?.tenderId as number | null | undefined;
+
+  const handleExtractRequirements = async () => {
+    if (!linkedTenderId) return;
+    setExtracting(true);
+    try {
+      const res = await fetch(`${BASE}/api/opportunities/${linkedTenderId}/analyze`, { method: "POST" });
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        toast({ title: "Failed to start extraction", description: body.error ?? "Unknown error", variant: "destructive" });
+        return;
+      }
+      toast({ title: "Extracting requirements…", description: "AI is analysing the RFP. Open the linked Opportunity to see progress." });
+    } finally {
+      setExtracting(false);
+    }
+  };
+
+  const handleGenerateStrategy = async () => {
+    if (!linkedTenderId) return;
+    setGeneratingStrategy(true);
+    try {
+      const res = await fetch(`${BASE}/api/opportunities/${linkedTenderId}/generate-strategy`, { method: "POST" });
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        toast({ title: "Failed to start strategy", description: body.error ?? "Unknown error", variant: "destructive" });
+        return;
+      }
+      toast({ title: "Generating strategy…", description: "AI is building the strategy brief." });
+    } finally {
+      setGeneratingStrategy(false);
+    }
+  };
+
+  const handleGenerateDraft = async () => {
+    if (!linkedTenderId) return;
+    setGeneratingDraft(true);
+    try {
+      const res = await fetch(`${BASE}/api/opportunities/${linkedTenderId}/generate-proposal`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ proposalId: id }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      if (!res.ok) {
+        toast({ title: "Failed to generate draft", description: body.error ?? "Unknown error", variant: "destructive" });
+        return;
+      }
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: getGetProposalQueryKey(id) });
+        queryClient.invalidateQueries({ queryKey: ["proposal-sections", id] });
+      }, 3000);
+      toast({ title: "Draft generation started", description: "Refresh in a moment to see the updated content." });
+    } finally {
+      setGeneratingDraft(false);
+    }
+  };
+
   const handleDelete = () => {
     deleteProposal.mutate({ id }, {
       onSuccess: () => {
@@ -645,6 +706,35 @@ export default function ProposalDetail() {
           </AlertDialog>
         </div>
       </div>
+
+      {/* ── AI actions panel — shown when linked to an Opportunity ─────────────── */}
+      {linkedTenderId && (
+        <div className="mb-6 p-4 border border-primary/20 rounded-lg bg-primary/5">
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="text-sm text-muted-foreground flex-1 min-w-0">
+              Linked to Opportunity <span className="text-foreground font-medium">#{linkedTenderId}</span>
+            </p>
+            <Button size="sm" variant="outline" onClick={() => void handleExtractRequirements()} disabled={extracting} data-testid="button-extract-requirements">
+              {extracting
+                ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Extracting…</>
+                : <><Sparkles className="w-3 h-3 mr-1" /> Extract Requirements</>
+              }
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => void handleGenerateStrategy()} disabled={generatingStrategy} data-testid="button-generate-strategy">
+              {generatingStrategy
+                ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Generating…</>
+                : <><Sparkles className="w-3 h-3 mr-1" /> Generate Strategy</>
+              }
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => void handleGenerateDraft()} disabled={generatingDraft} data-testid="button-generate-draft">
+              {generatingDraft
+                ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Drafting…</>
+                : <><Sparkles className="w-3 h-3 mr-1" /> Generate Draft</>
+              }
+            </Button>
+          </div>
+        </div>
+      )}
 
       <Form {...form}>
         <form className="space-y-6" onSubmit={form.handleSubmit(handleSave)}>
