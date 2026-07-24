@@ -190,9 +190,13 @@ export default function NewProposal() {
   const [isExporting, setIsExporting] = useState(false);
   const [previewMode, setPreviewMode] = useState(false);
   const search = useSearch();
-  const [mode, setMode] = useState<"form" | "paste">(() => {
+  const [mode, setMode] = useState<"form" | "paste" | "import" | "blank" | "manual">(() => {
     const m = new URLSearchParams(search).get("mode");
-    return m === "paste" || m === "import" ? "paste" : "form";
+    if (m === "paste")  return "paste";
+    if (m === "import") return "import";
+    if (m === "blank")  return "blank";
+    if (m === "manual") return "manual";
+    return "form";
   });
   const [pasteText, setPasteText] = useState("");
   const [pasteFile, setPasteFile] = useState<File | null>(null);
@@ -201,6 +205,8 @@ export default function NewProposal() {
   const [pasteError, setPasteError] = useState<string | null>(null);
   const [briefCheck, setBriefCheck] = useState<{ sufficient: boolean; missing: string[]; summary: string } | null>(null);
   const [briefChecking, setBriefChecking] = useState(false);
+  const [importUrl, setImportUrl] = useState("");
+  const [creatingOpportunity, setCreatingOpportunity] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const checkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [, setLocation] = useLocation();
@@ -346,6 +352,85 @@ export default function NewProposal() {
         },
       },
     );
+  };
+
+  // ── Create a canonical Opportunity from pasted text ──────────────────────
+  const handlePasteAsOpportunity = async () => {
+    if (!pasteText.trim()) {
+      setPasteError("Please paste some text or upload a document first.");
+      return;
+    }
+    setPasteError(null);
+    const rawText = pasteText.trim();
+    const lines = rawText.split("\n").filter(Boolean);
+    const title = (lines[0] ?? "Pasted RFP").slice(0, 100);
+
+    setCreatingOpportunity(true);
+    try {
+      const res = await fetch(`${BASE}/api/opportunities`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          agency: "Unknown",
+          description: rawText.slice(0, 500),
+          rawText,
+          sourceType: "pasted_text",
+        }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { id?: number; error?: string };
+      if (!res.ok) {
+        toast({ title: "Failed to create opportunity", description: body.error ?? "Unknown error", variant: "destructive" });
+        return;
+      }
+      toast({ title: "Opportunity created", description: "Review the details and pursue when ready." });
+      if (body.id) setLocation(`/opportunities/${body.id}`);
+    } finally {
+      setCreatingOpportunity(false);
+    }
+  };
+
+  // ── Create a canonical Opportunity from file or URL import ───────────────
+  const handleImportAsOpportunity = async () => {
+    const hasUrl  = importUrl.trim().length > 0;
+    const hasFile = pasteText.trim().length > 0 || pasteFile !== null;
+
+    if (!hasUrl && !hasFile) {
+      setPasteError("Please upload a file or enter a URL.");
+      return;
+    }
+    setPasteError(null);
+
+    const rawText   = pasteText.trim();
+    const sourceType = hasUrl ? "url" : "rfp_upload";
+    const sourceUrl  = hasUrl ? importUrl.trim() : undefined;
+    const lines      = rawText.split("\n").filter(Boolean);
+    const title      = (lines[0] ?? (hasUrl ? importUrl.trim().slice(0, 100) : "Imported RFP")).slice(0, 100);
+
+    setCreatingOpportunity(true);
+    try {
+      const res = await fetch(`${BASE}/api/opportunities`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title,
+          agency: "Unknown",
+          description: rawText.slice(0, 500) || `Imported from ${sourceUrl ?? "file"}`,
+          rawText: rawText || undefined,
+          sourceType,
+          sourceUrl,
+        }),
+      });
+      const body = (await res.json().catch(() => ({}))) as { id?: number; error?: string };
+      if (!res.ok) {
+        toast({ title: "Failed to create opportunity", description: body.error ?? "Unknown error", variant: "destructive" });
+        return;
+      }
+      toast({ title: "Opportunity created", description: "Review the details and pursue when ready." });
+      if (body.id) setLocation(`/opportunities/${body.id}`);
+    } finally {
+      setCreatingOpportunity(false);
+    }
   };
 
   const handleIntakeSubmit = (values: IntakeValues) => {
@@ -501,8 +586,32 @@ export default function NewProposal() {
         </div>
       )}
 
+      {/* ── Step 1: blank mode → skip straight to proposal form ── */}
+      {step === 1 && !parseBrief.isPending && mode === "blank" && (
+        <div className="bg-card border rounded-lg p-10 flex flex-col items-center justify-center gap-6 min-h-[300px]">
+          <FileText className="w-12 h-12 text-muted-foreground" />
+          <div className="text-center space-y-1">
+            <p className="text-lg font-semibold text-foreground">Start with a blank proposal</p>
+            <p className="text-sm text-muted-foreground">Fill in the details yourself — no AI parsing needed.</p>
+          </div>
+          <Button size="lg" onClick={() => setStep(2)}>Start Blank Proposal</Button>
+        </div>
+      )}
+
+      {/* ── Step 1: manual mode → redirect to Opportunities ── */}
+      {step === 1 && !parseBrief.isPending && mode === "manual" && (
+        <div className="bg-card border rounded-lg p-10 flex flex-col items-center justify-center gap-6 min-h-[300px]">
+          <ClipboardList className="w-12 h-12 text-muted-foreground" />
+          <div className="text-center space-y-1">
+            <p className="text-lg font-semibold text-foreground">Create a Manual Opportunity</p>
+            <p className="text-sm text-muted-foreground">Add an opportunity manually then pursue it to generate a proposal.</p>
+          </div>
+          <Button size="lg" onClick={() => setLocation("/opportunities?add=1")}>Go to Opportunities</Button>
+        </div>
+      )}
+
       {/* ── Step 1: mode toggle + content ── */}
-      {step === 1 && !parseBrief.isPending && (
+      {step === 1 && !parseBrief.isPending && (mode === "form" || mode === "paste" || mode === "import") && (
         <>
           {/* Mode toggle */}
           <div className="flex rounded-lg border border-border overflow-hidden w-fit mb-6">
@@ -523,12 +632,112 @@ export default function NewProposal() {
                 mode === "paste" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-accent"
               }`}
             >
+              <FileText className="w-4 h-4" />
+              Paste Text
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("import")}
+              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${
+                mode === "import" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-accent"
+              }`}
+            >
               <UploadCloud className="w-4 h-4" />
-              Paste / Upload
+              Import File / URL
             </button>
           </div>
 
-          {/* ── Paste / Upload panel ── */}
+          {/* ── Import (file / URL) panel → creates canonical Opportunity ── */}
+          {mode === "import" && (
+            <div className="space-y-4">
+              <div className="bg-card border rounded-lg overflow-hidden">
+                <div className="bg-muted px-6 py-4 border-b">
+                  <h2 className="font-semibold text-foreground">Import RFP</h2>
+                  <p className="text-sm text-muted-foreground mt-0.5">
+                    Upload a file or enter a URL — a new Opportunity will be created for review and pursuit.
+                  </p>
+                </div>
+                <div className="p-6 space-y-4">
+                  {/* File upload zone */}
+                  <div
+                    className="border-2 border-dashed border-border rounded-lg p-6 flex flex-col items-center gap-3 cursor-pointer hover:border-primary/50 transition-colors"
+                    onClick={() => fileInputRef.current?.click()}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const f = e.dataTransfer.files[0];
+                      if (f) handleFileSelect(f);
+                    }}
+                  >
+                    {pasteFileExtracting ? (
+                      <>
+                        <Loader2 className="w-8 h-8 text-muted-foreground animate-spin" />
+                        <p className="text-sm text-muted-foreground">Reading document…</p>
+                      </>
+                    ) : pasteFile ? (
+                      <div className="flex items-center gap-3 w-full">
+                        <FileText className="w-5 h-5 text-primary shrink-0" />
+                        <span className="text-sm text-foreground flex-1 truncate">{pasteFile.name}</span>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); setPasteFile(null); setPasteText(""); if (fileInputRef.current) fileInputRef.current.value = ""; }}
+                          className="text-muted-foreground hover:text-foreground"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <UploadCloud className="w-8 h-8 text-muted-foreground" />
+                        <div className="text-center">
+                          <p className="text-sm font-medium text-foreground">Drop a file or click to browse</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">PDF, DOCX, TXT · Max 20 MB</p>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".pdf,.docx,.txt"
+                    className="hidden"
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFileSelect(f); }}
+                  />
+                  {pasteFileError && <p className="text-xs text-destructive">{pasteFileError}</p>}
+
+                  {/* Divider */}
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 border-t border-border" />
+                    <span className="text-xs text-muted-foreground">or enter a URL</span>
+                    <div className="flex-1 border-t border-border" />
+                  </div>
+
+                  {/* URL input */}
+                  <Input
+                    type="url"
+                    placeholder="https://example.gov/rfp/2026-tender.pdf"
+                    value={importUrl}
+                    onChange={(e) => setImportUrl(e.target.value)}
+                  />
+
+                  <div className="flex items-center justify-between">
+                    <div>
+                      {pasteError && <p className="text-xs text-destructive">{pasteError}</p>}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end">
+                <Button type="button" size="lg" className="gap-2" onClick={() => void handleImportAsOpportunity()} disabled={creatingOpportunity}>
+                  {creatingOpportunity ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
+                  {creatingOpportunity ? "Creating Opportunity…" : "Create Opportunity"}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* ── Paste / Upload panel → creates canonical Opportunity ── */}
           {mode === "paste" && (
             <div className="space-y-4">
               <div className="bg-card border rounded-lg overflow-hidden">
@@ -645,9 +854,9 @@ export default function NewProposal() {
               </div>
 
               <div className="flex justify-end">
-                <Button type="button" size="lg" className="gap-2" onClick={handlePasteSubmit} disabled={parseBrief.isPending}>
-                  <FileText className="w-4 h-4" />
-                  Generate Proposal
+                <Button type="button" size="lg" className="gap-2" onClick={() => void handlePasteAsOpportunity()} disabled={creatingOpportunity}>
+                  {creatingOpportunity ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
+                  {creatingOpportunity ? "Creating Opportunity…" : "Create Opportunity"}
                 </Button>
               </div>
             </div>

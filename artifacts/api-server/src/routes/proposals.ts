@@ -753,7 +753,7 @@ router.post("/intake/draft", async (req, res) => {
  *    f. UPDATE draft.opportunityId.
  * 3. Return {success:true}. Never expose IDs or log PII in errors.
  */
-router.post("/intake", upload.none(), async (req, res) => {
+router.post("/intake", upload.single("briefFile"), async (req, res) => {
   const {
     submissionKey, firstName, lastName, jobTitle, email,
     phone, preferredContact, briefText, clientName, industry,
@@ -772,6 +772,27 @@ router.post("/intake", upload.none(), async (req, res) => {
     res.status(400).json({ error: "firstName, lastName, jobTitle and email are required" });
     return;
   }
+
+  // Extract text from uploaded brief file (PDF / DOCX / TXT) if provided
+  let uploadedBriefText = "";
+  if (req.file) {
+    try {
+      const { mimetype, originalname, buffer } = req.file;
+      if (mimetype === "application/pdf" || originalname.match(/\.pdf$/i)) {
+        const result = await pdfParse(buffer);
+        uploadedBriefText = result.text?.trim() ?? "";
+      } else if (mimetype.includes("wordprocessingml") || originalname.match(/\.docx$/i)) {
+        const result = await mammoth.extractRawText({ buffer });
+        uploadedBriefText = result.value?.trim() ?? "";
+      } else {
+        uploadedBriefText = buffer.toString("utf-8").trim();
+      }
+    } catch {
+      req.log.warn("intake: could not extract text from briefFile — continuing without it");
+    }
+  }
+
+  let opportunityCreated = false;
 
   try {
     type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -816,6 +837,7 @@ router.post("/intake", upload.none(), async (req, res) => {
       // 4. Build brief (structured summary, no raw PII in opportunity fields)
       const fullBrief = [
         briefText?.trim() ?? "",
+        uploadedBriefText,
         `---\n${firstName.trim()} ${lastName.trim()} · ${jobTitle.trim()}`,
       ].filter(Boolean).join("\n\n");
 
@@ -842,7 +864,40 @@ router.post("/intake", upload.none(), async (req, res) => {
         .update(intakeDraftsTable)
         .set({ opportunityId: opportunity.id, updatedAt: new Date() })
         .where(eq(intakeDraftsTable.id, draft.id));
+
+      opportunityCreated = true;
     });
+
+    // Fire-and-forget notification to ONWRD team — deduplicated via opportunityCreated flag
+    if (opportunityCreated) {
+      const sendNotification = async () => {
+        const apiKey = process.env.RESEND_API_KEY;
+        if (!apiKey) return;
+        try {
+          const { Resend } = await import("resend");
+          const resend = new Resend(apiKey);
+          const fromAddress = process.env.RESEND_FROM ?? "ONWRD Tender Desk <onboarding@resend.dev>";
+          const toAddress = process.env.INTAKE_NOTIFY_EMAIL ?? fromAddress;
+          await resend.emails.send({
+            from: fromAddress,
+            to: [toAddress],
+            subject: `New Prospect Intake — ${firstName?.trim()} ${lastName?.trim()} (${clientName?.trim() || "Unknown"})`,
+            html: `<p>A new prospect intake has been submitted.</p>
+<ul>
+  <li><strong>Name:</strong> ${firstName?.trim()} ${lastName?.trim()}</li>
+  <li><strong>Title:</strong> ${jobTitle?.trim()}</li>
+  <li><strong>Email:</strong> ${email?.trim()}</li>
+  <li><strong>Company:</strong> ${clientName?.trim() || "—"}</li>
+  <li><strong>Industry:</strong> ${industry?.trim() || "—"}</li>
+</ul>
+<p>Submission key: <code>${submissionKey?.trim()}</code></p>`,
+          });
+        } catch {
+          // Notification failure must never propagate to the caller
+        }
+      };
+      void sendNotification();
+    }
 
     res.json({ success: true });
   } catch (err) {

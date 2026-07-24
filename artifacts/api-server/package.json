@@ -8,7 +8,8 @@
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx/esm --test src/routes/opportunities.test.ts src/lib/scoring-rules.test.ts src/lib/google-docs-export.test.ts src/lib/google-docs-drive.test.ts src/lib/no-auto-ai.test.ts src/lib/ai-gateway.test.ts src/lib/ai-integration.test.ts src/lib/ai-circuit.test.ts src/lib/ai-route.test.ts src/lib/ai-workflow.test.ts"
+    "test": "node --import tsx/esm --test src/routes/opportunities.test.ts src/lib/scoring-rules.test.ts src/lib/google-docs-export.test.ts src/lib/google-docs-drive.test.ts src/lib/no-auto-ai.test.ts src/lib/ai-gateway.test.ts src/lib/ai-integration.test.ts src/lib/ai-circuit.test.ts src/lib/ai-route.test.ts src/lib/ai-workflow.test.ts src/lib/workflow-nav.test.ts",
+    "backfill-discoveries": "node --import tsx/esm src/scripts/backfill-discoveries.ts"
   },
   "dependencies": {
     "@google/generative-ai": "^0.24.1",

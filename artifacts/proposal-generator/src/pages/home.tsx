@@ -39,7 +39,7 @@ interface Proposal {
 function isTeamReview(p: Proposal): boolean {
   if (p.syncStatus === "handoff_complete") return true;
   if (
-    p.googleDocUrl &&
+    (p.googleDocUrl || p.googleFileId) &&
     p.syncStatus !== "pending_first_write" &&
     p.syncStatus !== "handoff_in_progress"
   ) return true;
