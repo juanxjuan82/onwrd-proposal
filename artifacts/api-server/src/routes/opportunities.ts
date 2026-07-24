@@ -1125,29 +1125,12 @@ router.post("/tender-intelligence/rescore", async (req, res) => {
 });
 
 // ── Generate section-based proposal ───────────────────────────────────────
-//
-// Concurrency safety: the status check, row-lock acquisition, and
-// proposal_drafting transition all happen inside ONE transaction using
-// SELECT … FOR UPDATE. The second concurrent request blocks on the lock,
-// then sees proposal_drafting and returns 409. No pre-transaction SELECT
-// is used as a concurrency guard.
-//
-const STALE_GENERATION_MS = 5 * 60 * 1000; // 5 minutes
-
 router.post("/opportunities/:id/generate-proposal", async (req, res) => {
   const id = Number(req.params.id);
   if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
 
   const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, id));
   if (!tender) { res.status(404).json({ error: "Opportunity not found" }); return; }
-
-  const requestedProposalId = req.body?.proposalId ? Number(req.body.proposalId) : null;
-
-  // Validate a supplied proposalId up-front: it must be a positive integer
-  if (requestedProposalId !== null && (isNaN(requestedProposalId) || requestedProposalId <= 0)) {
-    res.status(400).json({ error: "Invalid proposalId", code: "invalid_proposal_id" });
-    return;
-  }
 
   const requirements = await db
     .select()
@@ -1180,16 +1163,29 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
     ? `\nPROPOSAL STRATEGY BRIEF:\nPositioning: ${strategy.positioning}\nWin Themes: ${JSON.parse(strategy.winThemes ?? "[]").join(", ")}\nRecommended Case Studies: ${JSON.parse(strategy.recommendedCaseStudies ?? "[]").join(", ")}\nMessaging Guidance: ${strategy.messagingGuidance}\nRisks to Address: ${JSON.parse(strategy.risks ?? "[]").join(", ")}`
     : "";
 
-  // ── Atomic acquisition ────────────────────────────────────────────────────
+  // ── Resolve canonical proposal ────────────────────────────────────────────
+  // A tender has at most one proposal (unique constraint on tender_id).
+  // Never create a second proposal row — find or create the canonical one.
+  const requestedProposalId = req.body?.proposalId ? Number(req.body.proposalId) : null;
+
+  // Validate a supplied proposalId up-front: must be a positive integer.
+  if (requestedProposalId !== null && (isNaN(requestedProposalId) || requestedProposalId <= 0)) {
+    res.status(400).json({ error: "Invalid proposalId", code: "invalid_proposal_id" });
+    return;
+  }
+
+  // ── Atomic acquisition ─────────────────────────────────────────────────────────────────────
   // All concurrency guarding happens inside ONE transaction:
-  //   1. Upsert the canonical proposal row (INSERT … ON CONFLICT DO NOTHING)
-  //   2. SELECT … FOR UPDATE to acquire the row lock
-  //   3. Validate the caller's proposalId (even if no prior row existed)
-  //   4. Check for an active (non-stale) generation
-  //   5. Atomically claim generation by setting proposal_drafting + updated_at
+  //   1. INSERT … ON CONFLICT DO NOTHING (ensure canonical row exists)
+  //   2. SELECT … FOR UPDATE (acquire row lock — blocks concurrent requests)
+  //   3. Validate the caller’s proposalId
+  //   4. Check for active (non-stale) generation
+  //   5. Atomically claim generation (set proposal_drafting + updated_at)
   //   6. Reset sections
-  // The second concurrent request blocks on step 2, then sees proposal_drafting
-  // in step 4 and returns 409. Zero AI calls are launched by the second request.
+  // A second concurrent request blocks on step 2, then sees proposal_drafting in
+  // step 4 and returns 409. Zero AI calls are launched by the second request.
+
+  const STALE_GENERATION_MS = 5 * 60 * 1000; // 5 minutes
 
   type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -1229,7 +1225,7 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
 
       if (!locked) throw new Error("Proposal row missing after concurrent-safe insert");
 
-      // 3. Validate the caller's proposalId (checked even when no prior row existed)
+      // 3. Validate the caller’s proposalId
       if (requestedProposalId !== null && locked.id !== requestedProposalId) {
         const e = new Error("MISMATCH");
         (e as NodeJS.ErrnoException).code = "MISMATCH";

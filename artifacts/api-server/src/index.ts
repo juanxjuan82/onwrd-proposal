@@ -17,13 +17,10 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-// Wait for session store DDL before accepting connections.
-// If initialization fails the promise rejects — refuse to listen.
+// Wait for session store DDL before accepting connections
 try {
   await dbReady;
-} catch (err) {
-  const reason = err instanceof Error ? err.message : String(err);
-  logger.error({ reason }, "Session store initialization failed — server will not start");
+} catch {
   process.exit(1);
 }
 

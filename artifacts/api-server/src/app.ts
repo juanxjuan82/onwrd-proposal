@@ -38,7 +38,6 @@ pool.query(
 
 // Ensure session table exists before accepting requests — connect-pg-simple's
 // internal DDL is unreliable at startup; await this in index.ts before listen.
-// If DDL fails the promise REJECTS so that index.ts can refuse to listen.
 export const dbReady: Promise<void> = pool
   .query(
     `CREATE TABLE IF NOT EXISTS session (

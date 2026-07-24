@@ -315,7 +315,7 @@ router.post("/proposals/:id/export", async (req, res) => {
   }
 
   // ── 2a. Draft readiness — evaluated BEFORE auth or any Google API call ────
-  // Avoids triggering OAuth flows for proposals that aren't ready to export.
+  // Avoids triggering OAuth flows for proposals that aren’t ready to export.
   const DRAFTING_PLACEHOLDER = /generating proposal sections/i;
   const hasMeaningfulContent = (text: string | null | undefined): boolean =>
     !!(text?.trim()) && !DRAFTING_PLACEHOLDER.test(text.trim());
@@ -335,6 +335,11 @@ router.post("/proposals/:id/export", async (req, res) => {
   } else if (hasMeaningfulContent(proposal.proposalContent)) {
     exportContent = proposal.proposalContent!;
   } else {
+    await db
+      .update(proposalsTable)
+      .set({ syncStatus: null, handoffStartedAt: null })
+      .where(eq(proposalsTable.id, proposalId))
+      .catch(() => {});
     res.status(422).json({
       error: "Proposal draft is not ready to share. Wait for generation to complete.",
       code:  "draft_not_ready",
@@ -412,7 +417,7 @@ router.post("/proposals/:id/export", async (req, res) => {
       return;
     }
 
-    // exportContent was already computed in step 2a.
+    // exportContent was computed in step 2a before auth.
     const content = exportContent;
 
     const exportedBy = req.session.googleUserEmail ?? null;

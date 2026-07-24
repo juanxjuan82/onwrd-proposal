@@ -357,7 +357,7 @@ export default function NewProposal() {
           setStep(2);
         },
         onError: (error) => {
-          toast({ title: "Generation failed", description: error.error ?? "An unexpected error occurred.", variant: "destructive" });
+          toast({ title: "Generation failed", description: (error as { error?: string }).error ?? "An unexpected error occurred.", variant: "destructive" });
         },
       },
     );
@@ -458,7 +458,7 @@ export default function NewProposal() {
         onError: (error) => {
           toast({
             title: "Generation failed",
-            description: error.error || "An unexpected error occurred.",
+            description: (error as { error?: string }).error || "An unexpected error occurred.",
             variant: "destructive",
           });
         },
@@ -478,7 +478,7 @@ export default function NewProposal() {
         onError: (error) => {
           toast({
             title: "Save failed",
-            description: error.error || "Could not save proposal.",
+            description: (error as { error?: string }).error || "Could not save proposal.",
             variant: "destructive",
           });
         },
@@ -522,7 +522,7 @@ export default function NewProposal() {
               onError: (error) => {
                 toast({
                   title: "Export failed",
-                  description: error.error || "Could not export to Google Docs.",
+                  description: (error as { error?: string }).error || "Could not export to Google Docs.",
                   variant: "destructive",
                 });
               },
@@ -534,7 +534,7 @@ export default function NewProposal() {
           setIsExporting(false);
           toast({
             title: "Save failed before export",
-            description: error.error || "Could not save proposal.",
+            description: (error as { error?: string }).error || "Could not save proposal.",
             variant: "destructive",
           });
         },
