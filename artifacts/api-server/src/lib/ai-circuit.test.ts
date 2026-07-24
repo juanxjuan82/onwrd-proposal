@@ -13,7 +13,7 @@
  * same process.
  */
 
-import { describe, it, before, after, afterEach } from "node:test";
+import { describe, it, before, after, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { db } from "@workspace/db";
 import { aiDailyQuotaTable, aiUsageLogTable } from "@workspace/db";
@@ -86,8 +86,15 @@ describe("ai-circuit: gateway circuit/retry integration", () => {
     await resetCircuit();
   });
 
+  beforeEach(async () => {
+    __setOpenAICompletionForTesting(null);
+    __setInvokeAISpy(null);
+    await resetCircuit();
+  });
+
   afterEach(async () => {
     __setOpenAICompletionForTesting(null);
+    __setInvokeAISpy(null);
     await resetCircuit();
   });
 
@@ -119,12 +126,18 @@ describe("ai-circuit: gateway circuit/retry integration", () => {
 
     it("subsequent calls return GatewayCircuitOpenError without hitting provider", async () => {
       // Step 1 — open the circuit via a quota error.
+      // Use all three triggers isQuotaError checks: status 402, code, and message phrase.
       __setOpenAICompletionForTesting(async () => {
-        const err: any = new Error("exceeded quota");
+        const err: any = new Error("You exceeded your current quota");
         err.status = 402;
+        err.code   = "insufficient_quota";
         throw err;
       });
-      try { await invokeAI(BASE_PARAMS); } catch { /* expected */ }
+      try { await invokeAI(BASE_PARAMS); } catch { /* expected — gateway re-throws the quota error */ }
+
+      // Verify the circuit actually opened before testing gating.
+      const circuitAfterStep1 = await getCircuitState();
+      assert.ok(circuitAfterStep1.open, "circuit must open after a quota/402 error (step-1 precondition)");
 
       // Step 2 — replace mock and verify no provider call happens.
       let providerHits = 0;

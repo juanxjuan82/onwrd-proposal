@@ -63,7 +63,7 @@ interface DigestSettings {
 export default function SettingsSources() {
   const { toast } = useToast();
   const qc = useQueryClient();
-  const [tab, setTab] = useState<"sources" | "scoring" | "runs" | "digest">("sources");
+  const [tab, setTab] = useState<"sources" | "scoring" | "runs" | "digest" | "profiles">("sources");
   const [newEmail, setNewEmail] = useState("");
 
   const { data: sources = [], isLoading: sourcesLoading } = useQuery<TenderSource[]>({
@@ -92,7 +92,7 @@ export default function SettingsSources() {
       if (!r.ok) throw new Error("Failed");
       return r.json();
     },
-    enabled: (tab as string) === "profiles",
+    enabled: tab === "profiles",
   });
 
   const toggleSource = useMutation({
@@ -232,10 +232,11 @@ export default function SettingsSources() {
   });
 
   const TABS = [
-    { value: "sources", label: "Sources" },
-    { value: "scoring", label: "Scoring" },
-    { value: "digest", label: "Email Digest" },
-    { value: "runs", label: "Run History" },
+    { value: "sources",  label: "Sources" },
+    { value: "scoring",  label: "Scoring" },
+    { value: "profiles", label: "Search Profiles" },
+    { value: "digest",   label: "Email Digest" },
+    { value: "runs",     label: "Run History" },
   ] as const;
 
   return (
@@ -322,7 +323,7 @@ export default function SettingsSources() {
         </div>
       )}
 
-      {(tab as string) === "profiles" && (
+      {tab === "profiles" && (
         <div className="space-y-3">
           {profiles.map((p) => (
             <div key={p.id} className="p-4 rounded-lg border border-border bg-card">
