@@ -47,9 +47,14 @@ export class CARICOMAdapter implements TenderSourceAdapter {
             title: rawTitle,
             organization: "CARICOM Secretariat",
             url: fullUrl,
-            description: `CARICOM procurement: ${rawTitle}. Regional Caribbean Community communications and public awareness work.`,
+            // Real scope from page fetch only — no synthetic marketing assumption
+            description: `CARICOM Secretariat procurement notice: ${rawTitle}`,
             country: "Caribbean",
             sector: "Government & Public Communications",
+            rawData: {
+              adapterContext:
+                "CARICOM procurement: regional Caribbean Community communications and public awareness work.",
+            },
           });
 
           if (results.length >= 15) break;

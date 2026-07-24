@@ -60,9 +60,14 @@ export class EUCaribbeanAdapter implements TenderSourceAdapter {
             title: rawTitle,
             organization: "EU Caribbean Development Fund",
             url: fullUrl,
-            description: `EU Caribbean funding opportunity: ${rawTitle}. EU development programmes in the Caribbean often require communications, visibility and community engagement services.`,
+            // Real scope from page fetch only — no synthetic marketing assumption
+            description: `EU Caribbean funding notice: ${rawTitle}`,
             country: "Caribbean",
             sector: "Development Communications",
+            rawData: {
+              adapterContext:
+                "EU Caribbean: development programmes often require communications, visibility and community engagement services.",
+            },
           });
 
           if (results.length >= 15) break;

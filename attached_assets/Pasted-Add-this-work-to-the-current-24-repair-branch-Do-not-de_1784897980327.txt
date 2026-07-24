@@ -1,0 +1,221 @@
+Add this work to the current #24 repair branch. Do not deploy or merge.
+
+#25 — Crawl Control and Relevance Quality Repair
+
+What & Why
+
+The crawler is polluting canonical Opportunities with irrelevant results. The current implementation promotes every discovered tender, including recommendation="SKIP". Several adapters also inject assumed marketing/communications language into synthetic descriptions, allowing irrelevant records to pass their own relevance gate.
+
+Add an accessible Run Crawl action to Opportunities and repair crawler quality at the ingestion, scoring, promotion and cleanup layers. Do not add AI calls to automatic crawling or scoring.
+
+1. Diagnose the current false positives
+
+Before changing scoring, inspect the latest 50–100 discovered_tenders and corresponding canonical crawler Opportunities.
+
+Produce a short internal diagnostic summary grouped by:
+
+- Source adapter
+- Recommendation
+- Matched positive terms
+- Matched negative terms
+- Content quality: full_scope, partial_scope, title_only, boilerplate
+- Reason the result was incorrectly admitted
+
+Use representative public tender titles/descriptions as regression fixtures. Do not log private intake data or secrets.
+
+2. Add Run Crawl to Opportunities
+
+Add a small secondary “Run Crawl” button to the Opportunities page header.
+
+Behaviour:
+
+- POST /api/tender-intelligence/crawl with an empty body to run all active sources
+- Show spinner and “Crawl running” while active
+- Disable the button while a crawl is running
+- Handle 409 as “A crawl is already running”
+- Poll GET /api/crawler-runs until the latest run reaches success or failed
+- Refresh the canonical Opportunities query when complete
+- Show summary: sources checked, records found, relevant Opportunities added
+- Update all stale “Inbox” copy to “Opportunities”
+
+Keep Settings → Sources:
+
+- “Run All Now”
+- Per-source refresh action
+- Change the mutation type so sourceId is genuinely optional; remove the `undefined as unknown as number` cast
+- Update its completion messaging to reference Opportunities
+
+3. Separate real source content from adapter assumptions
+
+Adapters must never add marketing language merely because the source organization commonly publishes marketing work.
+
+Remove synthetic scoring text such as:
+
+- “Tourism destination marketing and communications for the Caribbean region”
+- “Regional Caribbean Community communications and public awareness work”
+- “EU programmes often require communications, visibility and community engagement”
+
+Store any adapter context separately in rawData.adapterContext. Never include it in the text passed to the relevance gate or scorer.
+
+For every candidate:
+
+- Fetch and extract the linked detail page or PDF when safely possible
+- Apply existing request timeouts, size limits and SSRF protections
+- Store the real title and extracted scope
+- If only a title or boilerplate description is available, retain the raw discovery but do not auto-promote it
+
+Do not crawl generic news/homepage links unless they resolve to a verifiable procurement, tender, RFP, EOI or consultancy notice.
+
+4. Implement one strict crawler eligibility function
+
+Create a shared deterministic function such as:
+
+evaluateCrawlerEligibility(discovery, score)
+
+Return:
+
+{
+  eligible: boolean,
+  destination: "new" | "reviewing" | "raw_only",
+  contentQuality: "full_scope" | "partial_scope" | "title_only" | "boilerplate",
+  positiveSignals: string[],
+  negativeSignals: string[],
+  rejectionReasons: string[]
+}
+
+Use this exact function for:
+
+- Live crawler promotion
+- Manual promote validation
+- Backfill
+- Re-score
+- Reconciliation of existing crawler Opportunities
+
+5. Strengthen the relevance gate
+
+Use word-boundary or phrase matching, not unrestricted substring matching.
+
+High-confidence ONWRD services include:
+
+- marketing strategy
+- communications strategy
+- public relations
+- media relations
+- brand strategy
+- brand identity
+- rebranding
+- advertising campaign
+- creative campaign
+- social media strategy or management
+- digital marketing
+- content strategy or production
+- copywriting
+- graphic design
+- video or multimedia production
+- destination marketing
+- public-awareness campaign
+- stakeholder/community engagement where communications deliverables are explicit
+
+Generic terms alone must not qualify:
+
+- consulting
+- advisory
+- tourism
+- campaign
+- communications
+- engagement
+- visibility
+- media
+- brand
+- research
+- training
+- outreach
+
+Add hard-negative categories:
+
+- construction and civil works
+- engineering
+- vehicles and equipment
+- medical/pharmaceutical supplies
+- office supplies
+- IT hardware, networking and software licensing
+- financial/external audits
+- security services
+- catering
+- job postings and individual employment
+- contract awards
+- vendor-registration notices
+- grants/funding announcements without a service procurement
+- training, research or evaluation with no explicit communications deliverable
+
+If the title is clearly dominated by a hard-negative category, reject it unless the actual scope contains at least two explicit core ONWRD deliverables.
+
+Expired opportunities are always raw_only.
+
+Title-only and boilerplate records are raw_only regardless of score.
+
+6. Correct automatic promotion
+
+After scoring and storing discovered_tenders:
+
+- PURSUE plus strict eligibility → promote to canonical Opportunity with status New
+- CONSIDER plus strict eligibility → promote with status Reviewing
+- SKIP → never auto-promote
+- Ineligible/boilerplate/title-only → never auto-promote
+- Preserve every discovery in discovered_tenders for audit
+
+Do not call promoteDiscoveredTender unconditionally.
+
+Update promoteDiscoveredTender to accept or derive the validated eligibility result. Manual forced promotion, if retained, must be an explicit authenticated action.
+
+7. Correct backfill
+
+Backfill must require:
+
+- opportunityId IS NULL
+- status IN ('new', 'saved')
+- recommendation IN ('PURSUE', 'CONSIDER')
+- evaluateCrawlerEligibility(...).eligible === true
+
+Never backfill SKIP, expired, title-only or boilerplate records.
+
+Add the missing `backfill-discoveries` package script.
+
+8. Safely clean existing bad Opportunities
+
+Create a reconciliation script with dry-run as the default:
+
+pnpm --filter @workspace/api-server run reconcile-crawler-opportunities
+
+It must:
+
+- Re-evaluate canonical Opportunities where sourceType="crawler"
+- Never delete records
+- Never alter opportunities with a linked proposal, bid_started status or meaningful manual edits
+- Report how many would remain, move to Reviewing or move to No Bid
+- Require an explicit `--apply` flag before changing anything
+- Set clearly irrelevant untouched crawler Opportunities to No Bid
+- Preserve the raw discovered_tenders record and linkage
+
+Return the dry-run report before applying changes.
+
+9. Tests
+
+Add tests proving:
+
+- SKIP discoveries are stored but never promoted
+- PURSUE eligible discoveries are promoted once
+- CONSIDER eligible discoveries become Reviewing
+- Concurrent promotions return one Opportunity
+- Expired records are not promoted
+- Boilerplate/title-only records are not promoted
+- Synthetic adapter context cannot influence scoring
+- Generic “communications equipment” does not pass
+- Construction notices mentioning a communications cable do not pass
+- Genuine communications strategy, PR, branding, digital campaign and destination-marketing RFPs pass
+- Backfill excludes SKIP and dismissed records
+- Run Crawl handles running, success, failure and 409 states
+- Completion refreshes the Opportunities list
+- No automatic crawl path invokes AI
+
+Run type-checks, tests and both production builds. Provide before/after precision counts from the diagnostic sample, exact command output and the new commit SHA. Do not deploy or merge.

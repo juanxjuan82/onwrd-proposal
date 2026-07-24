@@ -119,17 +119,17 @@ export default function SettingsSources() {
   });
 
   const crawlSource = useMutation({
-    mutationFn: async (sourceId: number) => {
+    mutationFn: async (sourceId?: number) => {
       const r = await fetch(`${BASE}/api/tender-intelligence/crawl`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceId }),
+        body: JSON.stringify(sourceId != null ? { sourceId } : {}),
       });
       if (!r.ok) throw new Error("Failed");
       return r.json();
     },
     onSuccess: () => {
-      toast({ title: "Crawl started", description: "Results will appear in the Inbox in ~1 minute." });
+      toast({ title: "Crawl started", description: "New opportunities will appear in ~1 minute." });
       setTimeout(() => qc.invalidateQueries({ queryKey: ["crawler-runs"] }), 30000);
     },
   });
@@ -146,7 +146,7 @@ export default function SettingsSources() {
     onSuccess: (data) => {
       toast({
         title: "Re-score complete",
-        description: `${data.count} items scored using keyword engine. Check the Inbox.`,
+        description: `${data.count} items scored using keyword engine. Check Opportunities.`,
       });
       qc.invalidateQueries({ queryKey: ["discovered-tenders"] });
     },
@@ -268,7 +268,7 @@ export default function SettingsSources() {
             <Button
               size="sm"
               variant="outline"
-              onClick={() => crawlSource.mutate(undefined as unknown as number)}
+              onClick={() => crawlSource.mutate(undefined)}
               disabled={crawlSource.isPending}
             >
               <Play className="w-3.5 h-3.5 mr-1.5" />
@@ -399,7 +399,7 @@ export default function SettingsSources() {
           {/* Thresholds */}
           <div className="p-5 rounded-lg border border-border bg-card">
             <h3 className="font-semibold text-white text-sm mb-1">Recommendation Thresholds</h3>
-            <p className="text-xs text-muted-foreground mb-4">Final fit score determines the recommendation shown in the Inbox.</p>
+            <p className="text-xs text-muted-foreground mb-4">Final fit score determines the recommendation shown in Opportunities.</p>
             <div className="space-y-2">
               {[
                 { label: "🔥 PURSUE",   range: "≥ 60", note: "Strong fit across geography, capabilities, and sector", color: "border-emerald-800 bg-emerald-900/20 text-emerald-400" },
@@ -573,7 +573,7 @@ export default function SettingsSources() {
             </button>
           </div>
           {runs.length === 0 ? (
-            <p className="text-muted-foreground text-sm py-8 text-center">No crawl runs yet. Trigger one from the Inbox or a source.</p>
+            <p className="text-muted-foreground text-sm py-8 text-center">No crawl runs yet. Trigger one from the Opportunities page or a source below.</p>
           ) : (
             runs.map((run) => {
               const src = sources.find((s) => s.id === run.sourceId);

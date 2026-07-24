@@ -11,11 +11,14 @@ import { applyDeterministicScore } from "./apply-deterministic-score.js";
  *   opportunityId check and creating duplicate Opportunities.
  * - Idempotent: if opportunityId is already set, returns it immediately.
  * - Sets sourceType = "crawler" on the canonical tenders row.
- * - Calls applyDeterministicScore within the same transaction so the
- *   insert, scoring, and link writes are fully atomic.
+ * - For "new" destination: calls applyDeterministicScore within the same
+ *   transaction so the insert, scoring, and link writes are fully atomic.
+ * - For "reviewing" destination: inserts with status "pending_review" and
+ *   skips deterministic scoring (the record needs human review first).
  */
 export async function promoteDiscoveredTender(
   discoveredTenderId: number,
+  destination: "new" | "reviewing" = "new",
 ): Promise<{ opportunityId: number }> {
   type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
   return db.transaction(async (tx: DbTx) => {
@@ -51,6 +54,8 @@ export async function promoteDiscoveredTender(
       return { opportunityId: row.opportunity_id };
     }
 
+    const initialStatus = destination === "reviewing" ? "pending_review" : "opportunity_found";
+
     const [opportunity] = await tx
       .insert(tendersTable)
       .values({
@@ -63,11 +68,15 @@ export async function promoteDiscoveredTender(
         sourceUrl:   row.url ?? undefined,
         rawText:     row.description || undefined,
         sourceType:  "crawler",
-        status:      "opportunity_found",
+        status:      initialStatus,
       })
       .returning({ id: tendersTable.id });
 
-    await applyDeterministicScore(tx, opportunity.id);
+    // Only run deterministic scoring for "new" destination opportunities —
+    // "reviewing" records need human review before scoring drives decisions.
+    if (destination === "new") {
+      await applyDeterministicScore(tx, opportunity.id);
+    }
 
     await tx
       .update(discoveredTendersTable)

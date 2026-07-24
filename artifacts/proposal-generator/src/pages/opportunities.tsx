@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useLocation } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -230,6 +230,71 @@ function usePursue(id: number) {
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["opportunities"] }),
   });
+}
+
+function useRunCrawl() {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  const [crawlRunning, setCrawlRunning] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  const startPolling = useCallback(() => {
+    const deadline = Date.now() + 5 * 60 * 1000;
+    pollRef.current = setInterval(async () => {
+      if (Date.now() > deadline) {
+        stopPolling();
+        setCrawlRunning(false);
+        return;
+      }
+      try {
+        const r = await fetch(`${BASE}/api/crawler-runs`);
+        if (!r.ok) return;
+        const runs = (await r.json()) as { status: string; startedAt: string }[];
+        const latest = runs[0];
+        if (latest && (latest.status === "success" || latest.status === "failed")) {
+          stopPolling();
+          setCrawlRunning(false);
+          await qc.invalidateQueries({ queryKey: ["opportunities"] });
+          toast({
+            title: latest.status === "success" ? "Crawl complete" : "Crawl finished with errors",
+            description: "Opportunities list refreshed.",
+          });
+        }
+      } catch { /* ignore poll errors */ }
+    }, 8000);
+  }, [stopPolling, qc, toast]);
+
+  useEffect(() => () => stopPolling(), [stopPolling]);
+
+  const mutation = useMutation({
+    mutationFn: async () => {
+      const r = await fetch(`${BASE}/api/tender-intelligence/crawl`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (r.status === 409) throw new Error("A crawl is already in progress — try again in a moment.");
+      if (!r.ok) throw new Error("Failed to start crawl");
+      return r.json() as Promise<{ message: string }>;
+    },
+    onSuccess: () => {
+      setCrawlRunning(true);
+      toast({ title: "Crawl started", description: "Scanning sources for new opportunities…" });
+      startPolling();
+    },
+    onError: (err: Error) => {
+      toast({ title: "Crawl failed", description: err.message, variant: "destructive" });
+    },
+  });
+
+  return { runCrawl: () => mutation.mutate(), crawlRunning: crawlRunning || mutation.isPending };
 }
 
 // ── Score display ────────────────────────────────────────────────────────────
@@ -700,6 +765,7 @@ export default function Opportunities() {
   const { data: opportunities, isLoading } = useOpportunities();
   const [filterTab, setFilterTab] = useState<FilterTab>("all");
   const [selected, setSelected] = useState<Opportunity | null>(null);
+  const { runCrawl, crawlRunning } = useRunCrawl();
 
   const all = opportunities ?? [];
 
@@ -711,9 +777,24 @@ export default function Opportunities() {
 
   return (
     <div className="p-8 max-w-6xl mx-auto">
-      <div className="mb-6">
-        <h1 className="text-3xl font-bold text-white mb-1 tracking-tight">Opportunities</h1>
-        <p className="text-muted-foreground text-sm">Score, enrich, and decide — then pursue or pass.</p>
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold text-white mb-1 tracking-tight">Opportunities</h1>
+          <p className="text-muted-foreground text-sm">Score, enrich, and decide — then pursue or pass.</p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          className="shrink-0 mt-1"
+          onClick={runCrawl}
+          disabled={crawlRunning}
+        >
+          {crawlRunning ? (
+            <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Crawling…</>
+          ) : (
+            <><Globe className="w-3.5 h-3.5 mr-1.5" />Run Crawl</>
+          )}
+        </Button>
       </div>
 
       {/* Filter tabs */}

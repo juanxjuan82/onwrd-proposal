@@ -1,3 +1,4 @@
+- [Crawler eligibility gate](crawler-eligibility.md) — evaluateCrawlerEligibility() in lib/crawler-eligibility.ts; phrase matching, hard negatives, content quality; adapter context must not be in description
 - [Crawler quota design](crawler-quota-design.md) — circuit breaker + keyword-first gating pattern for AI scoring in the crawl pipeline
 - [Analysis pipeline design](analysis-pipeline.md) — extraction is a single AI call (not a loop); step statuses, 45k-char truncation, 90s abort, quota-never-retry pattern
 - [Test runner choice](test-runner.md) — vitest blocked by package firewall; use node:test + tsx (already in workspace catalog); test script in package.json lists files explicitly
