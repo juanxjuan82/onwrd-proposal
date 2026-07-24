@@ -18,7 +18,11 @@ if (Number.isNaN(port) || port <= 0) {
 }
 
 // Wait for session store DDL before accepting connections
-await dbReady;
+try {
+  await dbReady;
+} catch {
+  process.exit(1);
+}
 
 app.listen(port, (err) => {
   if (err) {

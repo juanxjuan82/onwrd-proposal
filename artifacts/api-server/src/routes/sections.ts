@@ -314,6 +314,34 @@ router.post("/proposals/:id/export", async (req, res) => {
     return;
   }
 
+  // ── 2a. Draft readiness — evaluated BEFORE auth or any Google API call ────
+  // Avoids triggering OAuth flows for proposals that aren’t ready to export.
+  const DRAFTING_PLACEHOLDER = /generating proposal sections/i;
+  const hasMeaningfulContent = (text: string | null | undefined): boolean =>
+    !!(text?.trim()) && !DRAFTING_PLACEHOLDER.test(text.trim());
+
+  const allSections = await db
+    .select()
+    .from(proposalSectionsTable)
+    .where(eq(proposalSectionsTable.proposalId, proposalId))
+    .orderBy(proposalSectionsTable.orderIndex);
+
+  // Only sections with meaningful content are exported — empty shells are omitted.
+  const meaningfulSections = allSections.filter((s) => hasMeaningfulContent(s.content));
+
+  let exportContent: string;
+  if (meaningfulSections.length > 0) {
+    exportContent = meaningfulSections.map((s) => `## ${s.title}\n\n${s.content}`).join("\n\n---\n\n");
+  } else if (hasMeaningfulContent(proposal.proposalContent)) {
+    exportContent = proposal.proposalContent!;
+  } else {
+    res.status(422).json({
+      error: "Proposal draft is not ready to share. Wait for generation to complete.",
+      code:  "draft_not_ready",
+    });
+    return;
+  }
+
   // ── 3. Auth check — only needed for new / retry handoffs ─────────────────
   let accessToken: string;
   try {
@@ -370,14 +398,7 @@ router.post("/proposals/:id/export", async (req, res) => {
 
   try {
     // ── 6. Require configured folder ─────────────────────────────────────
-    const [[driveConfig], sections] = await Promise.all([
-      db.select().from(googleDriveConfigTable).limit(1),
-      db
-        .select()
-        .from(proposalSectionsTable)
-        .where(eq(proposalSectionsTable.proposalId, proposalId))
-        .orderBy(proposalSectionsTable.orderIndex),
-    ]);
+    const [driveConfig] = await db.select().from(googleDriveConfigTable).limit(1);
 
     if (!driveConfig?.folderId) {
       await db
@@ -391,31 +412,8 @@ router.post("/proposals/:id/export", async (req, res) => {
       return;
     }
 
-    // ── Empty-draft guard ─────────────────────────────────────────────────────
-    // Reject before any Drive mutation when the draft is not yet ready.
-    const DRAFTING_PLACEHOLDER = /generating proposal sections/i;
-    const hasMeaningfulContent = (text: string | null | undefined): boolean =>
-      !!(text?.trim()) && !DRAFTING_PLACEHOLDER.test(text.trim());
-
-    const meaningfulSections = sections.filter((s) => hasMeaningfulContent(s.content));
-
-    let content: string;
-    if (meaningfulSections.length > 0) {
-      content = sections.map((s) => `## ${s.title}\n\n${s.content}`).join("\n\n---\n\n");
-    } else if (hasMeaningfulContent(proposal.proposalContent)) {
-      content = proposal.proposalContent!;
-    } else {
-      await db
-        .update(proposalsTable)
-        .set({ syncStatus: null, handoffStartedAt: null })
-        .where(eq(proposalsTable.id, proposalId))
-        .catch(() => {});
-      res.status(422).json({
-        error: "Proposal draft is not ready to share. Wait for generation to complete.",
-        code:  "draft_not_ready",
-      });
-      return;
-    }
+    // exportContent was computed in step 2a before auth.
+    const content = exportContent;
 
     const exportedBy = req.session.googleUserEmail ?? null;
 

@@ -50,7 +50,9 @@ export const dbReady: Promise<void> = pool
   .then(() => pool.query(`CREATE INDEX IF NOT EXISTS IDX_session_expire ON session (expire)`))
   .then(() => undefined)
   .catch((err: unknown) => {
-    logger.error({ err }, "Failed to create session table");
+    const reason = err instanceof Error ? err.message : String(err);
+    logger.error({ reason }, "Session store initialization failed — refusing to start");
+    throw err;
   });
 
 const PgStore = connectPgSimple(session);

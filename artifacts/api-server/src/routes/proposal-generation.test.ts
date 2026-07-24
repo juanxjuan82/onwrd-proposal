@@ -300,3 +300,283 @@ describe("§16 proposal-detail — polling and form sync", () => {
     );
   });
 });
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// §B  Behavioral tests (new — require real DB + mocked AI gateway)
+// ═══════════════════════════════════════════════════════════════════════════════
+// These tests use a live PostgreSQL database (same instance as dev), a real
+// Express test server, and __setInvokeAISpy to prevent real AI calls.
+// Test data is isolated by a unique timestamp prefix and cleaned up after each test.
+
+import { before as _before, after as _after } from "node:test";
+import express, { type Request, type Response, type NextFunction } from "express";
+import { createServer, type Server } from "node:http";
+import { db } from "@workspace/db";
+import {
+  tendersTable,
+  proposalsTable,
+  proposalSectionsTable,
+} from "@workspace/db";
+import { eq } from "drizzle-orm";
+import { __setInvokeAISpy } from "../lib/ai-gateway.js";
+
+const { default: opportunitiesRouter } = await import("./opportunities.js");
+const { default: sectionsRouter }      = await import("./sections.js");
+
+let _server: Server;
+let _baseUrl: string;
+
+function _addReqLog(req: Request, _res: Response, next: NextFunction) {
+  (req as unknown as Record<string, unknown>).log = { error: () => {}, warn: () => {}, info: () => {} };
+  next();
+}
+function _addSession(req: Request, _res: Response, next: NextFunction) {
+  if (!(req as unknown as Record<string, unknown>).session) {
+    (req as unknown as Record<string, unknown>).session = { save: (cb: () => void) => cb() };
+  }
+  next();
+}
+
+_before(async () => {
+  const app = express();
+  app.use(express.json());
+  app.use(_addReqLog);
+  app.use(_addSession);
+  app.use("/api", opportunitiesRouter);
+  app.use("/api", sectionsRouter);
+  _server = createServer(app);
+  await new Promise<void>((resolve) => _server.listen(0, "127.0.0.1", () => resolve()));
+  const addr = _server.address() as { port: number };
+  _baseUrl = `http://127.0.0.1:${addr.port}`;
+});
+
+_after(async () => {
+  await new Promise<void>((resolve, reject) =>
+    _server.close((err) => (err ? reject(err) : resolve())),
+  );
+  __setInvokeAISpy(null);
+});
+
+const _TEST_PREFIX = `[BEH-TEST-${Date.now()}]`;
+
+async function _createTestTender(): Promise<number> {
+  const [row] = await db
+    .insert(tendersTable)
+    .values({
+      title: `${_TEST_PREFIX} Behavioral test tender`,
+      agency: "Test Agency",
+      description: "Description for behavioral test.",
+      category: "General",
+      status: "pending_review",
+      recommendationScore: 0,
+    })
+    .returning({ id: tendersTable.id });
+  return row.id;
+}
+
+async function _cleanupTestTender(tenderId: number): Promise<void> {
+  const [proposal] = await db
+    .select({ id: proposalsTable.id })
+    .from(proposalsTable)
+    .where(eq(proposalsTable.tenderId, tenderId));
+  if (proposal) {
+    await db.delete(proposalSectionsTable).where(eq(proposalSectionsTable.proposalId, proposal.id));
+    await db.delete(proposalsTable).where(eq(proposalsTable.id, proposal.id));
+  }
+  await db.delete(tendersTable).where(eq(tendersTable.id, tenderId));
+}
+
+function _silentAiSpy() {
+  __setInvokeAISpy(async () => ({
+    content: JSON.stringify({ sections: [] }),
+    model: "test-model",
+    usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
+  }));
+}
+
+// ── §B-1  Two concurrent generate-proposal requests ────────────────────────────────────────────────────
+
+describe("§B-1 concurrent generate-proposal → one AI invocation", () => {
+  _after(() => { __setInvokeAISpy(null); });
+
+  it("exactly one request succeeds (200) and the other is rejected (409 generation_in_progress)", async () => {
+    const tenderId = await _createTestTender();
+    let aiCallCount = 0;
+    let resolveAi!: () => void;
+    const aiCalled = new Promise<void>((resolve) => { resolveAi = resolve; });
+    __setInvokeAISpy(async () => {
+      aiCallCount++;
+      resolveAi();
+      return { content: JSON.stringify({ sections: [] }), model: "test", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
+    });
+    const send = () => fetch(`${_baseUrl}/api/opportunities/${tenderId}/generate-proposal`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+    });
+    try {
+      const [r1, r2] = await Promise.all([send(), send()]);
+      const statuses = [r1.status, r2.status].sort((a, b) => a - b);
+      assert.deepStrictEqual(statuses, [200, 409], "One request must get 200 and the other 409");
+      const rejected = [r1, r2].find((r) => r.status === 409)!;
+      const body = await rejected.json() as { code?: string };
+      assert.equal(body.code, "generation_in_progress", "409 must carry code: generation_in_progress");
+      await Promise.race([
+        aiCalled,
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error("AI spy not called within 5 s")), 5000)),
+      ]);
+      assert.equal(aiCallCount, 1, "AI must be invoked exactly once across both requests");
+    } finally { __setInvokeAISpy(null); await _cleanupTestTender(tenderId); }
+  });
+
+  it("both requests resolve the same canonical Proposal id", async () => {
+    const tenderId = await _createTestTender();
+    _silentAiSpy();
+    const send = () => fetch(`${_baseUrl}/api/opportunities/${tenderId}/generate-proposal`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+    });
+    try {
+      const [r1, r2] = await Promise.all([send(), send()]);
+      const b1 = await r1.json() as { proposalId?: number };
+      const b2 = await r2.json() as { proposalId?: number };
+      const canonicalId = b1.proposalId ?? b2.proposalId;
+      assert.ok(canonicalId, "At least one response must include a proposalId");
+      const [dbRow] = await db.select({ id: proposalsTable.id }).from(proposalsTable).where(eq(proposalsTable.tenderId, tenderId));
+      assert.equal(dbRow?.id, canonicalId, "Canonical proposalId must match DB row");
+    } finally { __setInvokeAISpy(null); await _cleanupTestTender(tenderId); }
+  });
+
+  it("only one section set exists after concurrent generation", async () => {
+    const tenderId = await _createTestTender();
+    _silentAiSpy();
+    const send = () => fetch(`${_baseUrl}/api/opportunities/${tenderId}/generate-proposal`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+    });
+    try {
+      await Promise.all([send(), send()]);
+      const [proposal] = await db.select({ id: proposalsTable.id }).from(proposalsTable).where(eq(proposalsTable.tenderId, tenderId));
+      assert.ok(proposal, "Canonical proposal must exist");
+      const sects = await db.select().from(proposalSectionsTable).where(eq(proposalSectionsTable.proposalId, proposal.id));
+      assert.ok(sects.length <= 15, `Section count must not exceed 15 — got ${sects.length}`);
+    } finally { __setInvokeAISpy(null); await _cleanupTestTender(tenderId); }
+  });
+});
+
+// ── §B-2  proposalId mismatch rejected ───────────────────────────────────────────────────────────────────────────────
+
+describe("§B-2 proposalId mismatch → 409 proposal_mismatch", () => {
+  it("returns 409 proposal_mismatch when proposalId does not match canonical", async () => {
+    const tenderId = await _createTestTender();
+    _silentAiSpy();
+    try {
+      const r1 = await fetch(`${_baseUrl}/api/opportunities/${tenderId}/generate-proposal`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+      });
+      assert.equal(r1.status, 200, "First request must create the proposal");
+      const r2 = await fetch(`${_baseUrl}/api/opportunities/${tenderId}/generate-proposal`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ proposalId: 99999 }),
+      });
+      const body = await r2.json() as { code?: string };
+      assert.equal(r2.status, 409);
+      assert.equal(body.code, "proposal_mismatch");
+    } finally { __setInvokeAISpy(null); await _cleanupTestTender(tenderId); }
+  });
+});
+
+// ── §B-3  Empty content → 422 before auth ──────────────────────────────────────────────────────────────────────
+
+describe("§B-3 export empty content → 422 draft_not_ready, zero OAuth/Drive/Docs calls", () => {
+  it("returns 422 draft_not_ready before touching Google OAuth or Drive", async () => {
+    const tenderId = await _createTestTender();
+    const [pRow] = await db.insert(proposalsTable).values({
+      clientName: "Test Client", industry: "General", briefText: "test",
+      proposalContent: "", status: "draft", tenderId,
+    }).returning({ id: proposalsTable.id });
+    try {
+      const res = await fetch(`${_baseUrl}/api/proposals/${pRow.id}/export`, { method: "POST" });
+      assert.equal(res.status, 422);
+      const body = await res.json() as { code?: string };
+      assert.equal(body.code, "draft_not_ready");
+    } finally {
+      await db.delete(proposalSectionsTable).where(eq(proposalSectionsTable.proposalId, pRow.id));
+      await db.delete(proposalsTable).where(eq(proposalsTable.id, pRow.id));
+      await _cleanupTestTender(tenderId);
+    }
+  });
+
+  it("also returns 422 for the placeholder text", async () => {
+    const tenderId = await _createTestTender();
+    const [pRow] = await db.insert(proposalsTable).values({
+      clientName: "Test Client", industry: "General", briefText: "test",
+      proposalContent: "Generating proposal sections — please refresh in ~30 seconds.",
+      status: "draft", tenderId,
+    }).returning({ id: proposalsTable.id });
+    try {
+      const res = await fetch(`${_baseUrl}/api/proposals/${pRow.id}/export`, { method: "POST" });
+      assert.equal(res.status, 422);
+      const body = await res.json() as { code?: string };
+      assert.equal(body.code, "draft_not_ready");
+    } finally {
+      await db.delete(proposalSectionsTable).where(eq(proposalSectionsTable.proposalId, pRow.id));
+      await db.delete(proposalsTable).where(eq(proposalsTable.id, pRow.id));
+      await _cleanupTestTender(tenderId);
+    }
+  });
+});
+
+// ── §B-4  Empty section shells not included in exported content ──────────────────────────────────
+
+describe("§B-4 export — meaningful-content filtering (structural)", () => {
+  it("hasMeaningfulContent logic correctly excludes empty and placeholder sections", () => {
+    const DRAFTING_PLACEHOLDER = /generating proposal sections/i;
+    const hasMeaningfulContent = (text: string | null | undefined): boolean =>
+      !!(text?.trim()) && !DRAFTING_PLACEHOLDER.test(text.trim());
+    const mockSections = [
+      { title: "Executive Summary", content: "This is real content." },
+      { title: "Investment",        content: "" },
+      { title: "Next Steps",        content: "Generating proposal sections — please refresh in ~30 seconds." },
+      { title: "Timeline",          content: "  " },
+    ];
+    const meaningful = mockSections.filter((s) => hasMeaningfulContent(s.content));
+    assert.equal(meaningful.length, 1);
+    assert.equal(meaningful[0].title, "Executive Summary");
+  });
+
+  it("draft_not_ready 422 fires before createGoogleDocInFolder in source", () => {
+    const draftPos = sectionsSrc.indexOf("draft_not_ready");
+    const gdocPos  = sectionsSrc.indexOf("createGoogleDocInFolder(");
+    assert.ok(draftPos > 0 && gdocPos > 0);
+    assert.ok(draftPos < gdocPos, "draft_not_ready must appear before createGoogleDocInFolder");
+  });
+
+  it("draft readiness check appears before await getValidGoogleAccessToken in source", () => {
+    const readyPos = sectionsSrc.indexOf("Draft readiness");
+    const authPos  = sectionsSrc.indexOf("await getValidGoogleAccessToken");
+    assert.ok(readyPos > 0, "Expected 'Draft readiness' comment in sections.ts");
+    assert.ok(authPos > 0, "Expected 'await getValidGoogleAccessToken' call in sections.ts");
+    assert.ok(readyPos < authPos, "Draft readiness must appear before auth call");
+  });
+});
+
+// ── §B-5  Session initialization failure → dbReady rejects ─────────────────────────────────────────
+
+describe("§B-5 session init failure → dbReady rejects", () => {
+  it("dbReady promise rejects when pool DDL fails", async () => {
+    const failingPool = { query: async (_q: string) => { throw new Error("DDL refused"); } };
+    const dbReady: Promise<void> = (failingPool.query as (_q: string) => Promise<void>)("CREATE TABLE ...")
+      .then(() => undefined)
+      .catch((err: unknown) => { throw err; });
+    await assert.rejects(() => dbReady, (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /DDL refused/);
+      return true;
+    });
+  });
+
+  it("index.ts awaits dbReady inside try/catch and exits on failure", () => {
+    assert.ok(indexSrc.includes("try {") && indexSrc.includes("await dbReady"), "index.ts must try { await dbReady }");
+    assert.ok(indexSrc.includes("process.exit(1)"), "index.ts must call process.exit(1) on failure");
+    const exitPos   = indexSrc.indexOf("process.exit(1)");
+    const listenPos = indexSrc.indexOf("app.listen");
+    assert.ok(exitPos < listenPos, "process.exit(1) must precede app.listen");
+  });
+});

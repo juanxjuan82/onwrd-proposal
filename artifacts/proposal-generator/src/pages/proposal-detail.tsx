@@ -553,15 +553,17 @@ export default function ProposalDetail() {
         queryClient.invalidateQueries({ queryKey: getGetProposalQueryKey(id) });
         const status = (error as { status?: number }).status;
         const title =
+          status === 422 ? "Draft not ready" :
           status === 409 ? "Handoff in progress" :
           status === 400 ? "Configuration required" :
           status === 401 ? "Google account disconnected" :
           "Share failed";
         const description =
+          status === 422 ? "The proposal has no content ready to export. Wait for generation to complete or add content first." :
           status === 409 ? "A handoff is already running for this proposal. Try again in a moment." :
-          status === 400 ? (error.error || "No Google Drive folder configured. Set a destination in Settings first.") :
+          status === 400 ? ((error as { error?: string }).error || "No Google Drive folder configured. Set a destination in Settings first.") :
           status === 401 ? "Your Google account is not connected. Reconnect it in Settings → Google Docs." :
-          error.error || "Could not share to Google Docs. Make sure your Google account is connected in Settings.";
+          (error as { error?: string }).error || "Could not share to Google Docs. Make sure your Google account is connected in Settings.";
         toast({ title, description, variant: "destructive" });
       }
     });
@@ -1057,16 +1059,23 @@ export default function ProposalDetail() {
                 )}
 
                 {/* Share for Team Review — only when no doc yet */}
-                {!proposal.googleFileId && proposal.syncStatus !== "handoff_in_progress" && (
+                {!proposal.googleFileId && proposal.syncStatus !== "handoff_in_progress" && (() => {
+                  const PLACEHOLDER = /generating proposal sections/i;
+                  const isMeaningful = (t: string | null | undefined) => !!(t?.trim()) && !PLACEHOLDER.test(t.trim());
+                  const hasMeaningSections = sections?.some((s) => isMeaningful(s.content)) ?? false;
+                  const hasNoReadyContent = !hasMeaningSections && !isMeaningful(proposal.proposalContent);
+                  return (
                   <Button
                     type="button"
-                    disabled={updateProposal.isPending || exportToDocs.isPending || !driveConfig?.folderId || (proposal.status as string) === "proposal_drafting"}
+                    disabled={updateProposal.isPending || exportToDocs.isPending || !driveConfig?.folderId || (proposal.status as string) === "proposal_drafting" || hasNoReadyContent}
                     onClick={handleHandoff}
                     className="bg-[#0000FF] hover:bg-[#0000FF] text-white border border-[#0000FF] disabled:opacity-50"
                     data-testid="button-share"
                     title={
                       (proposal.status as string) === "proposal_drafting"
                         ? "Wait for generation to complete before sharing"
+                        : hasNoReadyContent
+                        ? "No content ready — generate or add proposal content first"
                         : !driveConfig?.folderId
                         ? "Configure a destination folder in Settings first"
                         : undefined
@@ -1079,7 +1088,8 @@ export default function ProposalDetail() {
                     )}
                     Share for Team Review
                   </Button>
-                )}
+                  );
+                })()}
               </div>
             </div>
           )}
