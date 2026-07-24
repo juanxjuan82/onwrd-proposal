@@ -1,0 +1,88 @@
+Proceed with the full #23 Google Drive / Docs Connection Overhaul based on the audit you just completed.
+
+Critical product correction:
+
+The earlier requirement that existing linked documents “continue to sync” is withdrawn. Current syncing clears and rewrites the Google Doc body, which can destroy team edits.
+
+Required handoff model:
+
+* Before handoff, the proposal inside the app is canonical.
+* The first **Share for Team Review** action creates and populates one Google Doc.
+* Persist the Google document ID before writing its content.
+* If the initial content write fails, record an explicit incomplete-first-write state.
+* A retry must reuse and populate that same document without creating a duplicate.
+* After the first write succeeds, the Google Doc becomes canonical.
+* The primary action becomes **Open Google Doc**.
+* Repeated export/handoff requests return the existing document URL without making any Google Docs mutation.
+* Legacy linked documents remain linked and are never rewritten.
+* Remove **Sync Changes**, destructive rewrite behavior, and `clearAndReplaceContent`.
+* Do not use the existence of `googleFileId` alone to identify an incomplete first write. Use an explicit retryable state.
+
+Implement the remainder of #23:
+
+1. Replace MemoryStore with `connect-pg-simple` using the existing PostgreSQL pool.
+2. Require `SESSION_SECRET` in production; use a warned fallback in development.
+3. Use secure production cookies while preserving local development.
+4. Add a shared `getValidGoogleAccessToken(session)` helper.
+5. Refresh within 60 seconds of expiry and update the session.
+6. On refresh failure, clear all Google session keys and throw a typed 401 `GoogleAuthError`.
+7. Use the helper before every Google API call.
+8. Generate OAuth state with `crypto.randomBytes(32).toString("hex")`.
+9. Store `googleOAuthState` and `googleOAuthReturnTo` separately.
+10. Accept only same-origin internal `returnTo` paths.
+11. Never log authorization codes, tokens, secrets, or raw token responses.
+12. Make the status endpoint validate/refresh the token and return the connected account email.
+13. Correct folder validation using:
+
+`GET /drive/v3/files/{folderId}?supportsAllDrives=true&fields=id,name,mimeType,driveId,parents,capabilities(canAddChildren,canEdit)`
+
+14. Never send `driveId` or `includeItemsFromAllDrives` to `files.get`.
+15. Require folder MIME type and `capabilities.canAddChildren === true`.
+16. Derive `driveId` from the returned folder metadata.
+17. Return distinct codes for expired auth, not found, non-folder, no write permission, admin restriction, and temporary failure.
+18. Add Google Picker folder-only selection with Shared Drive support using the current supported Picker API.
+19. Use the backend OAuth access token plus:
+
+* `VITE_GOOGLE_PICKER_API_KEY`
+* `VITE_GOOGLE_CLOUD_PROJECT_NUMBER`
+* `VITE_GOOGLE_CLIENT_ID` where required
+
+20. Never expose `GOOGLE_CLIENT_SECRET` or create a frontend client-secret variable.
+21. Remove all manual Folder ID, Display Name, and Shared Drive ID inputs.
+22. After Picker selection, send only the selected folder ID to the backend; validate it and derive its name and `driveId` server-side before saving.
+23. Show connected account email, selected folder name, Change Folder, Test Connection, and Clear Folder.
+24. Create the first document directly in the destination using:
+
+`POST /drive/v3/files?supportsAllDrives=true&fields=id,name,webViewLink,parents,driveId`
+
+with:
+
+`{ name, mimeType: "application/vnd.google-apps.document", parents: [folderId] }`
+
+25. Delete the create-then-move flow, `moveDocToFolder`, and unused `shareWithAnyone`.
+26. Require a configured folder before first handoff. Never imply that an unset folder exports to Drive root.
+
+Do not modify:
+
+* Proposal-generation logic or prompts
+* Opportunity-analysis logic
+* Deterministic scoring
+* OAuth scopes
+* Navigation or the planned three-stage workflow refactor
+* Billing
+* The one-Google-document-per-proposal rule
+
+Tests must cover My Drive, Shared Drive root, nested Shared Drive folders, automatic `driveId`, invalid IDs, non-folders, viewer-only access, token refresh success/failure, OAuth CSRF, internal-only `returnTo`, forbidden Drive parameters, direct creation in the configured parent, concurrent handoff protection, failed initial content retry without duplication, legacy linked documents remaining untouched, and repeated successful handoffs making zero Docs mutation calls.
+
+Run the complete test suite, type-check, and production builds. Fix failures caused by this work. Do not deploy or merge automatically.
+
+When finished, report:
+
+* Branch and commit hash
+* Files changed
+* Database/session changes
+* Exact incomplete-first-write state used
+* Tests added
+* Full test results
+* Build results
+* Any remaining manual Google Cloud configuration

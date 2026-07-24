@@ -1,0 +1,64 @@
+Amend the implementation plan before building:
+
+1. Add an atomic transient `handoff_in_progress` state. Use a conditional database update as the concurrency lock. A second request while this state is active must receive 409.
+
+State transitions:
+
+* No document → `handoff_in_progress` → create and record ID → write content → `handoff_complete`
+* Creation fails before an ID exists → clear the transient state so a normal first attempt can retry
+* Content fails after the ID is recorded → `pending_first_write`
+* `pending_first_write` → atomically acquire `handoff_in_progress` → reset only that incomplete document → populate it → `handoff_complete`
+* Completed or legacy linked document → return its URL immediately without acquiring a write lock or calling a Docs mutation
+
+2. A first write may fail after partially inserting content. Do not blindly append during retry. Add a narrowly scoped helper that clears/resets content only when the proposal was explicitly in `pending_first_write`. It must be impossible to call this helper for `handoff_complete`, `synced`, null-status legacy documents, or any other linked document.
+
+`clearAndReplaceContent` must still be removed as a general sync operation. The incomplete-first-write reset must have a separate name and guarded call site.
+
+Add a test where the first write inserts partial content and then fails. The retry must reuse the same document, remove the partial content, write one clean copy, and never call Drive `files.create` again.
+
+3. Add `artifacts/proposal-generator/src/pages/proposal-detail.tsx` to the files being changed.
+
+Update it to:
+
+* Show **Share for Team Review** before successful handoff
+* Disable that action when no folder is configured and link to Google settings
+* Show a retry action only for `pending_first_write`
+* Show **Open Google Doc** after successful handoff or for legacy linked documents
+* Remove **Sync to Google Docs**
+* Remove “last sync failed,” “syncing,” “last synced,” and “changes not synced” language
+* Remove dirty-state badges and sync-specific toast copy
+* Never call the export endpoint from the completed/legacy Open button; open the stored URL directly
+
+4. Do not remove the existing lifecycle information required by the future Team Review stage.
+
+On the first successful handoff only:
+
+* Set `syncStatus = "handoff_complete"`
+* Set `lastSyncedAt` once as the handoff-completed timestamp
+* Set `status = "exported_to_drive"` as the existing lifecycle signal
+* Insert one successful `google_exports` record
+
+Never update that timestamp or insert another export record for repeated Open/return-URL requests. In the UI, label the timestamp **Shared for team review**, not “Last synced.”
+
+Existing database columns may remain to avoid a migration. Remove new writes to `dirtySince`, but do not perform a destructive schema migration.
+
+5. After `getValidGoogleAccessToken()` succeeds in the connection-status endpoint, make a lightweight authenticated Google userinfo request. This verifies that an apparently unexpired token has not been revoked. If validation fails, return `connected: false` with the required reason and clear invalid Google session credentials.
+
+Preserve the requested status response contract: expired or unrefreshable credentials must produce `reason: "token_expired"` even if the internal typed error is more specific.
+
+6. OAuth callback handling must consume the saved state exactly once:
+
+* Compare using a timing-safe method where practical
+* Delete `googleOAuthState` and `googleOAuthReturnTo` immediately after reading them, including failure paths
+* Reject replayed callbacks
+* Accept only paths beginning with exactly one `/`
+* Reject `//`, absolute URLs, backslashes, control characters, and malformed encoded paths
+* Default invalid `returnTo` values to `/`
+
+7. Ensure production session cookies work behind Replit’s proxy by retaining or adding:
+
+`app.set("trust proxy", 1)`
+
+8. Resolve the frontend environment-variable inconsistency before implementation. Picker requires the access token, `VITE_GOOGLE_PICKER_API_KEY`, and `VITE_GOOGLE_CLOUD_PROJECT_NUMBER`. Do not claim `VITE_GOOGLE_CLIENT_ID` is required by the Picker unless the implemented frontend actually uses it. Never expose the client secret.
+
+Update the plan accordingly, then proceed in Build mode. Run every discovered test file rather than relying on a hard-coded test-file count.
