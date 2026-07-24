@@ -1,0 +1,545 @@
+Implement **#24 — Workflow, Navigation and Intake Consolidation**.
+
+This is the complete sidebar and proposal-development-flow refactor. The #23 Google Drive overhaul is complete and authoritative. Preserve it exactly.
+
+Do not merely restate this plan. Inspect the current code, implement the refactor, run the full test/build suite, and report the result.
+
+# Product model
+
+The product has two primary operating destinations:
+
+1. **Opportunities** — potential work before ONWRD commits to developing a proposal
+2. **Proposals** — committed proposal work from development through Google handoff
+
+**Team Review is a proposal lifecycle phase, not a standalone sidebar destination.**
+
+All intake sources must converge into one canonical Opportunity or, for a blank proposal, directly into one Proposal. Do not maintain separate proposal-generation pipelines for each intake source.
+
+# Final sidebar
+
+Implement this structure:
+
+```text
+[ + NEW ]
+
+WORKFLOW
+1  Opportunities
+2  Proposals
+
+WORKSPACE
+   Knowledge
+   Settings
+```
+
+Requirements:
+
+* `+ New` is a persistent button/menu, not a destination.
+* Remove permanent sidebar entries for:
+
+  * New Proposal
+  * Tenders
+  * Inbox
+  * Import
+  * Team Review
+* Keep Knowledge and Settings.
+* Sources remains under Settings.
+* Google configuration remains under Settings.
+* Preserve mobile usability, keyboard navigation, Escape-to-close and click-outside behavior.
+* Do not duplicate a large Add Opportunity button on the Opportunities page when `+ New` is visible. A contextual empty-state action is acceptable.
+
+# `+ New` menu
+
+The menu contains:
+
+1. **Import RFP**
+2. **Paste RFP Text**
+3. **Add Opportunity Manually**
+4. **Create Blank Proposal**
+5. **Prospect Intake Link**
+
+Reuse and consolidate existing forms and routes where possible. Do not create duplicate intake implementations.
+
+## Import RFP
+
+Supports:
+
+* PDF
+* DOCX
+* TXT
+* RFP URL
+* Existing CSV bulk-import capability
+
+Cycle:
+
+1. Capture or upload the source.
+2. Extract file/page text.
+3. Show a preview.
+4. Do not automatically call AI.
+5. Offer an explicit **Extract Details with AI** action where structured metadata extraction is needed.
+6. Allow the user to correct title, organization, deadline, category, value and description.
+7. Save a canonical Opportunity.
+8. Apply the existing deterministic score.
+9. Navigate to the created Opportunity.
+
+PDF/DOCX/URL capture must not automatically start requirements extraction, strategy generation or proposal drafting.
+
+CSV import must make zero AI calls. Validate rows, report row-level errors, deduplicate, create one Opportunity per valid row and score each deterministically.
+
+## Paste RFP Text
+
+Cycle:
+
+1. User pastes RFP text.
+2. Show a preview and enforce existing input limits.
+3. Do not automatically call AI.
+4. Offer explicit **Extract Details with AI** or manual metadata entry.
+5. User confirms/corrects the metadata.
+6. Create and deterministically score the Opportunity.
+7. Navigate to it.
+
+## Add Opportunity Manually
+
+Cycle:
+
+1. User enters the opportunity fields.
+2. Save without an AI call.
+3. Apply deterministic scoring.
+4. Navigate to the Opportunity.
+
+## Create Blank Proposal
+
+Cycle:
+
+1. User enters client, proposal name, deadline and brief.
+2. Create a Proposal directly.
+3. Do not create a fake Opportunity.
+4. Do not calculate an opportunity score.
+5. Do not automatically invoke AI.
+6. Open the Proposal workspace immediately.
+7. Requirements, Strategy and Draft remain explicit actions.
+
+## Prospect Intake Link
+
+Clicking this item opens a sharing modal. It must not create a record, invoke AI, call Google or send an email.
+
+Modal:
+
+**Request a Proposal Form**
+
+“Share this form with a prospect to collect their organization, project requirements, budget, timeline and supporting documents.”
+
+Display the public URL derived from the current application origin and base path:
+
+`/intake`
+
+Actions:
+
+* **Copy Link**
+* **Preview Form**
+* **Close**
+
+Copy Link copies the complete current-environment URL and confirms success.
+
+Preview Form opens the public form in a new tab using `noopener,noreferrer`.
+
+Do not hard-code a Replit development domain.
+
+# Public prospect-intake submission
+
+Preserve `/intake` as a public, no-sidebar route.
+
+The current `/api/intake` endpoint automatically calls AI—up to three attempts—and generates a complete Proposal. Remove that behavior entirely.
+
+New submission cycle:
+
+1. Validate the prospect’s form.
+2. Parse permitted PDF/DOCX/TXT uploads using the existing limits.
+3. Preserve the complete formatted brief and extracted file text.
+4. Create exactly one Opportunity.
+5. Apply deterministic scoring.
+6. Mark and link the intake draft.
+7. Notify ONWRD with a link to `/opportunities/{id}`.
+8. Return only `{ success: true }`.
+9. Show the prospect the existing confirmation experience.
+
+The submission must:
+
+* Create zero Proposals
+* Make zero AI calls
+* Make zero Google API calls
+* Never expose the internal Opportunity ID to the prospect
+* Never log prospect PII, uploaded text or full request bodies
+
+Suggested Opportunity mapping:
+
+* `title`: project type and organization, falling back to `Project inquiry — {organization}`
+* `agency`: organization
+* `description`: prospect’s project description
+* `category`: selected industry
+* `valueAmount`: selected investment range
+* `contactInfo`: contact name, title, email, phone and preferred method
+* `rawText`: full formatted intake plus extracted document text
+* `status`: normal new-opportunity status
+* `sourceType`: `prospect_intake`
+
+If no source discriminator exists, add a nullable `sourceType` column rather than misusing `sourceUrl`.
+
+Add a nullable `opportunityId` foreign key to `intake_drafts`. Preserve the existing `proposalId` column for legacy compatibility.
+
+Use the intake draft or an explicit submission key for idempotency. A repeated submission must return success without creating another Opportunity.
+
+Creating the Opportunity and linking/marking the intake draft must be transactional.
+
+The existing implementation extracts uploaded text but does not persist the original binary. Preserve the extracted text. Do not claim that the original attachment is stored unless a secure storage implementation already exists.
+
+# Opportunities destination
+
+Consolidate all potential work into the Opportunities experience:
+
+* Automated crawler discoveries
+* Uploaded RFPs
+* URL imports
+* Pasted RFP text
+* Manual opportunities
+* CSV imports
+* Prospect intake submissions
+
+Use source badges:
+
+* Crawler
+* RFP Upload
+* URL
+* Pasted Text
+* Manual
+* CSV
+* Prospect Intake
+
+If crawler discoveries and canonical Opportunities remain in separate backend tables, the user must not experience them as separate products. Implement a unified view or an idempotent promotion path. Do not duplicate a crawler discovery when it becomes a canonical Opportunity.
+
+## Opportunity filters
+
+Provide clear filters/tabs:
+
+* **New** — newly captured and awaiting review
+* **Reviewing/Scored** — scored or being evaluated but not pursued
+* **In Progress** — Pursue selected or a linked Proposal exists
+* **No Bid/Archived** — declined or archived
+* **All** — optional if useful
+
+Requirements:
+
+* New records receive the existing deterministic score.
+* Explain score factors using the existing score reasoning.
+* Do not change the scoring formula or thresholds.
+* Crawler results appear here, not in Inbox.
+* Once Pursue succeeds, the Opportunity leaves the default New queue.
+* In Progress opportunities link directly to their active Proposal.
+* No Bid never creates a Proposal.
+* Source, organization, deadline, score, recommendation and status should be visible without opening every record.
+
+# Canonical Pursue transition
+
+The current code has conflicting `start-bid` and `convert` behaviors. Replace them with one canonical idempotent transition:
+
+`POST /api/opportunities/:id/pursue`
+
+Required behavior:
+
+1. Validate the Opportunity.
+2. Create or retrieve exactly one Proposal for it.
+3. Use the existing unique relationship/constraint to prevent duplicates.
+4. Mark the Opportunity In Progress.
+5. Link the Opportunity and Proposal consistently.
+6. Return the Proposal ID.
+7. Frontend navigates immediately to `/proposals/{proposalId}`.
+8. Make zero AI calls.
+9. Do not start `runExtractionPipeline`.
+10. Do not automatically extract requirements, generate strategy or generate a draft.
+
+Use a transaction or equivalent atomic protection so concurrent Pursue requests cannot create duplicates.
+
+Remove all frontend calls to `start-bid` and `convert`.
+
+For backward compatibility, either:
+
+* Keep the old endpoints as deprecated wrappers around the same no-AI Pursue service, or
+* Return an intentional redirect/deprecation response if no callers require them.
+
+Under no circumstances may the old `convert` endpoint continue launching background extraction.
+
+Tests must prove that repeated and concurrent Pursue calls return the same Proposal.
+
+# Proposal workspace
+
+The proposal-development cycle is:
+
+1. **Extract Requirements**
+2. **Generate Strategy** — optional
+3. **Generate Draft**
+4. **Edit and Review**
+5. **Critic/Quality Check** — where currently supported
+6. **Approve**
+7. **Share for Team Review**
+8. **Open Google Doc**
+
+Requirements:
+
+* Requirements, Strategy and Draft are explicit user actions.
+* Preserve existing prompts and algorithms.
+* Preserve existing timeout, progress, cancellation, Resume/Re-analyse and duplicate-run protections.
+* Do not automatically launch the next AI stage.
+* Saving manual edits makes no AI call.
+* Pursue only opens the workspace.
+* Preserve all #23 Google behavior:
+
+  * Share creates one document
+  * Failed initial write retries the same document
+  * Successful handoff makes Google canonical
+  * No destructive sync or rewrite
+  * Open Google Doc directly after handoff
+
+# Proposals destination
+
+Replace the undifferentiated proposal list with lifecycle tabs:
+
+## In Progress
+
+Includes proposals that are:
+
+* New
+* Draft
+* Extracting requirements
+* Developing strategy
+* Drafting
+* Awaiting ONWRD input
+* Under internal review
+
+Cards/rows open the Proposal workspace.
+
+## Ready to Share
+
+Includes proposals that:
+
+* Passed or overrode the quality gate
+* Are approved
+* Have not completed Google handoff
+
+Show **Share for Team Review** where appropriate.
+
+If no Google folder is configured, disable Share and link to `/settings`.
+
+## Team Review
+
+This is a tab inside Proposals, not a sidebar destination.
+
+Includes:
+
+* `handoff_complete` proposals
+* Legacy proposals with a linked Google document
+
+Show:
+
+* Proposal/client name
+* Google Doc link
+* “Shared for team review” timestamp
+* Shared-by account where available
+* Current lifecycle status
+* **Open Google Doc**
+
+The Open action must open the stored URL directly. It must not call the handoff endpoint or any Google mutation.
+
+Do not show:
+
+* Sync Changes
+* Sync to Google Docs
+* Changes not synced
+* Last synced
+* Any action that rewrites a completed document
+
+A future Completed/Archived tab may be added later, but do not invent Final or Sent lifecycle behavior in this task.
+
+# Settings and Knowledge
+
+Keep **Knowledge** as a standalone workspace destination.
+
+Keep **Settings** as a standalone destination with subsections for:
+
+* Google Docs
+* Sources
+
+Remove Import as a permanent Settings/sidebar destination. Import belongs under `+ New`.
+
+Preserve all completed Google settings and Picker behavior.
+
+# Legacy routes
+
+Preserve bookmarks and old links:
+
+* `/tenders` → Opportunities
+* `/tenders/:id` → corresponding canonical `/opportunities/:id`
+* `/inbox` → Opportunities with the appropriate New/Crawler filter
+* `/settings/import` → consolidated Import RFP experience
+* `/new` → consolidated creation experience or appropriate `+ New` default
+
+Do not leave legacy pages accessible as competing workflows.
+
+Redirects must preserve relevant IDs and safe query parameters.
+
+# AI and quota boundaries
+
+Audit every creation path touched by this refactor.
+
+The following must make zero AI calls:
+
+* Crawler discovery
+* Manual opportunity creation
+* CSV import
+* Prospect intake submission
+* Pursue
+* Blank Proposal creation
+* Saving edits
+* Opening an existing Google Doc
+
+PDF/DOCX/URL/pasted-text metadata extraction may use AI only after an explicit user action.
+
+Requirements extraction, strategy and draft generation remain explicit and bounded.
+
+Remove fire-and-forget AI from intake and Pursue paths.
+
+Do not change:
+
+* AI prompts
+* Model selection
+* Deterministic scoring formula
+* Score thresholds
+* Google OAuth
+* Google Picker
+* Google folder validation
+* Google handoff state machine
+* Billing
+
+# Schema and data compatibility
+
+Inspect the current schema before changing it.
+
+Potential additions:
+
+* `sourceType` on canonical Opportunities
+* `opportunityId` on intake drafts
+
+Use nullable/backward-compatible additions.
+
+Do not remove or repurpose legacy columns destructively.
+
+Use the repository’s existing non-force Drizzle schema-push process. Never use `push-force`.
+
+Existing records must remain visible:
+
+* Existing opportunities
+* Existing proposals
+* Existing crawler discoveries
+* Existing linked Google documents
+* Existing intake drafts
+* Existing legacy routes
+
+# Required tests
+
+Add or update tests covering at minimum:
+
+## Navigation
+
+1. Sidebar shows only Opportunities, Proposals, Knowledge and Settings.
+2. `+ New` is present and contains all five actions.
+3. Removed sidebar destinations are absent.
+4. Legacy URLs redirect correctly.
+5. Team Review exists as a Proposals tab, not a sidebar item.
+6. Sources remains under Settings.
+7. Import is accessible through `+ New`.
+
+## Intake sources
+
+8. Manual opportunity creates and scores without AI.
+9. CSV import creates/scorers valid rows without AI.
+10. Uploaded RFP does not automatically invoke AI.
+11. URL import does not automatically invoke AI.
+12. Pasted text does not automatically invoke AI.
+13. Explicit Extract Details may invoke one bounded metadata action.
+14. Blank Proposal creates no Opportunity and invokes no AI.
+15. Crawler discovery appears in Opportunities.
+16. Crawler promotion/import is idempotent.
+17. Source badges are correct.
+
+## Prospect intake
+
+18. Prospect Intake Link opens the share modal.
+19. Opening the modal makes no backend request.
+20. Copy Link uses the current application origin.
+21. Preview opens `/intake`.
+22. `/intake` remains public with no admin sidebar.
+23. Submission creates one Opportunity and zero Proposals.
+24. Submission makes zero AI and Google calls.
+25. Deterministic score is applied.
+26. Repeated submission creates no duplicate.
+27. ONWRD notification links to the Opportunity.
+28. Public response exposes no internal record ID.
+
+## Pursue
+
+29. Pursue creates one Proposal and opens it.
+30. Repeated Pursue returns the same Proposal.
+31. Concurrent Pursue creates no duplicate.
+32. Pursue marks the Opportunity In Progress.
+33. Pursue makes zero AI calls.
+34. Legacy `convert` cannot launch automatic analysis.
+35. In Progress opportunity links directly to its Proposal.
+
+## Proposal lifecycle
+
+36. In Progress tab classification is correct.
+37. Ready to Share classification is correct.
+38. Team Review classification is correct.
+39. Successful handoff moves the Proposal into Team Review.
+40. Team Review opens the stored Google URL directly.
+41. Team Review makes zero Google mutations.
+42. No Sync Changes UI exists.
+43. Existing linked documents remain visible and untouched.
+44. Missing Drive folder disables Share and links to `/settings`.
+
+## Regression
+
+45. All completed #23 Google tests remain passing.
+46. Requirements/Strategy/Draft remain explicit.
+47. Cancel, timeout, Resume and duplicate-run protection still work.
+48. Existing proposal editing and approval still work.
+49. Existing records remain accessible.
+50. Public intake validation and upload limits still work.
+
+Run:
+
+* Every discovered test file
+* API server type-check
+* Proposal frontend type-check
+* API production build
+* Frontend production build
+
+Fix failures caused by this refactor.
+
+Do not deploy or merge automatically.
+
+# Completion report
+
+When finished, report:
+
+* Branch and commit hash
+* Files changed
+* Final sidebar structure
+* Final `+ New` actions
+* Legacy-route mapping
+* Canonical Pursue implementation
+* Opportunity and Proposal status mappings
+* Schema changes and required non-force schema command
+* Proof that public intake and Pursue make zero AI calls
+* Test totals and results
+* Type-check and production-build results
+* Any pre-existing failures
+* Any remaining attachment-storage limitation
