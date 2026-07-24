@@ -12,6 +12,11 @@ const SCOPES = [
 ].join(" ");
 
 function getCallbackUrl(): string {
+  // Explicit override takes precedence — required for deployed environments
+  // where the heuristic may resolve to the wrong domain.
+  if (process.env.GOOGLE_OAUTH_CALLBACK_URL) {
+    return process.env.GOOGLE_OAUTH_CALLBACK_URL;
+  }
   const domains = process.env.REPLIT_DOMAINS?.split(",").map((d) => d.trim()) ?? [];
   const preferred =
     domains.find((d) => d.endsWith(".replit.app")) ??
@@ -62,7 +67,7 @@ router.get("/auth/google", (req, res) => {
   req.session.save((err) => {
     if (err) {
       logger.error({ err }, "session save failed");
-      res.status(500).json({ error: "Session error" });
+      res.status(503).json({ error: "Session store unavailable", code: "session_store_unavailable" });
       return;
     }
 

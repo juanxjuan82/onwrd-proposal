@@ -391,10 +391,31 @@ router.post("/proposals/:id/export", async (req, res) => {
       return;
     }
 
-    const content =
-      sections.length > 0
-        ? sections.map((s) => `## ${s.title}\n\n${s.content}`).join("\n\n---\n\n")
-        : proposal.proposalContent;
+    // ── Empty-draft guard ─────────────────────────────────────────────────────
+    // Reject before any Drive mutation when the draft is not yet ready.
+    const DRAFTING_PLACEHOLDER = /generating proposal sections/i;
+    const hasMeaningfulContent = (text: string | null | undefined): boolean =>
+      !!(text?.trim()) && !DRAFTING_PLACEHOLDER.test(text.trim());
+
+    const meaningfulSections = sections.filter((s) => hasMeaningfulContent(s.content));
+
+    let content: string;
+    if (meaningfulSections.length > 0) {
+      content = sections.map((s) => `## ${s.title}\n\n${s.content}`).join("\n\n---\n\n");
+    } else if (hasMeaningfulContent(proposal.proposalContent)) {
+      content = proposal.proposalContent!;
+    } else {
+      await db
+        .update(proposalsTable)
+        .set({ syncStatus: null, handoffStartedAt: null })
+        .where(eq(proposalsTable.id, proposalId))
+        .catch(() => {});
+      res.status(422).json({
+        error: "Proposal draft is not ready to share. Wait for generation to complete.",
+        code:  "draft_not_ready",
+      });
+      return;
+    }
 
     const exportedBy = req.session.googleUserEmail ?? null;
 

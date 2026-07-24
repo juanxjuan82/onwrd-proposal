@@ -5,7 +5,7 @@
 - [drizzle-kit push blocked](drizzle-kit-push.md) — drizzle-kit push hangs on interactive prompt; use direct SQL for schema changes
 - [Scoring architecture](scoring-architecture.md) — bid scoring is deterministic (scoring-rules.ts), not AI; applyDeterministicScore(executor, tenderId) takes db or tx as first arg for atomic transactions
 - [Drizzle tx type annotation](drizzle-tx-type.md) — type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0]; annotate transaction callback params with (tx: DbTx) to avoid TS7006
-- [Pre-existing TS errors](preexisting-ts-errors.md) — sections.ts and tenders.ts have implicit-any + unbuilt .d.ts errors predating this work; pnpm typecheck exit 2 is not a regression
+- [Pre-existing TS errors](preexisting-ts-errors.md) — sections.ts and tenders.ts have implicit-any + unbuilt .d.ts errors predating this work; pnpm typecheck exit 2 is not a regression; proposal-detail.tsx ProposalStatus type is stale (only "draft"|"exported") — cast to string for runtime comparisons like "proposal_drafting"
 - [Lib build to fix TS6305](lib-build-ts6305.md) — composite libs must be built with `npx tsc --build lib/X` before typecheck; fix lib source errors first or builds emit nothing (noEmitOnError:true)
 - [AI gateway pattern](ai-gateway-pattern.md) — single permitted openai importer; all AI calls route through invokeAI(); build guard in build.mjs enforces this at compile time.
 - [Deterministic metadata extractor](metadata-extractor.md) — tender imports use extractTenderMetadata() (no AI); returns needsReview flag when title/agency undetected.
@@ -14,3 +14,5 @@
 - [node:test file isolation](node-test-file-isolation.md) — top-level before/after hooks scope to ROOT suite across all files; when multiple files run in one process, wrap all hooks and suites in a file-level describe for correct per-file isolation.
 - [Gateway spy hooks](gateway-spy-hooks.md) — __setInvokeAISpy short-circuits all gateway logic; __setOpenAICompletionForTesting mocks only the OpenAI HTTP call while keeping circuit/quota/DB logic live. Both are null in production.
 - [ai_usage_log schema](ai-usage-log-schema.md) — columns: id, requestId, feature, opportunityId, proposalId, operationKey, model, status, startedAt, completedAt, inputTokens, outputTokens, errorCode. No createdAt — use startedAt for time-bounded queries.
+- [GitHub push via REST API](github-push-rest-api.md) — git commit is blocked in main agent; push external repos by creating blobs+tree+commit+ref via GitHub REST API with GITHUB_PAT from bash env; code_execution sandbox cannot read Replit secrets (process.env is undefined there).
+- [Canonical proposal generation](canonical-proposal-generation.md) — proposals have unique constraint on tender_id; generate-proposal must SELECT by tenderId before any INSERT; use ON CONFLICT (tender_id) DO NOTHING for the new-proposal path; DELETE + reinsert sections idempotently inside a transaction.

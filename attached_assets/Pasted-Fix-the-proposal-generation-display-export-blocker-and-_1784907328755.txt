@@ -1,0 +1,94 @@
+Fix the proposal-generation/display/export blocker and the development Google OAuth session error on branch replit/workflow-navigation-intake-consolidation.
+
+Preserve the #23 one-time Google handoff model and #24 workflow. Do not change AI prompts, scoring, opportunity intake, or crawler behavior.
+
+A. Fix the canonical Proposal generation flow
+
+Current bug:
+- Pursue creates the canonical Proposal with proposalContent = "".
+- proposal-detail.tsx calls POST /api/opportunities/:id/generate-proposal with { proposalId }.
+- That backend endpoint ignores proposalId and inserts another Proposal.
+- The UI remains on the original empty Proposal, and the unique tender_id constraint may make generation fail entirely.
+
+Required behavior:
+1. POST /api/opportunities/:id/generate-proposal must generate into the existing canonical Proposal linked to that Opportunity.
+2. Resolve the canonical Proposal by tenderId inside a transaction.
+3. If proposalId is supplied, validate that it belongs to the Opportunity.
+4. Never create a second Proposal for the same tender.
+5. If no Proposal exists for a legacy caller, create it using INSERT ... ON CONFLICT (tender_id) DO NOTHING, then fetch the canonical row.
+6. Update that same Proposal to proposal_drafting.
+7. Create or reset its section rows without producing duplicate sections.
+8. Run AI generation against that Proposal ID and update the same Proposal and section rows.
+9. Return { proposalId, status } using the canonical ID.
+10. Make concurrent Generate Draft requests idempotent or return a specific 409 generation_in_progress response.
+
+B. Fix editor and preview refresh
+
+Current bugs:
+- proposal-detail.tsx initializes the form only once through initializedRef.
+- It invalidates queries only once after three seconds, although generation can take 30+ seconds.
+
+Required behavior:
+1. Poll the Proposal and sections every 2–3 seconds while status is proposal_drafting.
+2. Stop polling on ready_for_review, needs_onwrd_input, draft/generation_failed, or another terminal status.
+3. Refresh the editor and preview when generated content arrives.
+4. Never overwrite unsaved user edits: only reset from server data when the form is not dirty, or when completing the generation initiated by this page.
+5. Remove the unreliable one-time three-second timeout.
+6. Display an explicit generation failure message and allow retry.
+7. Confirm Edit, Preview, Full Document, and Sections all reference the same canonical Proposal.
+
+C. Prevent blank Google documents
+
+Current bug:
+- Export uses section rows whenever any exist, even if every section’s content is empty.
+- It has no empty-draft guard before creating the Drive file.
+
+Required behavior:
+1. Build export content from sections only when at least one section contains meaningful non-whitespace content.
+2. Otherwise fall back to meaningful proposal.proposalContent.
+3. Treat empty content and the “Generating proposal sections” placeholder as not ready.
+4. If no meaningful content exists, return:
+   HTTP 422
+   { error: "Proposal draft is not ready to share.", code: "draft_not_ready" }
+5. Reject before createGoogleDocInFolder or any other Drive mutation.
+6. Disable “Share for Team Review” in the frontend while the draft is empty or generation is running.
+7. Do not modify or rewrite handoff_complete or legacy-linked Google Docs.
+8. Do not automatically reset existing completed handoffs.
+
+D. Diagnose and fix development Google OAuth
+
+Current code can return {"error":"Session error"} only when req.session.save fails before redirecting to Google.
+
+Required behavior:
+1. Await PostgreSQL session-table readiness before the server begins accepting requests. Remove the startup race caused by firing asynchronous session DDL without awaiting it.
+2. If the session store cannot initialize, fail startup in production with a clear non-secret message; provide a safe diagnostic in development.
+3. Return a specific error code such as:
+   { error: "Session store unavailable", code: "session_store_unavailable" }
+   Do not expose credentials or connection strings.
+4. Add explicit GOOGLE_OAUTH_CALLBACK_URL configuration and use it for both authorization and token exchange instead of heuristically choosing between REPLIT_DOMAINS and REPLIT_DEV_DOMAIN.
+5. GET /api/auth/google/status must return the exact callback URL being used.
+6. Confirm SESSION_SECRET and DATABASE_URL are available in the development environment.
+7. Preserve secure production cookies, SameSite=Lax, CSRF state, refresh-token handling, and PostgreSQL sessions.
+8. Document that the exact development callback URL must be added to the OAuth web client’s Authorized redirect URIs.
+
+E. Tests
+
+Add regression tests proving:
+- Pursue followed by Generate Draft uses one Proposal ID.
+- The provided proposalId cannot be ignored or replaced.
+- Concurrent generation cannot create duplicate Proposals or sections.
+- Generated content becomes visible in Edit and Preview.
+- Unsaved edits are not overwritten by polling.
+- Empty sections fall back to non-empty proposalContent.
+- Empty/placeholder drafts return 422 and make zero Google API calls.
+- A valid draft still follows the #23 direct-create handoff.
+- A session-store save failure returns session_store_unavailable.
+- The configured OAuth callback URL is used identically in authorization and token exchange.
+
+Run the full suite, both type-checks, and both production builds. Report:
+- root cause,
+- files changed,
+- tests/build results,
+- commit SHA,
+- exact GOOGLE_OAUTH_CALLBACK_URL required for the current dev environment.
+Do not deploy or merge automatically.
