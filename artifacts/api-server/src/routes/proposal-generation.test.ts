@@ -130,11 +130,83 @@ describe("§13 export — empty-draft guard before Drive mutation", () => {
     );
   });
 
-  it("releases the sync lock (sets syncStatus to null) before returning 422", () => {
-    const guardBlock = sectionsSrc.slice(sectionsSrc.indexOf("draft_not_ready") - 500, sectionsSrc.indexOf("draft_not_ready") + 200);
+  it("syncStatus pending_first_write is preserved (not reset) after draft_not_ready", async () => {
+    const tenderId = await _createTestTender();
+    const [pRow] = await db.insert(proposalsTable).values({
+      clientName: "Test Client", industry: "General", briefText: "test",
+      proposalContent: "", status: "draft", tenderId,
+      syncStatus: "pending_first_write",
+    }).returning({ id: proposalsTable.id });
+    try {
+      const res = await fetch(`${_baseUrl}/api/proposals/${pRow.id}/export`, { method: "POST" });
+      assert.equal(res.status, 422, "export must return 422 for empty draft");
+      const [row] = await db.select({ syncStatus: proposalsTable.syncStatus })
+        .from(proposalsTable).where(eq(proposalsTable.id, pRow.id));
+      assert.equal(
+        row?.syncStatus, "pending_first_write",
+        "readiness guard must not clear syncStatus; pending_first_write must survive draft_not_ready",
+      );
+    } finally {
+      await db.delete(proposalSectionsTable).where(eq(proposalSectionsTable.proposalId, pRow.id));
+      await db.delete(proposalsTable).where(eq(proposalsTable.id, pRow.id));
+      await _cleanupTestTender(tenderId);
+    }
+  });
+
+  it("syncStatus handoff_in_progress is preserved (not reset) after draft_not_ready", async () => {
+    const tenderId = await _createTestTender();
+    const [pRow] = await db.insert(proposalsTable).values({
+      clientName: "Test Client", industry: "General", briefText: "test",
+      proposalContent: "", status: "draft", tenderId,
+      syncStatus: "handoff_in_progress",
+    }).returning({ id: proposalsTable.id });
+    try {
+      const res = await fetch(`${_baseUrl}/api/proposals/${pRow.id}/export`, { method: "POST" });
+      assert.equal(res.status, 422, "export must return 422 for empty draft");
+      const [row] = await db.select({ syncStatus: proposalsTable.syncStatus })
+        .from(proposalsTable).where(eq(proposalsTable.id, pRow.id));
+      assert.equal(
+        row?.syncStatus, "handoff_in_progress",
+        "readiness guard must not clear syncStatus; handoff_in_progress must survive draft_not_ready",
+      );
+    } finally {
+      await db.delete(proposalSectionsTable).where(eq(proposalSectionsTable.proposalId, pRow.id));
+      await db.delete(proposalsTable).where(eq(proposalsTable.id, pRow.id));
+      await _cleanupTestTender(tenderId);
+    }
+  });
+
+  it("null syncStatus remains null after draft_not_ready", async () => {
+    const tenderId = await _createTestTender();
+    const [pRow] = await db.insert(proposalsTable).values({
+      clientName: "Test Client", industry: "General", briefText: "test",
+      proposalContent: "", status: "draft", tenderId,
+      syncStatus: null,
+    }).returning({ id: proposalsTable.id });
+    try {
+      const res = await fetch(`${_baseUrl}/api/proposals/${pRow.id}/export`, { method: "POST" });
+      assert.equal(res.status, 422, "export must return 422 for empty draft");
+      const [row] = await db.select({ syncStatus: proposalsTable.syncStatus })
+        .from(proposalsTable).where(eq(proposalsTable.id, pRow.id));
+      assert.equal(
+        row?.syncStatus ?? null, null,
+        "readiness guard must not disturb null syncStatus",
+      );
+    } finally {
+      await db.delete(proposalSectionsTable).where(eq(proposalSectionsTable.proposalId, pRow.id));
+      await db.delete(proposalsTable).where(eq(proposalsTable.id, pRow.id));
+      await _cleanupTestTender(tenderId);
+    }
+  });
+
+  it("422 guard appears before getValidGoogleAccessToken — readiness check precedes auth", () => {
+    const draftNotReadyPos = sectionsSrc.indexOf("draft_not_ready");
+    const authCallPos      = sectionsSrc.indexOf("await getValidGoogleAccessToken");
+    assert.ok(draftNotReadyPos > 0, "draft_not_ready must exist in sections.ts");
+    assert.ok(authCallPos > 0,      "getValidGoogleAccessToken call must exist in sections.ts");
     assert.ok(
-      guardBlock.includes("syncStatus: null"),
-      "export handler must release syncStatus lock before returning 422"
+      draftNotReadyPos < authCallPos,
+      "draft readiness guard must appear BEFORE getValidGoogleAccessToken — no auth triggered for unready drafts",
     );
   });
 

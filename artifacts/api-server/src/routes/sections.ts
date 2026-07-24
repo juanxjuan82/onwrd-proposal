@@ -335,11 +335,6 @@ router.post("/proposals/:id/export", async (req, res) => {
   } else if (hasMeaningfulContent(proposal.proposalContent)) {
     exportContent = proposal.proposalContent!;
   } else {
-    await db
-      .update(proposalsTable)
-      .set({ syncStatus: null, handoffStartedAt: null })
-      .where(eq(proposalsTable.id, proposalId))
-      .catch(() => {});
     res.status(422).json({
       error: "Proposal draft is not ready to share. Wait for generation to complete.",
       code:  "draft_not_ready",
