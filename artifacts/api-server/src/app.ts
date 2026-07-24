@@ -36,19 +36,22 @@ pool.query(
   logger.error({ err }, "Failed to apply handoff_started_at migration");
 });
 
-// Ensure session table exists (connect-pg-simple's internal DDL is unreliable at startup)
-pool.query(
-  `CREATE TABLE IF NOT EXISTS session (
+// Ensure session table exists before accepting requests — connect-pg-simple's
+// internal DDL is unreliable at startup; await this in index.ts before listen.
+export const dbReady: Promise<void> = pool
+  .query(
+    `CREATE TABLE IF NOT EXISTS session (
     sid varchar NOT NULL,
     sess json NOT NULL,
     expire timestamp(6) NOT NULL,
     CONSTRAINT session_pkey PRIMARY KEY (sid)
   )`,
-).then(() =>
-  pool.query(`CREATE INDEX IF NOT EXISTS IDX_session_expire ON session (expire)`),
-).catch((err: unknown) => {
-  logger.error({ err }, "Failed to create session table");
-});
+  )
+  .then(() => pool.query(`CREATE INDEX IF NOT EXISTS IDX_session_expire ON session (expire)`))
+  .then(() => undefined)
+  .catch((err: unknown) => {
+    logger.error({ err }, "Failed to create session table");
+  });
 
 const PgStore = connectPgSimple(session);
 

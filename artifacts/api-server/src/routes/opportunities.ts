@@ -1163,38 +1163,104 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
     ? `\nPROPOSAL STRATEGY BRIEF:\nPositioning: ${strategy.positioning}\nWin Themes: ${JSON.parse(strategy.winThemes ?? "[]").join(", ")}\nRecommended Case Studies: ${JSON.parse(strategy.recommendedCaseStudies ?? "[]").join(", ")}\nMessaging Guidance: ${strategy.messagingGuidance}\nRisks to Address: ${JSON.parse(strategy.risks ?? "[]").join(", ")}`
     : "";
 
-  const [draft] = await db
-    .insert(proposalsTable)
-    .values({
-      clientName:      tender.agency,
-      industry:        tender.category,
-      briefText,
-      proposalContent: "Generating proposal sections — please refresh in ~30 seconds.",
-      status:          "proposal_drafting",
-      tenderId:        id,
-    })
-    .returning();
+  // ── Resolve canonical proposal ────────────────────────────────────────────
+  // A tender has at most one proposal (unique constraint on tender_id).
+  // Never create a second proposal row — find or create the canonical one.
+  const requestedProposalId = req.body?.proposalId ? Number(req.body.proposalId) : null;
 
-  await db
-    .update(tendersTable)
-    .set({ proposalId: draft.id, status: "proposal_drafting", updatedAt: new Date() })
-    .where(eq(tendersTable.id, id));
+  const [existingProposal] = await db
+    .select({ id: proposalsTable.id, status: proposalsTable.status })
+    .from(proposalsTable)
+    .where(eq(proposalsTable.tenderId, id));
 
-  const sectionRows = await db
-    .insert(proposalSectionsTable)
-    .values(
-      SECTION_DEFINITIONS.map((s) => ({
-        proposalId: draft.id,
-        sectionKey: s.key,
-        title:      s.title,
-        content:    "",
-        status:     "not_started",
-        orderIndex: s.order,
-      })),
-    )
-    .returning();
+  // Validate that the caller's proposalId (if provided) is the canonical one
+  if (requestedProposalId && existingProposal && existingProposal.id !== requestedProposalId) {
+    res.status(409).json({
+      error: "proposalId does not belong to this opportunity",
+      code:  "proposal_mismatch",
+    });
+    return;
+  }
 
-  res.status(201).json({ proposal: draft, sections: sectionRows });
+  // 409 when a generation is already running — idempotent for the UI
+  if (existingProposal?.status === "proposal_drafting") {
+    res.status(409).json({
+      error: "Generation is already in progress for this proposal.",
+      code:  "generation_in_progress",
+    });
+    return;
+  }
+
+  type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+  const { draft, sectionRows } = await db.transaction(async (tx: DbTx) => {
+    let resolvedProposal: { id: number; [k: string]: unknown };
+
+    if (existingProposal) {
+      // Re-use the canonical proposal — reset fields and status to drafting
+      const [updated] = await tx
+        .update(proposalsTable)
+        .set({
+          clientName:      tender.agency,
+          industry:        tender.category,
+          briefText,
+          proposalContent: "Generating proposal sections — please refresh in ~30 seconds.",
+          status:          "proposal_drafting",
+          updatedAt:       new Date(),
+        })
+        .where(eq(proposalsTable.id, existingProposal.id))
+        .returning();
+      resolvedProposal = updated as typeof resolvedProposal;
+    } else {
+      // No proposal exists yet — INSERT with ON CONFLICT DO NOTHING (race-safe),
+      // then read back the canonical row.
+      await tx.execute(sql`
+        INSERT INTO proposals
+          (client_name, industry, brief_text, proposal_content, status, tender_id, created_at, updated_at)
+        VALUES (
+          ${tender.agency},
+          ${tender.category},
+          ${briefText},
+          ${"Generating proposal sections — please refresh in ~30 seconds."},
+          ${"proposal_drafting"},
+          ${id},
+          NOW(), NOW()
+        )
+        ON CONFLICT (tender_id) DO NOTHING
+      `);
+      const [fetched] = await tx
+        .select()
+        .from(proposalsTable)
+        .where(eq(proposalsTable.tenderId, id));
+      resolvedProposal = fetched as typeof resolvedProposal;
+    }
+
+    // Keep tender linked to the canonical proposal
+    await tx
+      .update(tendersTable)
+      .set({ proposalId: resolvedProposal.id, status: "proposal_drafting", updatedAt: new Date() })
+      .where(eq(tendersTable.id, id));
+
+    // Reset section rows idempotently — delete any stale shells, insert fresh ones
+    await tx.execute(sql`DELETE FROM proposal_sections WHERE proposal_id = ${resolvedProposal.id}`);
+
+    const sections = await tx
+      .insert(proposalSectionsTable)
+      .values(
+        SECTION_DEFINITIONS.map((s) => ({
+          proposalId: resolvedProposal.id as number,
+          sectionKey: s.key,
+          title:      s.title,
+          content:    "",
+          status:     "not_started",
+          orderIndex: s.order,
+        })),
+      )
+      .returning();
+
+    return { draft: resolvedProposal, sectionRows: sections };
+  });
+
+  res.status(200).json({ proposalId: draft.id, proposal: draft, sections: sectionRows });
 
   void (async () => {
     try {

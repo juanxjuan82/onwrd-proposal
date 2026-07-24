@@ -457,17 +457,48 @@ export default function ProposalDetail() {
   });
 
   const initializedRef = useRef(false);
+  const prevStatusRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
-    if (proposal && !initializedRef.current) {
+    if (!proposal) return;
+    const prevStatus = prevStatusRef.current;
+    prevStatusRef.current = proposal.status;
+
+    if (!initializedRef.current) {
       form.reset({
         clientName: proposal.clientName,
         industry: proposal.industry,
         proposalContent: proposal.proposalContent,
       });
       initializedRef.current = true;
+      return;
+    }
+
+    // When generation completes (was drafting, now terminal), sync only if
+    // the user has not made local edits.
+    if (
+      prevStatus === "proposal_drafting" &&
+      (proposal.status as string) !== "proposal_drafting" &&
+      !form.formState.isDirty
+    ) {
+      form.reset({
+        clientName: proposal.clientName,
+        industry: proposal.industry,
+        proposalContent: proposal.proposalContent,
+      });
     }
   }, [proposal, form]);
+
+  // ── Continuous polling while proposal is being generated ──────────────────
+  const isDrafting = (proposal?.status as string | undefined) === "proposal_drafting";
+  useEffect(() => {
+    if (!isDrafting) return;
+    const poll = setInterval(() => {
+      void queryClient.invalidateQueries({ queryKey: getGetProposalQueryKey(id) });
+      void queryClient.invalidateQueries({ queryKey: ["proposal-sections", id] });
+    }, 2500);
+    return () => clearInterval(poll);
+  }, [isDrafting, id, queryClient]);
 
   const handleSave = (values: ProposalFormValues) => {
     updateProposal.mutate({
@@ -579,16 +610,19 @@ export default function ProposalDetail() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ proposalId: id }),
       });
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
+      const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
       if (!res.ok) {
+        if (body.code === "generation_in_progress") {
+          toast({ title: "Already generating", description: "Generation is already in progress — this page will update automatically." });
+          return;
+        }
         toast({ title: "Failed to generate draft", description: body.error ?? "Unknown error", variant: "destructive" });
         return;
       }
-      setTimeout(() => {
-        queryClient.invalidateQueries({ queryKey: getGetProposalQueryKey(id) });
-        queryClient.invalidateQueries({ queryKey: ["proposal-sections", id] });
-      }, 3000);
-      toast({ title: "Draft generation started", description: "Refresh in a moment to see the updated content." });
+      // Kick off first poll immediately; the polling effect takes over
+      void queryClient.invalidateQueries({ queryKey: getGetProposalQueryKey(id) });
+      void queryClient.invalidateQueries({ queryKey: ["proposal-sections", id] });
+      toast({ title: "Draft generation started", description: "Generating your proposal — this page will update automatically." });
     } finally {
       setGeneratingDraft(false);
     }
@@ -726,13 +760,19 @@ export default function ProposalDetail() {
                 : <><Sparkles className="w-3 h-3 mr-1" /> Generate Strategy</>
               }
             </Button>
-            <Button size="sm" variant="outline" onClick={() => void handleGenerateDraft()} disabled={generatingDraft} data-testid="button-generate-draft">
-              {generatingDraft
-                ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Drafting…</>
+            <Button size="sm" variant="outline" onClick={() => void handleGenerateDraft()} disabled={generatingDraft || isDrafting} data-testid="button-generate-draft">
+              {generatingDraft || isDrafting
+                ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> {isDrafting ? "Generating…" : "Drafting…"}</>
                 : <><Sparkles className="w-3 h-3 mr-1" /> Generate Draft</>
               }
             </Button>
           </div>
+          {proposal?.proposalContent?.startsWith("Generation failed") && (
+            <div className="flex items-center gap-2 mt-2 text-sm text-destructive" data-testid="generation-failure-banner">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>Generation failed. Click <strong>Generate Draft</strong> to retry.</span>
+            </div>
+          )}
         </div>
       )}
 
@@ -1020,11 +1060,17 @@ export default function ProposalDetail() {
                 {!proposal.googleFileId && proposal.syncStatus !== "handoff_in_progress" && (
                   <Button
                     type="button"
-                    disabled={updateProposal.isPending || exportToDocs.isPending || !driveConfig?.folderId}
+                    disabled={updateProposal.isPending || exportToDocs.isPending || !driveConfig?.folderId || (proposal.status as string) === "proposal_drafting"}
                     onClick={handleHandoff}
                     className="bg-[#0000FF] hover:bg-[#0000FF] text-white border border-[#0000FF] disabled:opacity-50"
                     data-testid="button-share"
-                    title={!driveConfig?.folderId ? "Configure a destination folder in Settings first" : undefined}
+                    title={
+                      (proposal.status as string) === "proposal_drafting"
+                        ? "Wait for generation to complete before sharing"
+                        : !driveConfig?.folderId
+                        ? "Configure a destination folder in Settings first"
+                        : undefined
+                    }
                   >
                     {exportToDocs.isPending ? (
                       <Loader2 className="w-4 h-4 mr-2 animate-spin" />
