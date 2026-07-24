@@ -31,6 +31,7 @@ SMTP_USER = "john.aymes@gmail.com"
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = "587"
 RESEND_FROM = "ONWRD Tender Desk <desk@onwrdadvisors.com>"
+GITHUB_REPO = "https://github.com/juanxjuan82/onwrd-proposal"
 
 [[ports]]
 localPort = 8080
