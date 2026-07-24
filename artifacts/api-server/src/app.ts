@@ -38,6 +38,7 @@ pool.query(
 
 // Ensure session table exists before accepting requests — connect-pg-simple's
 // internal DDL is unreliable at startup; await this in index.ts before listen.
+// If DDL fails the promise REJECTS so that index.ts can refuse to listen.
 export const dbReady: Promise<void> = pool
   .query(
     `CREATE TABLE IF NOT EXISTS session (
@@ -50,7 +51,9 @@ export const dbReady: Promise<void> = pool
   .then(() => pool.query(`CREATE INDEX IF NOT EXISTS IDX_session_expire ON session (expire)`))
   .then(() => undefined)
   .catch((err: unknown) => {
-    logger.error({ err }, "Failed to create session table");
+    const reason = err instanceof Error ? err.message : String(err);
+    logger.error({ reason }, "Session store initialization failed — refusing to start");
+    throw err;
   });
 
 const PgStore = connectPgSimple(session);

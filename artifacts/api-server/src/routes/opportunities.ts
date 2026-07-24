@@ -1125,12 +1125,29 @@ router.post("/tender-intelligence/rescore", async (req, res) => {
 });
 
 // ── Generate section-based proposal ───────────────────────────────────────
+//
+// Concurrency safety: the status check, row-lock acquisition, and
+// proposal_drafting transition all happen inside ONE transaction using
+// SELECT … FOR UPDATE. The second concurrent request blocks on the lock,
+// then sees proposal_drafting and returns 409. No pre-transaction SELECT
+// is used as a concurrency guard.
+//
+const STALE_GENERATION_MS = 5 * 60 * 1000; // 5 minutes
+
 router.post("/opportunities/:id/generate-proposal", async (req, res) => {
   const id = Number(req.params.id);
   if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
 
   const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, id));
   if (!tender) { res.status(404).json({ error: "Opportunity not found" }); return; }
+
+  const requestedProposalId = req.body?.proposalId ? Number(req.body.proposalId) : null;
+
+  // Validate a supplied proposalId up-front: it must be a positive integer
+  if (requestedProposalId !== null && (isNaN(requestedProposalId) || requestedProposalId <= 0)) {
+    res.status(400).json({ error: "Invalid proposalId", code: "invalid_proposal_id" });
+    return;
+  }
 
   const requirements = await db
     .select()
@@ -1163,40 +1180,75 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
     ? `\nPROPOSAL STRATEGY BRIEF:\nPositioning: ${strategy.positioning}\nWin Themes: ${JSON.parse(strategy.winThemes ?? "[]").join(", ")}\nRecommended Case Studies: ${JSON.parse(strategy.recommendedCaseStudies ?? "[]").join(", ")}\nMessaging Guidance: ${strategy.messagingGuidance}\nRisks to Address: ${JSON.parse(strategy.risks ?? "[]").join(", ")}`
     : "";
 
-  // ── Resolve canonical proposal ────────────────────────────────────────────
-  // A tender has at most one proposal (unique constraint on tender_id).
-  // Never create a second proposal row — find or create the canonical one.
-  const requestedProposalId = req.body?.proposalId ? Number(req.body.proposalId) : null;
-
-  const [existingProposal] = await db
-    .select({ id: proposalsTable.id, status: proposalsTable.status })
-    .from(proposalsTable)
-    .where(eq(proposalsTable.tenderId, id));
-
-  // Validate that the caller's proposalId (if provided) is the canonical one
-  if (requestedProposalId && existingProposal && existingProposal.id !== requestedProposalId) {
-    res.status(409).json({
-      error: "proposalId does not belong to this opportunity",
-      code:  "proposal_mismatch",
-    });
-    return;
-  }
-
-  // 409 when a generation is already running — idempotent for the UI
-  if (existingProposal?.status === "proposal_drafting") {
-    res.status(409).json({
-      error: "Generation is already in progress for this proposal.",
-      code:  "generation_in_progress",
-    });
-    return;
-  }
+  // ── Atomic acquisition ────────────────────────────────────────────────────
+  // All concurrency guarding happens inside ONE transaction:
+  //   1. Upsert the canonical proposal row (INSERT … ON CONFLICT DO NOTHING)
+  //   2. SELECT … FOR UPDATE to acquire the row lock
+  //   3. Validate the caller's proposalId (even if no prior row existed)
+  //   4. Check for an active (non-stale) generation
+  //   5. Atomically claim generation by setting proposal_drafting + updated_at
+  //   6. Reset sections
+  // The second concurrent request blocks on step 2, then sees proposal_drafting
+  // in step 4 and returns 409. Zero AI calls are launched by the second request.
 
   type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
-  const { draft, sectionRows } = await db.transaction(async (tx: DbTx) => {
-    let resolvedProposal: { id: number; [k: string]: unknown };
 
-    if (existingProposal) {
-      // Re-use the canonical proposal — reset fields and status to drafting
+  let draft: { id: number; [k: string]: unknown };
+  let sectionRows: Record<string, unknown>[];
+
+  try {
+    const result = await db.transaction(async (tx: DbTx) => {
+      // 1. Ensure canonical row exists — ON CONFLICT DO NOTHING is race-safe
+      await tx.execute(sql`
+        INSERT INTO proposals
+          (client_name, industry, brief_text, proposal_content, status, tender_id, created_at, updated_at)
+        VALUES (
+          ${tender.agency},
+          ${tender.category},
+          ${briefText},
+          ${""},
+          ${"draft"},
+          ${id},
+          NOW(), NOW()
+        )
+        ON CONFLICT (tender_id) DO NOTHING
+      `);
+
+      // 2. Acquire the row lock — blocks concurrent requests until we commit
+      const lockedResult = await tx.execute(sql`
+        SELECT id, status, updated_at
+        FROM proposals
+        WHERE tender_id = ${id}
+        FOR UPDATE
+      `);
+      const locked = lockedResult.rows[0] as {
+        id: number;
+        status: string;
+        updated_at: string | null;
+      } | undefined;
+
+      if (!locked) throw new Error("Proposal row missing after concurrent-safe insert");
+
+      // 3. Validate the caller's proposalId (checked even when no prior row existed)
+      if (requestedProposalId !== null && locked.id !== requestedProposalId) {
+        const e = new Error("MISMATCH");
+        (e as NodeJS.ErrnoException).code = "MISMATCH";
+        throw e;
+      }
+
+      // 4. Active-generation check with stale-recovery timeout
+      if (locked.status === "proposal_drafting") {
+        const startedAt = locked.updated_at ? new Date(locked.updated_at).getTime() : 0;
+        if (Date.now() - startedAt < STALE_GENERATION_MS) {
+          const e = new Error("IN_PROGRESS");
+          (e as NodeJS.ErrnoException).code = "IN_PROGRESS";
+          throw e;
+        }
+        // Stale generation (> 5 min) — fall through and re-generate
+      }
+
+      // 5. Atomically claim generation
+      const now = new Date();
       const [updated] = await tx
         .update(proposalsTable)
         .set({
@@ -1205,60 +1257,58 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
           briefText,
           proposalContent: "Generating proposal sections — please refresh in ~30 seconds.",
           status:          "proposal_drafting",
-          updatedAt:       new Date(),
+          updatedAt:       now,
         })
-        .where(eq(proposalsTable.id, existingProposal.id))
+        .where(eq(proposalsTable.id, locked.id))
         .returning();
-      resolvedProposal = updated as typeof resolvedProposal;
-    } else {
-      // No proposal exists yet — INSERT with ON CONFLICT DO NOTHING (race-safe),
-      // then read back the canonical row.
-      await tx.execute(sql`
-        INSERT INTO proposals
-          (client_name, industry, brief_text, proposal_content, status, tender_id, created_at, updated_at)
-        VALUES (
-          ${tender.agency},
-          ${tender.category},
-          ${briefText},
-          ${"Generating proposal sections — please refresh in ~30 seconds."},
-          ${"proposal_drafting"},
-          ${id},
-          NOW(), NOW()
+
+      // 6. Keep tender linked to the canonical proposal
+      await tx
+        .update(tendersTable)
+        .set({ proposalId: locked.id, status: "proposal_drafting", updatedAt: now })
+        .where(eq(tendersTable.id, id));
+
+      // 7. Reset section rows idempotently — delete stale shells, insert fresh ones
+      await tx.execute(sql`DELETE FROM proposal_sections WHERE proposal_id = ${locked.id}`);
+
+      const sections = await tx
+        .insert(proposalSectionsTable)
+        .values(
+          SECTION_DEFINITIONS.map((s) => ({
+            proposalId: locked.id,
+            sectionKey: s.key,
+            title:      s.title,
+            content:    "",
+            status:     "not_started",
+            orderIndex: s.order,
+          })),
         )
-        ON CONFLICT (tender_id) DO NOTHING
-      `);
-      const [fetched] = await tx
-        .select()
-        .from(proposalsTable)
-        .where(eq(proposalsTable.tenderId, id));
-      resolvedProposal = fetched as typeof resolvedProposal;
+        .returning();
+
+      return { draft: updated as { id: number; [k: string]: unknown }, sectionRows: sections };
+    });
+
+    draft = result.draft;
+    sectionRows = result.sectionRows as typeof sectionRows;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "MISMATCH") {
+      res.status(409).json({
+        error: "proposalId does not belong to this opportunity",
+        code:  "proposal_mismatch",
+      });
+      return;
     }
-
-    // Keep tender linked to the canonical proposal
-    await tx
-      .update(tendersTable)
-      .set({ proposalId: resolvedProposal.id, status: "proposal_drafting", updatedAt: new Date() })
-      .where(eq(tendersTable.id, id));
-
-    // Reset section rows idempotently — delete any stale shells, insert fresh ones
-    await tx.execute(sql`DELETE FROM proposal_sections WHERE proposal_id = ${resolvedProposal.id}`);
-
-    const sections = await tx
-      .insert(proposalSectionsTable)
-      .values(
-        SECTION_DEFINITIONS.map((s) => ({
-          proposalId: resolvedProposal.id as number,
-          sectionKey: s.key,
-          title:      s.title,
-          content:    "",
-          status:     "not_started",
-          orderIndex: s.order,
-        })),
-      )
-      .returning();
-
-    return { draft: resolvedProposal, sectionRows: sections };
-  });
+    if ((err as NodeJS.ErrnoException).code === "IN_PROGRESS") {
+      res.status(409).json({
+        error: "Generation is already in progress for this proposal.",
+        code:  "generation_in_progress",
+      });
+      return;
+    }
+    req.log.error({ err }, "Error in generate-proposal transaction");
+    res.status(500).json({ error: "Failed to start proposal generation" });
+    return;
+  }
 
   res.status(200).json({ proposalId: draft.id, proposal: draft, sections: sectionRows });
 

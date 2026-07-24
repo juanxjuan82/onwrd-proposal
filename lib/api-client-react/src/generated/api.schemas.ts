@@ -21,10 +21,14 @@ export interface Proposal {
   id: number;
   clientName: string;
   industry: string;
-  status: ProposalStatus;
+  status: string;
   briefText: string;
   proposalContent: string;
   googleDocUrl?: string | null;
+  googleFileId?: string | null;
+  syncStatus?: string | null;
+  lastSyncedAt?: string | null;
+  tenderId?: number | null;
   createdAt: string;
   updatedAt: string;
 }

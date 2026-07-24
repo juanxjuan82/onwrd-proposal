@@ -1,0 +1,70 @@
+Review follow-up for commit a011936ddc78e1890d841563db54c8a06d85dc10.
+
+Do not deploy yet. Fix the remaining blockers without changing #23 handoff semantics or #24 workflow.
+
+1. Make Generate Draft acquisition atomic
+
+The current status check happens before the transaction, so concurrent requests can both pass.
+
+Inside one transaction:
+- Resolve/create the canonical Proposal.
+- SELECT the canonical Proposal FOR UPDATE.
+- After acquiring the row lock, check status.
+- If status is proposal_drafting and the generation is not stale, return 409 generation_in_progress.
+- Otherwise atomically set proposal_drafting and generation_started_at.
+- Only the request that acquired the generation lock may reset/upsert sections and launch AI.
+- The second concurrent request must launch zero AI calls and mutate zero sections.
+- Validate a supplied proposalId even when no existing canonical Proposal was found.
+- Add stale-generation recovery with a defined timeout.
+
+Do not use a pre-transaction SELECT as the concurrency guard.
+
+2. Make session initialization genuinely fail
+
+app.ts currently catches the session DDL failure and resolves dbReady.
+
+Change it so:
+- The error is logged without credentials.
+- The promise rejects after logging.
+- index.ts never calls app.listen when session initialization fails.
+- Production exits with a non-zero status.
+- Development displays the real non-secret initialization reason in logs.
+- Keep the runtime session_save error response:
+  503 / session_store_unavailable.
+
+Add a behavioral test where session initialization rejects and assert app.listen is never called.
+
+3. Tighten export readiness
+
+- Evaluate draft readiness before Google authentication or any Google API operation.
+- If sections are complete and meaningful, export them.
+- If sections are incomplete/empty but proposalContent is meaningful, use proposalContent.
+- Never include empty section shells in the exported document.
+- If neither source is meaningful, return 422 draft_not_ready.
+- Share for Team Review must also be disabled when proposalContent is empty/placeholder and sections have no meaningful content—not only during proposal_drafting.
+- Handle 422 in the UI with “Draft not ready,” not the generic Share failed message.
+
+4. Replace structural tests with behavioral coverage
+
+The current proposal-generation tests mostly use readFileSync/includes checks.
+
+Add real tests using controlled DB/API mocks that prove:
+- Two concurrent generation requests result in one AI invocation.
+- Both requests resolve the same canonical Proposal.
+- Only one section set exists.
+- proposalId mismatch is rejected.
+- Generated content reaches the same Proposal shown by Edit/Preview.
+- Empty content produces 422.
+- Empty export makes zero OAuth, Drive, and Docs API calls.
+- Partial empty section shells do not appear in exported content.
+- Failed session initialization prevents server listening.
+
+Add proposal-generation.test.ts to the normal API test command.
+
+5. Restore clean verification
+
+- Fix all frontend TypeScript errors, including stale generated Proposal types for syncStatus, googleFileId and lastSyncedAt.
+- Run frontend and API type-checks.
+- Run frontend and API production builds with documented required environment variables.
+- Run the standard full test command, including the new behavioral tests.
+- Push a new commit and report the SHA plus exact command results.
