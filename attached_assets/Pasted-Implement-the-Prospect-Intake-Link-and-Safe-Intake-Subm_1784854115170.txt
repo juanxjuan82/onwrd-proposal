@@ -1,0 +1,140 @@
+Implement the **Prospect Intake Link and Safe Intake Submission** flow as part of #24.
+
+Do not begin if the #23 Google Drive overhaul is still being modified in the same workspace. Report the current branch and stop if concurrent work would overlap.
+
+## Product model
+
+ONWRD must retain a public, shareable Request a Proposal form at `/intake`.
+
+Submitting this form must create a reviewable Opportunity—not automatically generate a proposal. The current `/api/intake` endpoint silently invokes AI, retries up to three times, and generates a complete proposal. Remove that behavior entirely.
+
+The required lifecycle is:
+
+**Prospect form → Opportunity → ONWRD review → Pursue → Proposal → Share for Team Review**
+
+## Share-link experience
+
+Add **Prospect Intake Link** to the global `+ New` menu.
+
+Clicking it opens a modal. It must not navigate away, create a record, call the backend, invoke AI, or send an email.
+
+Modal content:
+
+**Request a Proposal Form**
+
+“Share this form with a prospect to collect their organization, project requirements, budget, timeline and supporting documents.”
+
+Show the complete public URL, derived from the current application origin and base path. Do not hard-code a Replit development domain.
+
+Actions:
+
+* **Copy Link** — copies the `/intake` URL and shows a “Link copied” confirmation
+* **Preview Form** — opens the public form in a new tab with `noopener,noreferrer`
+* **Close**
+
+The `/intake` page remains public and must not display the authenticated/admin sidebar.
+
+## Public form behavior
+
+Preserve the existing intake form fields, validation, contact autosave and optional PDF/DOCX/TXT upload.
+
+On final submission:
+
+1. Validate the submitted fields and uploaded file.
+2. Parse uploaded file text using the existing safe file-type and 20 MB limits.
+3. Combine the structured form answers and extracted file text.
+4. Create exactly one Opportunity in `tendersTable`.
+5. Do not create a Proposal.
+6. Do not invoke OpenAI or any other AI provider.
+7. Do not create or modify a Google Doc.
+8. Run the existing deterministic opportunity-scoring formula without changing it.
+9. Mark the intake draft as submitted and link it to the created Opportunity.
+10. Send ONWRD the existing notification email, updated to link to `/opportunities/{id}` rather than a proposal.
+11. Return only a generic `{ success: true }` response. Do not expose internal IDs to the prospect.
+12. Show the prospect the existing confirmation experience.
+
+Suggested Opportunity mapping:
+
+* `title`: project type plus organization name, falling back to `Project inquiry — {organization}`
+* `agency`: organization name
+* `description`: prospect’s project description
+* `category`: selected industry
+* `valueAmount`: selected investment range
+* `contactInfo`: contact name, title, email, phone and preferred-contact method
+* `rawText`: the complete formatted intake brief plus extracted uploaded-document text
+* `status`: the normal new-opportunity status
+* `sourceType`: `prospect_intake`
+
+Add a nullable `sourceType` column to the opportunity/tender schema if no appropriate source discriminator exists. Do not misuse `sourceUrl` to store a source type.
+
+Add a nullable `opportunityId` foreign key to `intake_drafts`. Preserve the existing `proposalId` column for backward compatibility; do not destructively rename or remove it.
+
+Update the Drizzle schema and use the repository’s existing non-force schema-push process. Do not use `push-force`.
+
+## Idempotency
+
+A repeated submission must not create duplicate Opportunities.
+
+Use the intake draft as the idempotency anchor:
+
+* If its status is already submitted and it has an `opportunityId`, return `{ success: true }` without creating another record.
+* Creating the Opportunity and marking/linking the intake draft must be handled transactionally.
+* If no valid draft ID is supplied, use an explicit submission idempotency key rather than relying only on the frontend button being disabled.
+
+Do not log prospect PII, uploaded text or complete form bodies.
+
+## Deterministic scoring
+
+Reuse the existing deterministic scoring implementation. If necessary, extract it into a shared service/helper without changing its formula, thresholds, reasoning or output.
+
+Manual prospect submission must make zero model calls.
+
+The created record appears under **Opportunities → New** with a visible **Prospect Intake** source badge. ONWRD can then select:
+
+* **Pursue** — creates or fetches exactly one Proposal and opens it
+* **No Bid/Decline** — closes it without creating a Proposal
+
+Do not automatically run requirements extraction when Pursue is selected.
+
+## Upload limitation
+
+The current implementation extracts uploaded document text but does not persist the original binary file. Preserve the extracted text in `rawText`.
+
+Do not silently claim the original file is stored. Persistent binary attachment storage is a separate requirement unless the repository already has an appropriate secure storage service.
+
+## Tests
+
+Add tests proving:
+
+1. Clicking Prospect Intake Link opens the share modal.
+2. Opening the modal makes no backend request.
+3. Copy Link produces the correct current-origin `/intake` URL.
+4. Preview opens the public form in a new tab.
+5. `/intake` remains public and has no admin sidebar.
+6. A valid submission creates one Opportunity.
+7. A valid submission creates zero Proposals.
+8. A valid submission makes zero AI/model calls.
+9. A valid submission makes zero Google API calls.
+10. The existing deterministic score is applied.
+11. The Opportunity has `sourceType = "prospect_intake"`.
+12. Structured contact, organization and project information is preserved.
+13. Extracted upload text is preserved in `rawText`.
+14. ONWRD’s notification links to the Opportunity.
+15. A repeated submission using the same idempotency anchor creates no duplicate.
+16. Invalid or unsupported uploads are rejected safely.
+17. The public response never exposes an Opportunity or Proposal ID.
+18. Pursue still creates/fetches exactly one Proposal without starting AI automatically.
+
+Run every discovered test, both type-checks and both production builds. Do not deploy or merge automatically.
+
+Report:
+
+* Branch and commit hash
+* Files changed
+* Schema changes and required schema-push command
+* How idempotency is enforced
+* Evidence that `/api/intake` makes zero AI calls
+* Test and build results
+* Any remaining attachment-storage limitation
+
+Do not modify Google OAuth, Google Picker, Google handoff behavior, proposal-generation prompts, scoring logic, billing or unrelated navigation.
