@@ -17,6 +17,7 @@ import { CARICOMAdapter } from "./caricom.js";
 import { EUCaribbeanAdapter } from "./eu-caribbean.js";
 import { type TenderSourceAdapter, type TenderOpportunity } from "./base-adapter.js";
 import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
+import { evaluateCrawlerEligibility } from "../lib/crawler-eligibility.js";
 
 function getAdapter(adapterType: string): TenderSourceAdapter | null {
   switch (adapterType) {
@@ -443,12 +444,27 @@ export async function runCrawler(sourceId?: number): Promise<{
             confidence:           result.confidence,
           }).returning({ id: discoveredTendersTable.id });
 
-          // Promote to canonical Opportunity — best-effort, non-fatal per discovery
-          try {
-            await promoteDiscoveredTender(discovery.id);
-          } catch (promErr) {
-            const msg = promErr instanceof Error ? promErr.message : String(promErr);
-            console.warn(`[crawler] promote id=${discovery.id} failed: ${msg.slice(0, 80)}`);
+          // Promote only eligible discoveries to canonical Opportunities.
+          // SKIP, boilerplate, title-only, and hard-negative-dominated records
+          // are stored in discovered_tenders for human review but not promoted.
+          const eligibility = evaluateCrawlerEligibility({
+            title:          opp.title,
+            description:    opp.description,
+            recommendation: result.recommendation,
+            deadline:       opp.deadline,
+          });
+
+          if (eligibility.eligible) {
+            try {
+              const dest = eligibility.destination === "reviewing" ? "reviewing" : "new";
+              await promoteDiscoveredTender(discovery.id, dest);
+            } catch (promErr) {
+              const msg = promErr instanceof Error ? promErr.message : String(promErr);
+              console.warn(`[crawler] promote id=${discovery.id} failed: ${msg.slice(0, 80)}`);
+            }
+          } else {
+            const reason = eligibility.rejectionReasons[0] ?? "ineligible";
+            console.log(`[crawler] id=${discovery.id} stored, not promoted (${reason})`);
           }
 
           newCount++;

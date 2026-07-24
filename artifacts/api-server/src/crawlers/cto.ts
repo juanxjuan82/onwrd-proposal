@@ -46,9 +46,14 @@ export class CTOAdapter implements TenderSourceAdapter {
             title: rawTitle,
             organization: "Caribbean Tourism Organization",
             url: fullUrl,
-            description: `Caribbean Tourism Organization procurement: ${rawTitle}. Tourism destination marketing and communications for the Caribbean region.`,
+            // Real scope from page fetch only — no synthetic marketing assumption
+            description: `Caribbean Tourism Organization procurement notice: ${rawTitle}`,
             country: "Caribbean",
             sector: "Tourism & Destination Marketing",
+            rawData: {
+              adapterContext:
+                "CTO procurement: tourism destination marketing and communications for the Caribbean region.",
+            },
           });
 
           if (results.length >= 20) break;
