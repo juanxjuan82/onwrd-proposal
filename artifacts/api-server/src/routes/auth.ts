@@ -1,6 +1,7 @@
 import { Router } from "express";
 import crypto from "crypto";
 import { getValidGoogleAccessToken, GoogleAuthError } from "../lib/google-auth.js";
+import { logger } from "../lib/logger.js";
 
 const router = Router();
 
@@ -60,6 +61,7 @@ router.get("/auth/google", (req, res) => {
 
   req.session.save((err) => {
     if (err) {
+      logger.error({ err }, "session save failed");
       res.status(500).json({ error: "Session error" });
       return;
     }

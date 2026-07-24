@@ -36,6 +36,20 @@ pool.query(
   logger.error({ err }, "Failed to apply handoff_started_at migration");
 });
 
+// Ensure session table exists (connect-pg-simple's internal DDL is unreliable at startup)
+pool.query(
+  `CREATE TABLE IF NOT EXISTS session (
+    sid varchar NOT NULL,
+    sess json NOT NULL,
+    expire timestamp(6) NOT NULL,
+    CONSTRAINT session_pkey PRIMARY KEY (sid)
+  )`,
+).then(() =>
+  pool.query(`CREATE INDEX IF NOT EXISTS IDX_session_expire ON session (expire)`),
+).catch((err: unknown) => {
+  logger.error({ err }, "Failed to create session table");
+});
+
 const PgStore = connectPgSimple(session);
 
 const app: Express = express();
