@@ -793,6 +793,7 @@ router.post("/intake", upload.single("briefFile"), async (req, res) => {
   }
 
   let opportunityCreated = false;
+  let newOpportunityId: number | null = null;
 
   try {
     type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -865,6 +866,7 @@ router.post("/intake", upload.single("briefFile"), async (req, res) => {
         .set({ opportunityId: opportunity.id, updatedAt: new Date() })
         .where(eq(intakeDraftsTable.id, draft.id));
 
+      newOpportunityId = opportunity.id;
       opportunityCreated = true;
     });
 
@@ -890,7 +892,8 @@ router.post("/intake", upload.single("briefFile"), async (req, res) => {
   <li><strong>Company:</strong> ${clientName?.trim() || "—"}</li>
   <li><strong>Industry:</strong> ${industry?.trim() || "—"}</li>
 </ul>
-<p>Submission key: <code>${submissionKey?.trim()}</code></p>`,
+<p>Submission key: <code>${submissionKey?.trim()}</code></p>
+${newOpportunityId ? `<p><a href="${process.env.APP_URL ?? ""}/opportunities/${newOpportunityId}">View opportunity →</a></p>` : ""}`,
           });
         } catch {
           // Notification failure must never propagate to the caller

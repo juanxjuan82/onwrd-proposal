@@ -30,7 +30,7 @@ async function docsRequest(
     return fetch(`https://docs.googleapis.com${path}`, { ...options, headers });
   }
   const connectors = new ReplitConnectors();
-  return connectors.proxy("google-docs", path, options);
+  return connectors.proxy("google-docs", path, options as unknown as Parameters<typeof connectors.proxy>[2]);
 }
 
 async function batchUpdate(

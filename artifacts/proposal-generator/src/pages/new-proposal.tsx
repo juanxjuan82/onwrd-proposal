@@ -211,6 +211,14 @@ export default function NewProposal() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const checkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [, setLocation] = useLocation();
+
+  // Redirect plain /new → /new?mode=blank so the URL always reflects the active mode
+  useEffect(() => {
+    if (!new URLSearchParams(search).get("mode")) {
+      setLocation("/new?mode=blank", { replace: true });
+    }
+  }, []);
+
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
