@@ -676,7 +676,7 @@ function CreateDialog({
         category: form.category || undefined, deadline: form.deadline || undefined,
         valueAmount: form.valueAmount || undefined, rawText: form.rawText || undefined,
       });
-      toast({ title: "Opportunity created", description: "AI analysis is running in the background." });
+      toast({ title: "Opportunity added." });
       onClose();
       setForm({ title: "", agency: "", description: "", category: "Marketing", deadline: "", valueAmount: "", rawText: "" });
       onCreate(created.id);
@@ -726,7 +726,7 @@ function CreateDialog({
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button onClick={handleCreate} disabled={createOpp.isPending}>
-            {createOpp.isPending ? "Creating…" : "Create & Analyse"}
+            {createOpp.isPending ? "Creating…" : "Add Opportunity"}
           </Button>
         </DialogFooter>
       </DialogContent>

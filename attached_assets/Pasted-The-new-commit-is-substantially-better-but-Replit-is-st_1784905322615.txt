@@ -1,0 +1,36 @@
+The new commit is substantially better, but Replit is still declaring victory early.
+
+Also, the previous review did not misread the task. Commit [`59cfb50`](https://github.com/juanxjuan82/onwrd-proposal/commit/59cfb50b7b1fcfdae36099111ba173d3292ee2f1) changes the exact problems that review identified—proof those blockers were real.
+
+Verified improvements:
+
+* Canonical Pursue now uses `INSERT … ON CONFLICT DO NOTHING`.
+* `start-bid` and `convert` return 410.
+* Plain `/new` opens blank mode.
+* `?add=1` now opens the manual-opportunity dialog.
+* Run Crawl exists on Opportunities.
+* `SKIP`, expired, boilerplate and title-only discoveries are blocked from promotion.
+* Synthetic adapter language no longer influences scoring.
+* Backfill applies the eligibility gate.
+* Both production bundles pass.
+* I independently ran 147 directly relevant tests: all passed.
+
+Still unresolved:
+
+1. `pnpm typecheck` fails. Task #24 explicitly requires clean typechecks.
+2. Team Review remains non-compliant:
+
+   * cards open the internal Proposal page, not the stored Google Doc directly;
+   * no shared-by metadata;
+   * `googleDocUrl` alone still qualifies despite the authoritative `googleFileId` correction;
+   * its test duplicates the same predicate instead of importing production logic.
+3. Prospect notification email still does not link to `/opportunities/{id}`.
+4. Manual creation still says “Create & Analyse” and “AI analysis is running” even though creation is deliberately no-AI.
+5. Many “behavioral” tests are source-text/string assertions. There is still no real concurrent Pursue test, transactional intake test, or browser navigation test.
+6. `/new` behaves as blank but does not actually redirect to `/new?mode=blank`.
+7. The three repaired crawler adapters still do not fetch the actual detail page/PDF. They now avoid bad promotions, but will often store title-only results without promoting good opportunities.
+8. Crawl polling watches individual source-run records, so it can report completion before the entire multi-source crawl finishes.
+
+The “321/321” result may be true in Replit’s database environment, but I could only independently reproduce the 147 relevant non-database tests. More importantly, test count does not erase the remaining code gaps.
+
+My verdict: **close, but not complete—one focused cleanup commit remains.**

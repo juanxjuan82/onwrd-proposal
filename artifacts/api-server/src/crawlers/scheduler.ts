@@ -51,8 +51,8 @@ async function sendDigestEmail(newCount: number): Promise<void> {
         .map(
           (t) => `<tr>
               <td style="padding:8px;border-bottom:1px solid #222">
-                ${t.sourceUrl
-                  ? `<a href="${t.sourceUrl}" style="color:#fff;text-decoration:none"><strong>${t.title}</strong> <span style="color:#555;font-size:11px">↗</span></a>`
+                ${t.url
+                  ? `<a href="${t.url}" style="color:#fff;text-decoration:none"><strong>${t.title}</strong> <span style="color:#555;font-size:11px">↗</span></a>`
                   : `<strong>${t.title}</strong>`}
               </td>
               <td style="padding:8px;border-bottom:1px solid #222">${t.organization}</td>

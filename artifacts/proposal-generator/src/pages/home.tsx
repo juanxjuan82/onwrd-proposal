@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { isTeamReview } from "@/lib/proposal-predicates";
 import { useListProposals } from "@workspace/api-client-react";
 import { Link } from "wouter";
 import { format } from "date-fns";
@@ -36,15 +37,7 @@ interface Proposal {
 }
 
 // ── Lifecycle predicates ─────────────────────────────────────────────────────
-function isTeamReview(p: Proposal): boolean {
-  if (p.syncStatus === "handoff_complete") return true;
-  if (
-    (p.googleDocUrl || p.googleFileId) &&
-    p.syncStatus !== "pending_first_write" &&
-    p.syncStatus !== "handoff_in_progress"
-  ) return true;
-  return false;
-}
+export { isTeamReview };
 
 function isReadyToShare(p: Proposal): boolean {
   if (isTeamReview(p)) return false;
@@ -193,6 +186,39 @@ function IntakeShareCard() {
 
 // ── Proposal card ─────────────────────────────────────────────────────────────
 function ProposalCard({ proposal }: { proposal: Proposal }) {
+  const teamReview = isTeamReview(proposal);
+  const docUrl = proposal.googleDocUrl;
+  if (teamReview && docUrl) {
+    return (
+      <a
+        href={docUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="block group"
+        data-testid={`link-proposal-${proposal.id}`}
+      >
+        <div className="p-5 border bg-card rounded-lg hover:border-primary/50 transition-colors flex items-center justify-between gap-4">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2.5 mb-1.5 flex-wrap">
+              <h2 className="text-base font-medium text-foreground group-hover:text-primary transition-colors truncate">
+                {proposal.clientName}
+              </h2>
+              <Badge variant="secondary" className="font-normal text-xs shrink-0">
+                {proposal.industry}
+              </Badge>
+              <ProposalStatusBadge p={proposal} />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {proposal.updatedAt
+                ? `Updated ${format(new Date(proposal.updatedAt), "MMM d, yyyy")}`
+                : `Created ${format(new Date(proposal.createdAt), "MMM d, yyyy")}`}
+            </p>
+          </div>
+          <ExternalLink className="w-4 h-4 text-muted-foreground group-hover:text-primary transition-colors shrink-0" />
+        </div>
+      </a>
+    );
+  }
   return (
     <Link
       href={`/proposals/${proposal.id}`}

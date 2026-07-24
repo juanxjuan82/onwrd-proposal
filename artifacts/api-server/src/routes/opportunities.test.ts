@@ -36,6 +36,7 @@ import {
 } from "../lib/crawler-eligibility.js";
 
 import { scoreTender } from "../lib/scoring-rules.js";
+import { isTeamReview } from "../lib/proposal-predicates.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -607,21 +608,8 @@ describe("§9 backfill script — filter correctness", () => {
 // ── §10 Team Review predicate logic ──────────────────────────────────────────
 
 describe("§10 Team Review predicate — correct proposal classification", () => {
-  // Pure replica of the predicate for isolated unit testing.
-  // The real predicate lives in home.tsx — any contract change must be
-  // reflected both there and here.
-  function isTeamReview(p: {
-    syncStatus?: string | null;
-    googleDocUrl?: string | null;
-    googleFileId?: string | null;
-  }): boolean {
-    if (p.syncStatus === "handoff_complete") return true;
-    return !!(
-      (p.googleDocUrl || p.googleFileId) &&
-      p.syncStatus !== "pending_first_write" &&
-      p.syncStatus !== "handoff_in_progress"
-    );
-  }
+  // Uses the production predicate imported from proposal-predicates.ts —
+  // no local duplicate. Any contract change surfaces here automatically.
 
   it("handoff_complete → Team Review regardless of googleDocUrl", () => {
     assert.ok(isTeamReview({ syncStatus: "handoff_complete" }));

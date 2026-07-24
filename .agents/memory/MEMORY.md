@@ -6,6 +6,7 @@
 - [Scoring architecture](scoring-architecture.md) — bid scoring is deterministic (scoring-rules.ts), not AI; applyDeterministicScore(executor, tenderId) takes db or tx as first arg for atomic transactions
 - [Drizzle tx type annotation](drizzle-tx-type.md) — type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0]; annotate transaction callback params with (tx: DbTx) to avoid TS7006
 - [Pre-existing TS errors](preexisting-ts-errors.md) — sections.ts and tenders.ts have implicit-any + unbuilt .d.ts errors predating this work; pnpm typecheck exit 2 is not a regression
+- [Lib build to fix TS6305](lib-build-ts6305.md) — composite libs must be built with `npx tsc --build lib/X` before typecheck; fix lib source errors first or builds emit nothing (noEmitOnError:true)
 - [AI gateway pattern](ai-gateway-pattern.md) — single permitted openai importer; all AI calls route through invokeAI(); build guard in build.mjs enforces this at compile time.
 - [Deterministic metadata extractor](metadata-extractor.md) — tender imports use extractTenderMetadata() (no AI); returns needsReview flag when title/agency undetected.
 - [DB-backed circuit & usage log](db-circuit-usage.md) — ai_circuit (id=1 singleton), ai_usage_log, crawler_lock tables; 30s circuit cache, 60s count cache; isCrawlRunning() is now async

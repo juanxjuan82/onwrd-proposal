@@ -7,7 +7,13 @@
  * (see build.mjs) and code review.
  */
 import { openai, AI_MODEL } from "@workspace/integrations-openai-ai-server";
-import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
+// Local type alias — avoids a direct `openai` peer-dep on api-server.
+// Matches openai's ChatCompletionMessageParam shape.
+type ChatCompletionMessageParam = {
+  role: "system" | "user" | "assistant" | "tool";
+  content: string | null;
+  name?: string;
+};
 import { db } from "@workspace/db";
 import { aiCircuitTable, aiUsageLogTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
@@ -629,7 +635,8 @@ export async function invokeAI(params: InvokeAIParams): Promise<AIResult> {
         max_tokens: maxTokens,
         ...(responseFormat ? { response_format: responseFormat } : {}),
         messages,
-      } as Record<string, unknown>,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
       signal ? { signal } : undefined,
     );
     const u = completion.usage;
