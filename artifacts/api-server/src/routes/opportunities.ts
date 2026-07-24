@@ -799,157 +799,23 @@ router.put("/opportunities/:id", async (req, res) => {
   }
 });
 
-// ── Start bid: find-or-create proposal, mark tender as bid_started ────────────
-router.post("/opportunities/:id/start-bid", async (req, res) => {
-  const id = Number(req.params.id);
-  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
-
-  try {
-    const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, id));
-    if (!tender) { res.status(404).json({ error: "Tender not found" }); return; }
-
-    // If tender already has a linked proposal, return it
-    if (tender.proposalId) {
-      const [existing] = await db
-        .select({ id: proposalsTable.id })
-        .from(proposalsTable)
-        .where(eq(proposalsTable.id, tender.proposalId));
-      if (existing) {
-        res.json({ proposalId: existing.id, tenderId: id, existing: true });
-        return;
-      }
-    }
-
-    // Belt-and-suspenders: check proposals table by tenderId (unique constraint)
-    const [existingByTender] = await db
-      .select({ id: proposalsTable.id })
-      .from(proposalsTable)
-      .where(eq(proposalsTable.tenderId, id));
-    if (existingByTender) {
-      await db.update(tendersTable).set({
-        proposalId: existingByTender.id,
-        status:     tender.status === "bid_started" ? tender.status : "bid_started",
-        updatedAt:  new Date(),
-      }).where(eq(tendersTable.id, id));
-      res.json({ proposalId: existingByTender.id, tenderId: id, existing: true });
-      return;
-    }
-
-    // Create a new proposal from the tender's details
-    const briefParts: string[] = [
-      `Title: ${tender.title}`,
-      `Client: ${tender.agency}`,
-      `Category: ${tender.category}`,
-    ];
-    if (tender.deadline)    briefParts.push(`Deadline: ${new Date(tender.deadline).toDateString()}`);
-    if (tender.valueAmount) briefParts.push(`Value: ${tender.valueAmount}`);
-    briefParts.push("", tender.description);
-    if (tender.rawText)     briefParts.push(`\nFull RFP:\n${tender.rawText}`);
-
-    const [proposal] = await db
-      .insert(proposalsTable)
-      .values({
-        clientName:      tender.agency,
-        industry:        tender.category,
-        status:          "draft",
-        briefText:       briefParts.join("\n"),
-        proposalContent: "",
-        tenderId:        id,
-      })
-      .returning();
-
-    await db.update(tendersTable).set({
-      status:     "bid_started",
-      proposalId: proposal.id,
-      updatedAt:  new Date(),
-    }).where(eq(tendersTable.id, id));
-
-    res.json({ proposalId: proposal.id, tenderId: id, existing: false });
-  } catch (err) {
-    req.log.error({ err }, "Error starting bid");
-    res.status(500).json({ error: "Failed to start bid" });
-  }
+// ── REMOVED: start-bid ────────────────────────────────────────────────────────
+// Replaced by the canonical pursue route. Returns 410 Gone.
+router.post("/opportunities/:id/start-bid", (_req, res) => {
+  res.status(410).json({ error: "Gone. Use POST /opportunities/:id/pursue to create a proposal." });
 });
 
-// ── Convert opportunity to proposal + start extraction pipeline ───────────────
-// Idempotent — returns existing proposal if one is already linked.
-// Fires runExtractionPipeline in the background; client redirects immediately.
-router.post("/opportunities/:id/convert", async (req, res) => {
-  const id = Number(req.params.id);
-  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
-
-  try {
-    const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, id));
-    if (!tender) { res.status(404).json({ error: "Opportunity not found" }); return; }
-
-    // Idempotent: return existing linked proposal
-    if (tender.proposalId) {
-      const [existing] = await db
-        .select({ id: proposalsTable.id })
-        .from(proposalsTable)
-        .where(eq(proposalsTable.id, tender.proposalId));
-      if (existing) {
-        res.json({ proposalId: existing.id, tenderId: id, existing: true });
-        return;
-      }
-    }
-
-    // Belt-and-suspenders: check proposals table by tenderId (unique constraint)
-    const [existingByTender] = await db
-      .select({ id: proposalsTable.id })
-      .from(proposalsTable)
-      .where(eq(proposalsTable.tenderId, id));
-    if (existingByTender) {
-      await db.update(tendersTable)
-        .set({ proposalId: existingByTender.id, updatedAt: new Date() })
-        .where(eq(tendersTable.id, id));
-      res.json({ proposalId: existingByTender.id, tenderId: id, existing: true });
-      return;
-    }
-
-    // Block if already extracting
-    if (isActiveStatus(tender.status)) {
-      res.status(409).json({ error: `Analysis already running (${tender.status}). Wait or cancel first.` });
-      return;
-    }
-
-    // Build brief text from tender fields
-    const briefParts: string[] = [
-      `Title: ${tender.title}`,
-      `Client: ${tender.agency}`,
-      `Category: ${tender.category}`,
-    ];
-    if (tender.deadline)    briefParts.push(`Deadline: ${new Date(tender.deadline).toDateString()}`);
-    if (tender.valueAmount) briefParts.push(`Value: ${tender.valueAmount}`);
-    briefParts.push("", tender.description);
-    if (tender.rawText)     briefParts.push(`\nFull RFP:\n${tender.rawText}`);
-
-    const [proposal] = await db
-      .insert(proposalsTable)
-      .values({
-        clientName:      tender.agency,
-        industry:        tender.category,
-        status:          "draft",
-        briefText:       briefParts.join("\n"),
-        proposalContent: "",
-        tenderId:        id,
-      })
-      .returning();
-
-    await db.update(tendersTable)
-      .set({ proposalId: proposal.id, updatedAt: new Date() })
-      .where(eq(tendersTable.id, id));
-
-    res.json({ proposalId: proposal.id, tenderId: id, existing: false });
-  } catch (err) {
-    req.log.error({ err }, "Error converting opportunity");
-    res.status(500).json({ error: "Failed to convert opportunity to proposal" });
-  }
+// ── REMOVED: convert ─────────────────────────────────────────────────────────
+// Replaced by the canonical pursue route. Returns 410 Gone.
+router.post("/opportunities/:id/convert", (_req, res) => {
+  res.status(410).json({ error: "Gone. Use POST /opportunities/:id/pursue to create a proposal, then use proposal AI endpoints for generation." });
 });
 
 // ── Pursue: find-or-create proposal, mark tender bid_started (idempotent) ────
-// SELECT FOR UPDATE the tender row so concurrent callers cannot race past the
-// existence check and create duplicate proposals.
+// Concurrent-safe: INSERT ... ON CONFLICT (tender_id) DO NOTHING so both
+// concurrent callers attempt an insert, exactly one wins, and both then
+// read the same canonical row.  No SELECT FOR UPDATE needed — the unique
+// constraint on proposals.tender_id is the concurrency guard.
 router.post("/opportunities/:id/pursue", async (req, res) => {
   const id = Number(req.params.id);
   if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
@@ -957,12 +823,13 @@ router.post("/opportunities/:id/pursue", async (req, res) => {
   try {
     type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
     const proposalId = await db.transaction(async (tx: DbTx) => {
-      const lockResult = await tx.execute(
+      // 1. Verify the opportunity exists (plain SELECT — no lock needed)
+      const tenderResult = await tx.execute(
         sql`SELECT id, title, agency, category, description, deadline,
                    value_amount, raw_text
-            FROM tenders WHERE id = ${id} FOR UPDATE`,
+            FROM tenders WHERE id = ${id}`,
       );
-      const tender = lockResult.rows[0] as {
+      const tender = tenderResult.rows[0] as {
         id: number; title: string; agency: string; category: string;
         description: string; deadline: string | null;
         value_amount: string | null; raw_text: string | null;
@@ -973,40 +840,36 @@ router.post("/opportunities/:id/pursue", async (req, res) => {
         throw e;
       }
 
-      const existResult = await tx.execute(
-        sql`SELECT id FROM proposals WHERE tender_id = ${id} ORDER BY id LIMIT 1`,
-      );
-      const existing = existResult.rows[0] as { id: number } | undefined;
-
-      if (existing) {
-        await tx.execute(
-          sql`UPDATE tenders SET status = 'bid_started', updated_at = NOW() WHERE id = ${id}`,
-        );
-        return existing.id;
-      }
-
+      // 2. Build brief text
       const briefParts: string[] = [tender.title, `Agency: ${tender.agency}`];
       if (tender.deadline)     briefParts.push(`Deadline: ${tender.deadline.slice(0, 10)}`);
       if (tender.value_amount) briefParts.push(`Value: ${tender.value_amount}`);
       briefParts.push("", tender.description);
       if (tender.raw_text)     briefParts.push(`\nFull RFP:\n${tender.raw_text}`);
+      const briefText = briefParts.join("\n");
 
-      const [proposal] = await tx
-        .insert(proposalsTable)
-        .values({
-          clientName:      tender.agency,
-          industry:        tender.category,
-          status:          "draft",
-          briefText:       briefParts.join("\n"),
-          proposalContent: "",
-          tenderId:        id,
-        })
-        .returning({ id: proposalsTable.id });
-
+      // 3. Attempt insert — ON CONFLICT (tender_id) DO NOTHING is the
+      //    concurrency guard.  Exactly one caller creates the row; the other
+      //    silently skips.  Both then read the same canonical row below.
       await tx.execute(
-        sql`UPDATE tenders SET proposal_id = ${proposal.id}, status = 'bid_started', updated_at = NOW() WHERE id = ${id}`,
+        sql`INSERT INTO proposals (client_name, industry, status, brief_text, proposal_content, tender_id)
+            VALUES (${tender.agency}, ${tender.category}, 'draft', ${briefText}, '', ${id})
+            ON CONFLICT (tender_id) DO NOTHING`,
       );
-      return proposal.id;
+
+      // 4. Fetch the canonical proposal (same row for every concurrent caller)
+      const canonicalResult = await tx.execute(
+        sql`SELECT id FROM proposals WHERE tender_id = ${id} LIMIT 1`,
+      );
+      const canonical = canonicalResult.rows[0] as { id: number } | undefined;
+      if (!canonical) throw new Error("Proposal not found after concurrent-safe insert");
+
+      // 5. Mark Opportunity as bid_started
+      await tx.execute(
+        sql`UPDATE tenders SET status = 'bid_started', updated_at = NOW() WHERE id = ${id}`,
+      );
+
+      return canonical.id;
     });
 
     res.json({ proposalId });
