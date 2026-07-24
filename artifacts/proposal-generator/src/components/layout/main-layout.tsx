@@ -97,7 +97,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
               />
             </button>
             {menuOpen && (
-              <div className="absolute left-0 right-0 top-full mt-1 z-50 bg-[#111] border border-[#333] rounded-md shadow-2xl overflow-hidden">
+              <div className="absolute left-0 top-full mt-1 z-50 bg-[#111] border border-[#333] rounded-md shadow-2xl overflow-hidden min-w-[240px]">
                 {menuItems.map(({ label, icon: Icon, action }) => (
                   <button
                     key={label}
