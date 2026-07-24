@@ -8,7 +8,8 @@ import {
 } from "@workspace/db";
 import { eq, and, sql } from "drizzle-orm";
 import { invokeAI } from "../lib/ai-gateway.js";
-import { createGoogleDoc, appendContentWithLogo, clearAndReplaceContent, moveDocToFolder } from "../lib/google-docs.js";
+import { appendContentWithLogo, createGoogleDocInFolder, resetIncompleteDoc } from "../lib/google-docs.js";
+import { getValidGoogleAccessToken, GoogleAuthError } from "../lib/google-auth.js";
 import { googleDriveConfigTable } from "@workspace/db";
 
 const router = Router();
@@ -274,6 +275,8 @@ router.post("/proposals/:id/approve-for-export", async (req, res) => {
 //   - Concurrency guard: returns 409 if syncStatus is already 'syncing'.
 //   - Never calls shareWithAnyone — permissions are inherited from the folder.
 //
+const STALE_LOCK_MS = 5 * 60 * 1000; // 5 minutes
+
 router.post("/proposals/:id/export", async (req, res) => {
   const proposalId = Number(req.params.id);
   if (isNaN(proposalId)) {
@@ -281,13 +284,7 @@ router.post("/proposals/:id/export", async (req, res) => {
     return;
   }
 
-  const accessToken: string | undefined = req.session.googleAccessToken;
-  if (!accessToken) {
-    res.status(401).json({ error: "Google account not connected. Connect your account in Settings → Google Docs." });
-    return;
-  }
-
-  // ── 1. Load proposal ──────────────────────────────────────────────────────
+  // ── 1. Load proposal first ────────────────────────────────────────────────
   const [proposal] = await db
     .select()
     .from(proposalsTable)
@@ -298,44 +295,81 @@ router.post("/proposals/:id/export", async (req, res) => {
     return;
   }
 
-  // ── 2. Fast-path 409 to avoid a lock-attempt on obviously-busy proposals ─
-  if (proposal.syncStatus === "syncing") {
-    res.status(409).json({ error: "Export already in progress for this proposal." });
+  // ── 2. Early return for completed / legacy documents — NO auth required ───
+  //    handoff_complete = successfully shared; Google Doc is now canonical.
+  //    Legacy linked = has a fileId but was never in our new state machine
+  //    (syncStatus is not pending_first_write and not handoff_in_progress).
+  const isHandoffComplete = proposal.syncStatus === "handoff_complete";
+  const isLegacyLinked =
+    !!proposal.googleFileId &&
+    proposal.syncStatus !== "pending_first_write" &&
+    proposal.syncStatus !== "handoff_in_progress" &&
+    !isHandoffComplete;
+
+  if (isHandoffComplete || isLegacyLinked) {
+    const docUrl =
+      proposal.googleDocUrl ??
+      `https://docs.google.com/document/d/${proposal.googleFileId}/edit`;
+    res.json({ docUrl, alreadyComplete: true });
     return;
   }
 
-  // ── 3. Atomic lock: UPDATE ... WHERE sync_status IS DISTINCT FROM 'syncing' ─
-  //    Using IS DISTINCT FROM is critical: in Postgres, NULL != 'syncing' is
-  //    NULL (not TRUE), so a plain ne() predicate would skip NULL rows and
-  //    return 0 rows on the first-ever export of any proposal.
-  //    IS DISTINCT FROM treats NULL as a distinct value from 'syncing', so
-  //    the WHERE clause matches for both NULL and any non-'syncing' value.
+  // ── 3. Auth check — only needed for new / retry handoffs ─────────────────
+  let accessToken: string;
+  try {
+    accessToken = await getValidGoogleAccessToken(req.session);
+    await new Promise<void>((resolve) => req.session.save(() => resolve()));
+  } catch (err) {
+    if (err instanceof GoogleAuthError) {
+      res.status(401).json({
+        error: "Google account not connected. Connect your account in Settings → Google Docs.",
+        reason: err.reason,
+      });
+      return;
+    }
+    throw err;
+  }
+
+  // ── 4. Stale-lock recovery ────────────────────────────────────────────────
+  //    handoff_in_progress is transient; a server restart can leave it stuck.
+  //    After STALE_LOCK_MS, recover based on whether a doc ID was recorded.
+  if (proposal.syncStatus === "handoff_in_progress") {
+    const startedAt = proposal.handoffStartedAt?.getTime() ?? 0;
+    if (Date.now() - startedAt < STALE_LOCK_MS) {
+      res.status(409).json({ error: "Handoff already in progress for this proposal. Try again in a moment." });
+      return;
+    }
+    // Stale: recover
+    const recoverTo = proposal.googleFileId ? "pending_first_write" : null;
+    await db
+      .update(proposalsTable)
+      .set({ syncStatus: recoverTo, handoffStartedAt: null })
+      .where(and(eq(proposalsTable.id, proposalId), sql`sync_status = 'handoff_in_progress'`));
+    proposal.syncStatus = recoverTo;
+  }
+
+  // ── 5. Acquire atomic lock ────────────────────────────────────────────────
+  //    Fresh: WHERE sync_status IS NULL
+  //    Retry: WHERE sync_status = 'pending_first_write'
+  //    Any other concurrent request gets 0 rows → 409.
+  const isRetry = proposal.syncStatus === "pending_first_write";
+  const lockCondition = isRetry
+    ? sql`sync_status = 'pending_first_write'`
+    : sql`sync_status IS NULL`;
+
   const [locked] = await db
     .update(proposalsTable)
-    .set({ syncStatus: "syncing" })
-    .where(and(eq(proposalsTable.id, proposalId), sql`sync_status IS DISTINCT FROM 'syncing'`))
+    .set({ syncStatus: "handoff_in_progress", handoffStartedAt: new Date() })
+    .where(and(eq(proposalsTable.id, proposalId), lockCondition))
     .returning({ id: proposalsTable.id });
 
   if (!locked) {
-    res.status(409).json({ error: "Export already in progress for this proposal." });
+    res.status(409).json({ error: "Handoff already in progress for this proposal. Try again in a moment." });
     return;
   }
 
   try {
-    // ── 4. Backward compat: extract fileId from legacy URL ────────────────
-    let effectiveFileId = proposal.googleFileId;
-    if (!effectiveFileId && proposal.googleDocUrl) {
-      const match = proposal.googleDocUrl.match(/\/document\/d\/([^/?#]+)/);
-      effectiveFileId = match?.[1] ?? null;
-      if (effectiveFileId) {
-        await db
-          .update(proposalsTable)
-          .set({ googleFileId: effectiveFileId })
-          .where(eq(proposalsTable.id, proposalId));
-      }
-    }
-
-    // ── 5. Collect content and Drive config ───────────────────────────────
+    // ── 6. Require configured folder ─────────────────────────────────────
     const [[driveConfig], sections] = await Promise.all([
       db.select().from(googleDriveConfigTable).limit(1),
       db
@@ -345,92 +379,129 @@ router.post("/proposals/:id/export", async (req, res) => {
         .orderBy(proposalSectionsTable.orderIndex),
     ]);
 
-    const contentToExport =
+    if (!driveConfig?.folderId) {
+      await db
+        .update(proposalsTable)
+        .set({ syncStatus: null, handoffStartedAt: null })
+        .where(eq(proposalsTable.id, proposalId))
+        .catch(() => {});
+      res.status(400).json({
+        error: "No Google Drive folder configured. Set a destination folder in Settings → Google Docs before exporting.",
+      });
+      return;
+    }
+
+    const content =
       sections.length > 0
-        ? sections
-            .map((s) => `## ${s.title}\n\n${s.content}`)
-            .join("\n\n---\n\n")
+        ? sections.map((s) => `## ${s.title}\n\n${s.content}`).join("\n\n---\n\n")
         : proposal.proposalContent;
 
-    const exportedBy = req.session.googleUserEmail ?? undefined;
+    const exportedBy = req.session.googleUserEmail ?? null;
 
-    let docUrl: string;
     let documentId: string;
-    let isUpdate: boolean;
+    let docUrl: string;
 
-    if (effectiveFileId) {
-      // ── Sync: rewrite existing doc ──────────────────────────────────────
-      documentId = effectiveFileId;
+    if (isRetry) {
+      // ── Retry: reuse same doc, reset partial content, write clean ────────
+      // GUARD: resetIncompleteDoc is only called here, exclusively for
+      // proposals that were in pending_first_write.
+      documentId = proposal.googleFileId!;
       docUrl =
         proposal.googleDocUrl ??
         `https://docs.google.com/document/d/${documentId}/edit`;
-      await clearAndReplaceContent(documentId, contentToExport, accessToken);
-      isUpdate = true;
+      await resetIncompleteDoc(documentId, content, accessToken);
     } else {
-      // ── Create: new doc — requires a configured destination folder ───────
-      if (!driveConfig?.folderId) {
-        // Release the lock before returning so retries are not blocked
+      // ── First handoff: create doc directly in configured folder ───────────
+      const docTitle = `ONWRD Proposal — ${proposal.clientName}`;
+
+      let newDoc: { id: string; webViewLink?: string };
+      try {
+        newDoc = await createGoogleDocInFolder(docTitle, driveConfig.folderId, accessToken);
+      } catch (createErr) {
+        // Creation failed before an ID was recorded — release lock cleanly
         await db
           .update(proposalsTable)
-          .set({ syncStatus: null })
+          .set({ syncStatus: null, handoffStartedAt: null })
           .where(eq(proposalsTable.id, proposalId))
           .catch(() => {});
-        res.status(400).json({
-          error:
-            "No Google Drive folder configured. Set a destination folder in Settings → Google Docs before exporting.",
-        });
-        return;
+        throw createErr;
       }
 
-      const docTitle = `ONWRD Proposal — ${proposal.clientName}`;
-      const doc = await createGoogleDoc(docTitle, accessToken);
-      documentId = doc.documentId;
-      docUrl = `https://docs.google.com/document/d/${documentId}/edit`;
+      documentId = newDoc.id;
+      docUrl = newDoc.webViewLink ?? `https://docs.google.com/document/d/${documentId}/edit`;
 
-      await moveDocToFolder(
-        documentId,
-        driveConfig.folderId,
-        driveConfig.driveId,
-        accessToken,
-      );
+      // Persist the document ID BEFORE writing content so a content-write
+      // failure is recoverable (pending_first_write retry reuses this ID).
+      await db
+        .update(proposalsTable)
+        .set({ googleFileId: documentId, googleDocUrl: docUrl })
+        .where(eq(proposalsTable.id, proposalId));
 
-      await appendContentWithLogo(documentId, contentToExport, accessToken);
-      isUpdate = false;
+      try {
+        await appendContentWithLogo(documentId, content, accessToken);
+      } catch (contentErr) {
+        // ID is recorded; mark as pending_first_write so next request retries
+        await db
+          .update(proposalsTable)
+          .set({ syncStatus: "pending_first_write", handoffStartedAt: null })
+          .where(eq(proposalsTable.id, proposalId))
+          .catch(() => {});
+        throw contentErr;
+      }
     }
 
-    // ── 6. Record the export ──────────────────────────────────────────────
-    await db.insert(googleExportsTable).values({
-      proposalId,
-      googleDocUrl: docUrl,
-      googleFileId: documentId,
-      driveFolderId: driveConfig?.folderId ?? null,
-      exportedBy: exportedBy ?? null,
-    });
-
+    // ── 7. Completion writes — single transaction ─────────────────────────
     const now = new Date();
-    await db
-      .update(proposalsTable)
-      .set({
+    await db.transaction(async (tx) => {
+      await tx
+        .update(proposalsTable)
+        .set({
+          googleDocUrl: docUrl,
+          googleFileId: documentId,
+          syncStatus: "handoff_complete",
+          status: "exported_to_drive",
+          lastSyncedAt: now,
+          handoffStartedAt: null,
+          updatedAt: now,
+        })
+        .where(eq(proposalsTable.id, proposalId));
+
+      await tx.insert(googleExportsTable).values({
+        proposalId,
         googleDocUrl: docUrl,
         googleFileId: documentId,
-        status: isUpdate ? proposal.status : "exported_to_drive",
-        syncStatus: "synced",
-        lastSyncedAt: now,
-        dirtySince: null,
-        updatedAt: now,
-      })
-      .where(eq(proposalsTable.id, proposalId));
+        driveFolderId: driveConfig.folderId,
+        exportedBy,
+      });
+    });
 
-    res.json({ docUrl, documentId, isUpdate });
+    res.json({ docUrl, documentId, alreadyComplete: false });
   } catch (err) {
-    req.log.error({ err }, "Error exporting to Google Docs");
-    // Release the lock and record the error state
-    await db
-      .update(proposalsTable)
-      .set({ syncStatus: "error" })
-      .where(eq(proposalsTable.id, proposalId))
-      .catch(() => {});
-    res.status(500).json({ error: "Failed to export to Google Docs" });
+    req.log.error({ err }, "Error during proposal handoff to Google Docs");
+
+    // If still stuck in handoff_in_progress (not already set to pending_first_write
+    // by the content-write failure handler above), recover based on whether
+    // a document ID has been recorded.
+    try {
+      const [current] = await db
+        .select({ syncStatus: proposalsTable.syncStatus, googleFileId: proposalsTable.googleFileId })
+        .from(proposalsTable)
+        .where(eq(proposalsTable.id, proposalId));
+
+      if (current?.syncStatus === "handoff_in_progress") {
+        await db
+          .update(proposalsTable)
+          .set({
+            syncStatus: current.googleFileId ? "pending_first_write" : null,
+            handoffStartedAt: null,
+          })
+          .where(eq(proposalsTable.id, proposalId));
+      }
+    } catch {
+      // best-effort
+    }
+
+    res.status(500).json({ error: "Failed to export to Google Docs. Try again." });
   }
 });
 

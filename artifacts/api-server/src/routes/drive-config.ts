@@ -2,6 +2,7 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { googleDriveConfigTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
+import { getValidGoogleAccessToken, GoogleAuthError } from "../lib/google-auth.js";
 
 const router = Router();
 
@@ -15,86 +16,160 @@ router.get("/settings/google-drive", async (_req, res) => {
   }
 });
 
+/**
+ * Validate a folder ID against the Drive API.
+ * Uses the correct fields-only request — never sends driveId or includeItemsFromAllDrives.
+ */
+async function validateFolder(
+  folderId: string,
+  accessToken: string,
+): Promise<{
+  ok: true;
+  name: string;
+  driveId: string | null;
+} | {
+  ok: false;
+  code: "expired_auth" | "not_found" | "not_a_folder" | "no_write_permission" | "admin_restriction" | "temporary_failure";
+  message: string;
+}> {
+  let driveRes: Response;
+  try {
+    driveRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(folderId)}?supportsAllDrives=true&fields=id,name,mimeType,driveId,parents,capabilities(canAddChildren,canEdit)`,
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+    );
+  } catch {
+    return { ok: false, code: "temporary_failure", message: "Could not reach Google Drive. Check your connection and try again." };
+  }
+
+  if (driveRes.status === 401) {
+    return { ok: false, code: "expired_auth", message: "Google session expired. Reconnect your account and try again." };
+  }
+  if (driveRes.status === 403) {
+    const body = await driveRes.json().catch(() => ({})) as { error?: { errors?: { domain?: string; reason?: string }[] } };
+    const reason = body?.error?.errors?.[0]?.reason ?? "";
+    if (reason === "domainPolicy" || reason === "teamDriveFileLimitExceeded") {
+      return { ok: false, code: "admin_restriction", message: "An admin policy is preventing access to this folder." };
+    }
+    return { ok: false, code: "no_write_permission", message: "You don't have permission to create files in this folder. Ask the folder owner to grant you Editor access." };
+  }
+  if (driveRes.status === 404) {
+    return { ok: false, code: "not_found", message: "Folder not found. Check that the ID is correct and you have access to it." };
+  }
+  if (driveRes.status >= 500) {
+    return { ok: false, code: "temporary_failure", message: `Google Drive returned an error (HTTP ${driveRes.status}). Try again in a moment.` };
+  }
+  if (!driveRes.ok) {
+    return { ok: false, code: "temporary_failure", message: `Unexpected error from Google Drive (HTTP ${driveRes.status}).` };
+  }
+
+  const data = (await driveRes.json()) as {
+    name?: string;
+    mimeType?: string;
+    driveId?: string;
+    capabilities?: { canAddChildren?: boolean; canEdit?: boolean };
+  };
+
+  if (data.mimeType !== "application/vnd.google-apps.folder") {
+    return { ok: false, code: "not_a_folder", message: "The ID provided is not a folder. Use the folder ID from a Google Drive folder URL, not a file ID." };
+  }
+
+  if (data.capabilities?.canAddChildren !== true) {
+    return { ok: false, code: "no_write_permission", message: "You can view this folder but cannot create files in it. Ask the owner to grant you Editor access." };
+  }
+
+  return {
+    ok: true,
+    name: data.name ?? folderId,
+    driveId: data.driveId ?? null,
+  };
+}
+
 router.post("/settings/google-drive", async (req, res) => {
-  const body = req.body as { folderId?: unknown; driveId?: unknown; folderName?: unknown };
+  const body = req.body as { folderId?: unknown };
   const folderId = typeof body.folderId === "string" ? body.folderId.trim() : "";
-  const driveId = typeof body.driveId === "string" ? body.driveId.trim() : null;
-  let folderName = typeof body.folderName === "string" ? body.folderName.trim() : null;
 
   if (!folderId) {
     res.status(400).json({ error: "folderId is required" });
     return;
   }
 
-  // ── Validate folder access via Google Drive API (when user is connected) ──
-  const accessToken: string | undefined = req.session.googleAccessToken;
-  if (accessToken) {
-    try {
-      const params = new URLSearchParams({
-        fields: "id,name,mimeType",
-        supportsAllDrives: "true",
-      });
-      if (driveId) {
-        params.set("driveId", driveId);
-        params.set("includeItemsFromAllDrives", "true");
-      }
-
-      const driveRes = await fetch(
-        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(folderId)}?${params.toString()}`,
-        { headers: { Authorization: `Bearer ${accessToken}` } },
-      );
-
-      if (!driveRes.ok) {
-        const status = driveRes.status;
-        const errMsg =
-          status === 404
-            ? "Folder not found. Double-check the folder ID from the Google Drive URL."
-            : status === 403
-            ? "You don't have permission to access this folder. Make sure you have at least Viewer access."
-            : `Could not verify folder access (HTTP ${status}). Check the ID and try again.`;
-        res.status(400).json({ error: errMsg });
-        return;
-      }
-
-      const data = (await driveRes.json()) as { name?: string; mimeType?: string };
-      if (data.mimeType && !data.mimeType.includes("folder")) {
-        res.status(400).json({
-          error:
-            "The ID provided is not a folder. Use the folder ID from a Google Drive folder URL, not a file ID.",
-        });
-        return;
-      }
-
-      // Auto-populate folderName from the Drive API when not provided by user
-      if (!folderName && data.name) folderName = data.name;
-    } catch (err) {
-      console.error("[drive-config] folder validation error:", err);
-      res.status(500).json({ error: "Could not reach Google Drive to verify the folder. Try again." });
+  let accessToken: string;
+  try {
+    accessToken = await getValidGoogleAccessToken(req.session);
+  } catch (err) {
+    if (err instanceof GoogleAuthError) {
+      res.status(401).json({ error: "Google account not connected. Connect your account first.", code: "expired_auth" });
       return;
     }
+    res.status(500).json({ error: "Authentication error" });
+    return;
   }
 
-  // ── Save to DB ─────────────────────────────────────────────────────────────
+  const validation = await validateFolder(folderId, accessToken);
+  if (!validation.ok) {
+    res.status(validation.code === "expired_auth" ? 401 : 400).json({ error: validation.message, code: validation.code });
+    return;
+  }
+
   try {
     const [existing] = await db.select().from(googleDriveConfigTable).limit(1);
-
     if (existing) {
       const [updated] = await db
         .update(googleDriveConfigTable)
-        .set({ folderId, driveId: driveId || null, folderName: folderName || null, updatedAt: new Date() })
+        .set({ folderId, driveId: validation.driveId, folderName: validation.name, updatedAt: new Date() })
         .where(eq(googleDriveConfigTable.id, existing.id))
         .returning();
       res.json(updated);
     } else {
       const [inserted] = await db
         .insert(googleDriveConfigTable)
-        .values({ folderId, driveId: driveId || null, folderName: folderName || null })
+        .values({ folderId, driveId: validation.driveId, folderName: validation.name })
         .returning();
       res.json(inserted);
     }
   } catch (err) {
     console.error("[drive-config] POST error:", err);
     res.status(500).json({ error: "Failed to save Drive configuration" });
+  }
+});
+
+router.post("/settings/google-drive/test", async (req, res) => {
+  let accessToken: string;
+  try {
+    accessToken = await getValidGoogleAccessToken(req.session);
+  } catch (err) {
+    if (err instanceof GoogleAuthError) {
+      res.status(401).json({ ok: false, code: "expired_auth", error: "Google account not connected." });
+      return;
+    }
+    res.status(500).json({ ok: false, error: "Authentication error" });
+    return;
+  }
+
+  try {
+    const [config] = await db.select().from(googleDriveConfigTable).limit(1);
+    if (!config?.folderId) {
+      res.status(400).json({ ok: false, error: "No folder configured." });
+      return;
+    }
+
+    const validation = await validateFolder(config.folderId, accessToken);
+    if (!validation.ok) {
+      res.json({ ok: false, code: validation.code, error: validation.message });
+      return;
+    }
+
+    if (validation.name !== config.folderName || validation.driveId !== config.driveId) {
+      await db.update(googleDriveConfigTable)
+        .set({ folderName: validation.name, driveId: validation.driveId, updatedAt: new Date() })
+        .where(eq(googleDriveConfigTable.id, config.id));
+    }
+
+    res.json({ ok: true, folderName: validation.name, driveId: validation.driveId });
+  } catch (err) {
+    console.error("[drive-config] test error:", err);
+    res.status(500).json({ ok: false, error: "Test failed" });
   }
 });
 

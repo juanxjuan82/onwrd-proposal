@@ -15,6 +15,7 @@ export const proposalsTable = pgTable("proposals", {
   syncStatus: text("sync_status"),
   lastSyncedAt: timestamp("last_synced_at"),
   dirtySince: timestamp("dirty_since"),
+  handoffStartedAt: timestamp("handoff_started_at"),
   tenderId: integer("tender_id"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),

@@ -18,7 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
-import { ExternalLink, Loader2, ArrowLeft, Trash2, CheckCircle2, Eye, Pencil, Sparkles, AlertCircle, ShieldCheck, RefreshCw, Clock, AlertTriangle } from "lucide-react";
+import { ExternalLink, Loader2, ArrowLeft, Trash2, CheckCircle2, Eye, Pencil, Sparkles, AlertCircle, ShieldCheck, Clock, AlertTriangle, Share2, RotateCcw } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
@@ -489,21 +489,25 @@ export default function ProposalDetail() {
     });
   };
 
-  const handleExport = () => {
+  const handleHandoff = () => {
     exportToDocs.mutate({ id }, {
       onSuccess: (data) => {
         queryClient.invalidateQueries({ queryKey: getGetProposalQueryKey(id) });
         queryClient.invalidateQueries({ queryKey: getListProposalsQueryKey() });
-        const isUpdate = (data as { isUpdate?: boolean }).isUpdate;
+        const d = data as { docUrl?: string; alreadyComplete?: boolean };
+        if (d.alreadyComplete && d.docUrl) {
+          window.open(d.docUrl, "_blank");
+          return;
+        }
         toast({
-          title: isUpdate ? "Document synced" : "Exported successfully",
+          title: "Shared for team review",
           description: (
             <div className="flex flex-col gap-2 mt-2">
-              <p>{isUpdate ? "Google Doc updated with the latest content." : "Document created in Google Docs."}</p>
+              <p>Google Doc created in your configured Drive folder.</p>
               <Button variant="outline" size="sm" asChild className="w-fit">
-                <a href={data.docUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2">
+                <a href={d.docUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2">
                   <ExternalLink className="w-4 h-4" />
-                  Open Document
+                  Open Google Doc
                 </a>
               </Button>
             </div>
@@ -512,17 +516,18 @@ export default function ProposalDetail() {
         });
       },
       onError: (error) => {
+        queryClient.invalidateQueries({ queryKey: getGetProposalQueryKey(id) });
         const status = (error as { status?: number }).status;
         const title =
-          status === 409 ? "Export already in progress" :
+          status === 409 ? "Handoff in progress" :
           status === 400 ? "Configuration required" :
           status === 401 ? "Google account disconnected" :
-          "Export failed";
+          "Share failed";
         const description =
-          status === 409 ? "Another export is already running for this proposal. Wait and try again." :
-          status === 400 ? (error.error || "No Google Drive folder configured. Set a destination in Settings → Google Docs.") :
+          status === 409 ? "A handoff is already running for this proposal. Try again in a moment." :
+          status === 400 ? (error.error || "No Google Drive folder configured. Set a destination in Settings first.") :
           status === 401 ? "Your Google account is not connected. Reconnect it in Settings → Google Docs." :
-          error.error || "Could not export to Google Docs. Make sure your Google account is connected in Settings.";
+          error.error || "Could not share to Google Docs. Make sure your Google account is connected in Settings.";
         toast({ title, description, variant: "destructive" });
       }
     });
@@ -791,68 +796,86 @@ export default function ProposalDetail() {
 
           {activeTab === "content" && (
             <div className="pt-4 space-y-3">
-              {/* ── Pre-export destination panel (before first export) ────────── */}
-              {!proposal.googleFileId && (
-                <div className="flex flex-wrap items-center gap-3 text-sm bg-card border rounded-lg px-4 py-3">
-                  {driveConfig?.folderId ? (
-                    <>
+              {/* ── Google Doc status panel ─────────────────────────────────── */}
+              {(() => {
+                const isComplete = proposal.syncStatus === "handoff_complete";
+                const isPending = proposal.syncStatus === "pending_first_write";
+                const isInProgress = proposal.syncStatus === "handoff_in_progress";
+                const isLegacy = !!proposal.googleFileId && !isComplete && !isPending && !isInProgress;
+
+                if (isComplete) {
+                  return (
+                    <div className="flex flex-wrap items-center gap-3 text-sm bg-card border rounded-lg px-4 py-3">
                       <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" />
                       <span className="text-muted-foreground">
-                        Destination:{" "}
-                        <span className="text-foreground font-medium">
-                          {driveConfig.folderName ?? driveConfig.folderId}
-                        </span>
+                        Shared for team review
+                        {proposal.lastSyncedAt && (
+                          <> — <span className="text-foreground">{new Date(proposal.lastSyncedAt).toLocaleString()}</span></>
+                        )}
                       </span>
-                    </>
-                  ) : (
-                    <>
+                    </div>
+                  );
+                }
+                if (isPending) {
+                  return (
+                    <div className="flex flex-wrap items-center gap-3 text-sm bg-card border border-orange-900/40 rounded-lg px-4 py-3">
                       <AlertTriangle className="w-4 h-4 text-orange-400 shrink-0" />
-                      <span className="text-orange-400 font-medium">No destination folder configured</span>
-                    </>
-                  )}
-                  <a
-                    href="/settings-google"
-                    className="ml-auto text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
-                  >
-                    Change in Settings
-                  </a>
-                </div>
-              )}
-
-              {/* ── Post-export sync status panel ────────────────────────────── */}
-              {proposal.googleFileId && (
-                <div className="flex flex-wrap items-center gap-3 text-sm bg-card border rounded-lg px-4 py-3">
-                  {proposal.syncStatus === "error" && (
-                    <>
-                      <AlertTriangle className="w-4 h-4 text-destructive shrink-0" />
-                      <span className="text-destructive font-medium">Last sync failed — try again.</span>
-                    </>
-                  )}
-                  {proposal.syncStatus === "syncing" && (
-                    <>
+                      <span className="text-orange-400 font-medium">First write failed — document created but content not yet written.</span>
+                    </div>
+                  );
+                }
+                if (isInProgress) {
+                  return (
+                    <div className="flex flex-wrap items-center gap-3 text-sm bg-card border rounded-lg px-4 py-3">
                       <Loader2 className="w-4 h-4 animate-spin text-muted-foreground shrink-0" />
-                      <span className="text-muted-foreground">Syncing to Google Docs…</span>
-                    </>
-                  )}
-                  {(proposal.syncStatus === "synced" || proposal.syncStatus == null) && proposal.lastSyncedAt && (
-                    <>
-                      <Clock className="w-4 h-4 text-muted-foreground shrink-0" />
-                      <span className="text-muted-foreground">
-                        Last synced {new Date(proposal.lastSyncedAt).toLocaleString()}
-                      </span>
-                    </>
-                  )}
-                  {!proposal.syncStatus && !proposal.lastSyncedAt && (
-                    <span className="text-muted-foreground">Linked to Google Docs</span>
-                  )}
-                  {proposal.dirtySince && (
-                    <span className="ml-auto inline-flex items-center gap-1 rounded-full bg-orange-900/20 text-orange-400 border border-orange-900 px-2.5 py-0.5 text-xs font-medium">
-                      <AlertCircle className="w-3 h-3" />
-                      Changes not synced
-                    </span>
-                  )}
-                </div>
-              )}
+                      <span className="text-muted-foreground">Sharing…</span>
+                    </div>
+                  );
+                }
+                if (isLegacy) {
+                  return (
+                    <div className="flex flex-wrap items-center gap-3 text-sm bg-card border rounded-lg px-4 py-3">
+                      <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" />
+                      <span className="text-muted-foreground">Linked to Google Docs</span>
+                      {proposal.lastSyncedAt && (
+                        <>
+                          <Clock className="w-4 h-4 text-muted-foreground shrink-0" />
+                          <span className="text-muted-foreground">
+                            Shared for team review — {new Date(proposal.lastSyncedAt).toLocaleString()}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  );
+                }
+                // No doc yet — show destination status
+                return (
+                  <div className="flex flex-wrap items-center gap-3 text-sm bg-card border rounded-lg px-4 py-3">
+                    {driveConfig?.folderId ? (
+                      <>
+                        <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" />
+                        <span className="text-muted-foreground">
+                          Destination:{" "}
+                          <span className="text-foreground font-medium">
+                            {driveConfig.folderName ?? driveConfig.folderId}
+                          </span>
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <AlertTriangle className="w-4 h-4 text-orange-400 shrink-0" />
+                        <span className="text-orange-400 font-medium">No destination folder configured</span>
+                      </>
+                    )}
+                    <a
+                      href="/settings"
+                      className="ml-auto text-xs text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                    >
+                      Change in Settings
+                    </a>
+                  </div>
+                );
+              })()}
 
               <div className="flex justify-end gap-4">
                 <Button
@@ -864,36 +887,61 @@ export default function ProposalDetail() {
                   {updateProposal.isPending && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
                   Save Changes
                 </Button>
-                {proposal.googleDocUrl || proposal.googleFileId ? (
+
+                {/* Open Google Doc — completed or legacy (direct URL, no API call) */}
+                {(proposal.syncStatus === "handoff_complete" || (!!proposal.googleFileId && proposal.syncStatus !== "pending_first_write" && proposal.syncStatus !== "handoff_in_progress")) && (
                   <Button
                     type="button"
-                    disabled={updateProposal.isPending || exportToDocs.isPending}
-                    onClick={handleExport}
                     variant="outline"
-                    data-testid="button-sync"
+                    asChild
+                    data-testid="button-open-doc"
+                  >
+                    <a
+                      href={proposal.googleDocUrl ?? `https://docs.google.com/document/d/${proposal.googleFileId}/edit`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <ExternalLink className="w-4 h-4 mr-2" />
+                      Open Google Doc
+                    </a>
+                  </Button>
+                )}
+
+                {/* Retry — only when pending_first_write */}
+                {proposal.syncStatus === "pending_first_write" && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleHandoff}
+                    disabled={exportToDocs.isPending}
+                    data-testid="button-retry"
+                    className="border-orange-700 text-orange-400 hover:bg-orange-900/20"
                   >
                     {exportToDocs.isPending ? (
                       <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                     ) : (
-                      <RefreshCw className="w-4 h-4 mr-2" />
+                      <RotateCcw className="w-4 h-4 mr-2" />
                     )}
-                    Sync to Google Docs
+                    Retry Share
                   </Button>
-                ) : (
+                )}
+
+                {/* Share for Team Review — only when no doc yet */}
+                {!proposal.googleFileId && proposal.syncStatus !== "handoff_in_progress" && (
                   <Button
                     type="button"
                     disabled={updateProposal.isPending || exportToDocs.isPending || !driveConfig?.folderId}
-                    onClick={handleExport}
+                    onClick={handleHandoff}
                     className="bg-[#0000FF] hover:bg-[#0000FF] text-white border border-[#0000FF] disabled:opacity-50"
-                    data-testid="button-export"
-                    title={!driveConfig?.folderId ? "Configure a destination folder in Settings → Google Docs first" : undefined}
+                    data-testid="button-share"
+                    title={!driveConfig?.folderId ? "Configure a destination folder in Settings first" : undefined}
                   >
                     {exportToDocs.isPending ? (
                       <Loader2 className="w-4 h-4 mr-2 animate-spin" />
                     ) : (
-                      <CheckCircle2 className="w-4 h-4 mr-2" />
+                      <Share2 className="w-4 h-4 mr-2" />
                     )}
-                    Export to Google Docs
+                    Share for Team Review
                   </Button>
                 )}
               </div>

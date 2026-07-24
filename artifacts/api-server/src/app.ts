@@ -2,6 +2,8 @@ import express, { type Express } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
 import session from "express-session";
+import connectPgSimple from "connect-pg-simple";
+import { pool } from "@workspace/db";
 import router from "./routes";
 import { logger } from "./lib/logger";
 
@@ -11,8 +13,30 @@ declare module "express-session" {
     googleRefreshToken?: string;
     googleTokenExpiry?: number;
     googleUserEmail?: string;
+    googleOAuthState?: string;
+    googleOAuthReturnTo?: string;
   }
 }
+
+const isProd = process.env.NODE_ENV === "production";
+
+const sessionSecret = process.env.SESSION_SECRET;
+if (!sessionSecret) {
+  if (isProd) {
+    throw new Error("SESSION_SECRET environment variable is required in production");
+  } else {
+    logger.warn("SESSION_SECRET is not set — using insecure fallback (development only)");
+  }
+}
+
+// Add handoff_started_at column if it doesn't exist (idempotent startup migration)
+pool.query(
+  `ALTER TABLE proposals ADD COLUMN IF NOT EXISTS handoff_started_at TIMESTAMP`,
+).catch((err: unknown) => {
+  logger.error({ err }, "Failed to apply handoff_started_at migration");
+});
+
+const PgStore = connectPgSimple(session);
 
 const app: Express = express();
 
@@ -43,13 +67,17 @@ app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 app.use(
   session({
-    secret: process.env.SESSION_SECRET ?? "fallback-dev-secret",
+    store: new PgStore({
+      pool,
+      createTableIfMissing: true,
+    }),
+    secret: sessionSecret ?? "fallback-dev-secret-do-not-use-in-prod",
     resave: false,
     saveUninitialized: false,
     cookie: {
       httpOnly: true,
       sameSite: "lax",
-      secure: false,
+      secure: isProd,
       maxAge: 7 * 24 * 60 * 60 * 1000,
     },
   }),

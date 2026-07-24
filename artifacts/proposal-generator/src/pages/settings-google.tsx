@@ -1,9 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { GoogleConnect } from "@/components/google-connect";
-import { Settings, FolderOpen, Info, Save, Trash2, Loader2 } from "lucide-react";
+import { Settings, FolderOpen, Info, Loader2, FolderCheck, AlertTriangle, RefreshCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 
 interface DriveConfig {
@@ -12,31 +10,57 @@ interface DriveConfig {
   folderName: string | null;
 }
 
+interface GoogleStatus {
+  connected: boolean;
+  email: string | null;
+}
+
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+declare global {
+  interface Window {
+    gapi: {
+      load: (lib: string, cb: () => void) => void;
+    };
+    google: {
+      picker: {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        PickerBuilder: new () => any;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        DocsView: new (viewId?: unknown) => any;
+        ViewId: { FOLDERS: unknown };
+        Action: { PICKED: string; CANCEL: string };
+      };
+    };
+  }
+}
+
+interface PickerData {
+  action: string;
+  docs?: { id: string; name: string }[];
+}
 
 export default function SettingsGoogle() {
   const { toast } = useToast();
-
   const [driveConfig, setDriveConfig] = useState<DriveConfig | null>(null);
-  const [folderId, setFolderId] = useState("");
-  const [folderName, setFolderName] = useState("");
-  const [driveId, setDriveId] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [clearing, setClearing] = useState(false);
+  const [googleStatus, setGoogleStatus] = useState<GoogleStatus | null>(null);
   const [loadingConfig, setLoadingConfig] = useState(true);
+  const [pickerLoading, setPickerLoading] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const fetchConfig = async () => {
     try {
-      const res = await fetch(`${BASE}/api/settings/google-drive`);
-      if (res.ok) {
-        const data = (await res.json()) as DriveConfig;
-        setDriveConfig(data);
-        setFolderId(data.folderId ?? "");
-        setFolderName(data.folderName ?? "");
-        setDriveId(data.driveId ?? "");
+      const [configRes, statusRes] = await Promise.all([
+        fetch(`${BASE}/api/settings/google-drive`),
+        fetch(`${BASE}/api/auth/google/status`),
+      ]);
+      if (configRes.ok) setDriveConfig((await configRes.json()) as DriveConfig);
+      if (statusRes.ok) {
+        const s = (await statusRes.json()) as GoogleStatus;
+        setGoogleStatus(s);
       }
-    } catch {
-      // ignore
     } finally {
       setLoadingConfig(false);
     }
@@ -46,35 +70,116 @@ export default function SettingsGoogle() {
     void fetchConfig();
   }, []);
 
-  const handleSave = async () => {
-    if (!folderId.trim()) {
-      toast({ title: "Folder ID required", description: "Paste the folder ID from your Google Drive folder URL.", variant: "destructive" });
-      return;
-    }
+  // Load the Google API loader script once
+  useEffect(() => {
+    if (document.getElementById("gapi-script")) return;
+    const script = document.createElement("script");
+    script.id = "gapi-script";
+    script.src = "https://apis.google.com/js/api.js";
+    script.async = true;
+    document.body.appendChild(script);
+  }, []);
+
+  const handleFolderSelected = useCallback(async (folderId: string) => {
     setSaving(true);
     try {
       const res = await fetch(`${BASE}/api/settings/google-drive`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          folderId: folderId.trim(),
-          folderName: folderName.trim() || undefined,
-          driveId: driveId.trim() || undefined,
-        }),
+        body: JSON.stringify({ folderId }),
       });
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({})) as { error?: string };
-        throw new Error(errData.error || "Save failed");
+        const err = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
+        throw new Error(err.error ?? "Failed to save folder");
       }
       const data = (await res.json()) as DriveConfig;
       setDriveConfig(data);
-      setFolderName(data.folderName ?? folderName);
-      toast({ title: "Drive folder saved", description: "Exports will be placed in this folder." });
+      toast({ title: "Folder saved", description: `Now exporting to "${data.folderName ?? folderId}"` });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Could not save the Drive configuration.";
-      toast({ title: "Save failed", description: msg, variant: "destructive" });
+      toast({ title: "Could not save folder", description: (err as Error).message, variant: "destructive" });
     } finally {
       setSaving(false);
+    }
+  }, [toast]);
+
+  const openPicker = useCallback(async () => {
+    setPickerLoading(true);
+    try {
+      // Fetch the access token from the backend session
+      const tokenRes = await fetch(`${BASE}/api/auth/google/picker-token`);
+      if (!tokenRes.ok) {
+        const err = (await tokenRes.json().catch(() => ({}))) as { error?: string };
+        toast({ title: "Cannot open folder picker", description: err.error ?? "Connect your Google account first.", variant: "destructive" });
+        return;
+      }
+      const { accessToken } = (await tokenRes.json()) as { accessToken: string };
+
+      const pickerApiKey = import.meta.env.VITE_GOOGLE_PICKER_API_KEY as string | undefined;
+      const appId = import.meta.env.VITE_GOOGLE_CLOUD_PROJECT_NUMBER as string | undefined;
+
+      if (!pickerApiKey || !appId) {
+        toast({ title: "Picker not configured", description: "VITE_GOOGLE_PICKER_API_KEY and VITE_GOOGLE_CLOUD_PROJECT_NUMBER must be set.", variant: "destructive" });
+        return;
+      }
+
+      if (!window.gapi) {
+        toast({ title: "Google API not loaded", description: "Refresh the page and try again.", variant: "destructive" });
+        return;
+      }
+
+      window.gapi.load("picker", () => {
+        const google = window.google;
+
+        const myDriveView = new google.picker.DocsView(google.picker.ViewId.FOLDERS)
+          .setIncludeFolders(true)
+          .setSelectFolderEnabled(true)
+          .setMimeTypes("application/vnd.google-apps.folder");
+
+        const sharedDriveView = new google.picker.DocsView()
+          .setEnableTeamDrives(true)
+          .setIncludeFolders(true)
+          .setSelectFolderEnabled(true)
+          .setMimeTypes("application/vnd.google-apps.folder");
+
+        const picker = new google.picker.PickerBuilder()
+          .addView(myDriveView)
+          .addView(sharedDriveView)
+          .setOAuthToken(accessToken)
+          .setDeveloperKey(pickerApiKey)
+          .setAppId(appId)
+          .setCallback((data: PickerData) => {
+            if (data.action === google.picker.Action.PICKED && data.docs?.[0]) {
+              void handleFolderSelected(data.docs[0].id);
+            }
+          })
+          .build();
+
+        picker.setVisible(true);
+        setPickerLoading(false);
+      });
+    } catch {
+      setPickerLoading(false);
+      toast({ title: "Could not open folder picker", description: "An unexpected error occurred.", variant: "destructive" });
+    }
+  }, [handleFolderSelected, toast]);
+
+  const handleTest = async () => {
+    setTesting(true);
+    try {
+      const res = await fetch(`${BASE}/api/settings/google-drive/test`, { method: "POST" });
+      const data = (await res.json()) as { ok: boolean; error?: string; folderName?: string };
+      if (data.ok) {
+        if (data.folderName) {
+          setDriveConfig((prev) => prev ? { ...prev, folderName: data.folderName! } : prev);
+        }
+        toast({ title: "Connection verified", description: `Folder "${data.folderName ?? ""}" is accessible and writable.` });
+      } else {
+        toast({ title: "Test failed", description: data.error ?? "Could not verify folder access.", variant: "destructive" });
+      }
+    } catch {
+      toast({ title: "Test failed", description: "Could not reach the server.", variant: "destructive" });
+    } finally {
+      setTesting(false);
     }
   };
 
@@ -84,11 +189,9 @@ export default function SettingsGoogle() {
       const res = await fetch(`${BASE}/api/settings/google-drive`, { method: "DELETE" });
       if (!res.ok) throw new Error("Clear failed");
       setDriveConfig({ folderId: null, driveId: null, folderName: null });
-      setFolderId("");
-      setFolderName("");
-      toast({ title: "Drive folder cleared", description: "Exports will be saved to your Drive root." });
+      toast({ title: "Folder cleared", description: "No destination folder is configured." });
     } catch {
-      toast({ title: "Clear failed", description: "Could not clear the Drive configuration.", variant: "destructive" });
+      toast({ title: "Clear failed", description: "Could not clear the folder configuration.", variant: "destructive" });
     } finally {
       setClearing(false);
     }
@@ -110,10 +213,14 @@ export default function SettingsGoogle() {
             </div>
             <h2 className="text-lg font-semibold">Google Account</h2>
           </div>
-
           <div className="p-5 rounded-lg border bg-card">
+            {googleStatus?.connected && googleStatus.email && (
+              <p className="text-sm text-muted-foreground mb-3">
+                Connected as <span className="text-foreground font-medium">{googleStatus.email}</span>
+              </p>
+            )}
             <p className="text-sm text-muted-foreground mb-4">
-              Connect your Google account to export proposals to Google Docs. Exports are placed in your Drive with the permissions of the destination folder — no public link sharing.
+              Connect your Google account to share proposals to Google Docs. Documents are created with the permissions of the destination folder — no public link sharing.
             </p>
             <GoogleConnect />
           </div>
@@ -130,96 +237,94 @@ export default function SettingsGoogle() {
 
           <div className="p-5 rounded-lg border bg-card space-y-4">
             <p className="text-sm text-muted-foreground">
-              All exported proposals are placed in this Google Drive folder. Leave blank to save to your Drive root.
+              All proposals shared for team review are placed in this Google Drive folder. A folder must be configured before the first handoff.
             </p>
 
             {loadingConfig ? (
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Loader2 className="w-4 h-4 animate-spin" /> Loading…
               </div>
+            ) : driveConfig?.folderId ? (
+              <div className="space-y-3">
+                <div className="flex items-center gap-3 p-3 rounded-lg bg-muted/40 border">
+                  <FolderCheck className="w-4 h-4 text-green-400 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-foreground truncate">
+                      {driveConfig.folderName ?? driveConfig.folderId}
+                    </p>
+                    <p className="text-xs text-muted-foreground font-mono truncate">{driveConfig.folderId}</p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void openPicker()}
+                    disabled={pickerLoading || saving || !googleStatus?.connected}
+                    title={!googleStatus?.connected ? "Connect your Google account first" : undefined}
+                  >
+                    {pickerLoading || saving ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <FolderOpen className="w-4 h-4 mr-1.5" />}
+                    Change Folder
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void handleTest()}
+                    disabled={testing}
+                  >
+                    {testing ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-1.5" />}
+                    Test Connection
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="text-muted-foreground"
+                    onClick={() => void handleClear()}
+                    disabled={clearing}
+                  >
+                    {clearing ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <X className="w-4 h-4 mr-1.5" />}
+                    Clear Folder
+                  </Button>
+                </div>
+              </div>
             ) : (
               <div className="space-y-3">
-                {driveConfig?.folderId && (
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground p-2 rounded bg-muted/50">
-                    <span className="font-medium text-foreground">Current:</span>
-                    <code className="font-mono truncate max-w-xs">{driveConfig.folderId}</code>
-                    {driveConfig.folderName && <span className="text-muted-foreground shrink-0">({driveConfig.folderName})</span>}
+                {!googleStatus?.connected && (
+                  <div className="flex items-center gap-2 p-3 rounded-lg bg-orange-900/10 border border-orange-900/30 text-sm text-orange-400">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    Connect your Google account above before choosing a folder.
                   </div>
                 )}
-
-                <div className="space-y-1.5">
-                  <Label htmlFor="folder-id">Folder ID</Label>
-                  <Input
-                    id="folder-id"
-                    value={folderId}
-                    onChange={(e) => setFolderId(e.target.value)}
-                    placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
-                    className="font-mono text-xs"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Copy the ID from your Google Drive folder URL:{" "}
-                    <code className="bg-muted px-1 rounded">drive.google.com/drive/folders/&lt;FOLDER_ID&gt;</code>
-                  </p>
-                </div>
-
-                <div className="space-y-1.5">
-                  <Label htmlFor="folder-name">Display name <span className="text-muted-foreground font-normal">(optional — auto-filled on save)</span></Label>
-                  <Input
-                    id="folder-name"
-                    value={folderName}
-                    onChange={(e) => setFolderName(e.target.value)}
-                    placeholder="e.g. ONWRD Proposals 2026"
-                  />
-                </div>
-
-                <div className="space-y-1.5">
-                  <Label htmlFor="drive-id">Shared Drive ID <span className="text-muted-foreground font-normal">(optional — only needed for Shared Drives)</span></Label>
-                  <Input
-                    id="drive-id"
-                    value={driveId}
-                    onChange={(e) => setDriveId(e.target.value)}
-                    placeholder="Leave blank for personal Drive"
-                    className="font-mono text-xs"
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    For a Shared Drive folder, copy the Drive ID from{" "}
-                    <code className="bg-muted px-1 rounded">drive.google.com/drive/u/0/folders/&lt;FOLDER_ID&gt;</code>{" "}
-                    — it is the ID shown in the URL when you navigate to the Shared Drive root, not the folder.
-                  </p>
-                </div>
-
-                <div className="flex gap-2 pt-1">
-                  <Button size="sm" onClick={handleSave} disabled={saving || clearing}>
-                    {saving ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <Save className="w-4 h-4 mr-1.5" />}
-                    Save Folder
-                  </Button>
-                  {driveConfig?.folderId && (
-                    <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={handleClear} disabled={saving || clearing}>
-                      {clearing ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <Trash2 className="w-4 h-4 mr-1.5" />}
-                      Clear
-                    </Button>
-                  )}
-                </div>
+                <Button
+                  size="sm"
+                  onClick={() => void openPicker()}
+                  disabled={pickerLoading || !googleStatus?.connected}
+                  title={!googleStatus?.connected ? "Connect your Google account first" : undefined}
+                >
+                  {pickerLoading ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <FolderOpen className="w-4 h-4 mr-1.5" />}
+                  Choose Google Drive Folder
+                </Button>
               </div>
             )}
           </div>
         </section>
 
-        {/* Export Behaviour */}
+        {/* Handoff Model */}
         <section className="space-y-4">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-md bg-primary/10 flex items-center justify-center">
               <Info className="w-4 h-4 text-primary" />
             </div>
-            <h2 className="text-lg font-semibold">Export Behaviour</h2>
+            <h2 className="text-lg font-semibold">How Sharing Works</h2>
           </div>
 
           <div className="p-5 rounded-lg border bg-card space-y-4 text-sm">
             <div className="flex gap-3">
               <div className="w-2 h-2 rounded-full bg-primary mt-1.5 flex-shrink-0" />
               <div>
-                <p className="font-medium mb-0.5">One canonical document per proposal</p>
-                <p className="text-muted-foreground">The first export creates the Google Doc. Subsequent exports sync the latest content back into the same document — no duplicates.</p>
+                <p className="font-medium mb-0.5">One document per proposal</p>
+                <p className="text-muted-foreground">The first "Share for Team Review" creates the Google Doc and writes the proposal content. That document is then canonical — subsequent requests open the same document without overwriting it.</p>
               </div>
             </div>
             <div className="flex gap-3">
@@ -232,15 +337,8 @@ export default function SettingsGoogle() {
             <div className="flex gap-3">
               <div className="w-2 h-2 rounded-full bg-primary mt-1.5 flex-shrink-0" />
               <div>
-                <p className="font-medium mb-0.5">Section-based export</p>
-                <p className="text-muted-foreground">When a proposal has been generated from an opportunity with individual sections, those sections become distinct chapters in the document.</p>
-              </div>
-            </div>
-            <div className="flex gap-3">
-              <div className="w-2 h-2 rounded-full bg-primary mt-1.5 flex-shrink-0" />
-              <div>
-                <p className="font-medium mb-0.5">Manual export only</p>
-                <p className="text-muted-foreground">Proposals are never exported automatically. Use the Export or Sync button on the proposal page when you're ready.</p>
+                <p className="font-medium mb-0.5">Folder required before first handoff</p>
+                <p className="text-muted-foreground">The Share action is disabled until a destination folder is configured here. Documents are never created in the Drive root.</p>
               </div>
             </div>
           </div>

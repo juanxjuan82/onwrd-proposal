@@ -70,53 +70,77 @@ async function getDocument(
   return response.json() as Promise<Record<string, unknown>>;
 }
 
-/**
- * Make an existing Google Doc viewable by anyone with the link.
- * Requires the drive.file scope already granted during OAuth.
- */
-export async function shareWithAnyone(
-  fileId: string,
-  accessToken?: string,
-): Promise<void> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
-
-  try {
-    const res = await fetch(
-      `https://www.googleapis.com/drive/v3/files/${fileId}/permissions`,
-      {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ role: "reader", type: "anyone" }),
-      },
-    );
-    if (!res.ok) {
-      const text = await res.text();
-      console.error(`shareWithAnyone failed (${res.status}): ${text}`);
-    }
-  } catch (err) {
-    console.error("shareWithAnyone error:", err);
-  }
+interface DriveFile {
+  id: string;
+  name: string;
+  webViewLink?: string;
+  parents?: string[];
+  driveId?: string;
 }
 
-export async function createGoogleDoc(
+/**
+ * Create a Google Doc directly inside a Drive folder.
+ * Uses Drive v3 files.create so the document lands in the folder atomically —
+ * no separate move step.  supportsAllDrives=true handles both personal Drive
+ * and Shared Drives without the caller needing to specify a driveId.
+ */
+export async function createGoogleDocInFolder(
   title: string,
-  accessToken?: string,
-): Promise<Document> {
-  const response = await docsRequest(
-    "/v1/documents",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title }),
+  folderId: string,
+  accessToken: string,
+): Promise<DriveFile> {
+  const url =
+    "https://www.googleapis.com/drive/v3/files" +
+    "?supportsAllDrives=true&fields=id,name,webViewLink,parents,driveId";
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
     },
-    accessToken,
-  );
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Failed to create Google Doc: ${response.status} ${errorText}`);
+    body: JSON.stringify({
+      name: title,
+      mimeType: "application/vnd.google-apps.document",
+      parents: [folderId],
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Failed to create Google Doc in folder: ${res.status} ${text}`);
   }
-  return response.json() as Promise<Document>;
+  return res.json() as Promise<DriveFile>;
+}
+
+/**
+ * Clear all content from a Google Doc and rewrite it with fresh content.
+ *
+ * GUARD: This helper is ONLY valid when the proposal was in
+ * `pending_first_write` status.  It must NEVER be called for:
+ *   - handoff_complete proposals
+ *   - synced / null-status legacy linked documents
+ *   - any other state
+ *
+ * The call-site in the export route enforces this guard.  The separate name
+ * makes accidental misuse obvious at the call site.
+ */
+export async function resetIncompleteDoc(
+  documentId: string,
+  content: string,
+  accessToken: string,
+): Promise<void> {
+  const doc = await getDocument(documentId, accessToken);
+  const bodyContent = ((doc.body as Record<string, unknown>).content as { endIndex?: number }[]) ?? [];
+  const lastEl = bodyContent[bodyContent.length - 1];
+  const endIndex = lastEl?.endIndex ?? 1;
+
+  if (endIndex > 2) {
+    await batchUpdate(documentId, [
+      { deleteContentRange: { range: { startIndex: 1, endIndex: endIndex - 1 } } },
+    ], accessToken);
+  }
+
+  await appendContentWithLogo(documentId, content, accessToken);
 }
 
 /** Parse a markdown table row into cell strings */
@@ -538,65 +562,6 @@ async function insertTextBlock(
   return startIndex + combined.length;
 }
 
-/**
- * Move a Google Doc into a Drive folder. If driveId is supplied the folder is
- * treated as a Shared Drive (supportsAllDrives=true).  Safe to call even when
- * the doc is already in the target folder — Drive silently ignores duplicate
- * parents.
- */
-export async function moveDocToFolder(
-  fileId: string,
-  folderId: string,
-  driveId?: string | null,
-  accessToken?: string,
-): Promise<void> {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
-
-  const params = new URLSearchParams({ addParents: folderId, fields: "id,parents" });
-  // Always include supportsAllDrives so the call works for both personal Drive
-  // and Shared Drives without requiring the caller to know the Drive type.
-  params.set("supportsAllDrives", "true");
-  if (driveId) {
-    params.set("driveId", driveId);
-    params.set("includeItemsFromAllDrives", "true");
-  }
-
-  const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}?${params.toString()}`,
-    { method: "PATCH", headers },
-  );
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(
-      `Failed to move document into the configured folder (HTTP ${res.status}). ` +
-      `Check that the folder ID is correct and you have Editor access. Details: ${text}`,
-    );
-  }
-}
-
-/**
- * Clear all content from an existing Google Doc and re-write it with new
- * content + logo.  Used for "Sync Changes" on an already-exported proposal.
- */
-export async function clearAndReplaceContent(
-  documentId: string,
-  content: string,
-  accessToken?: string,
-): Promise<void> {
-  const doc = await getDocument(documentId, accessToken);
-  const bodyContent = ((doc.body as Record<string, unknown>).content as { endIndex?: number }[]) ?? [];
-  const lastEl = bodyContent[bodyContent.length - 1];
-  const endIndex = lastEl?.endIndex ?? 1;
-
-  if (endIndex > 2) {
-    await batchUpdate(documentId, [
-      { deleteContentRange: { range: { startIndex: 1, endIndex: endIndex - 1 } } },
-    ], accessToken);
-  }
-
-  await appendContentWithLogo(documentId, content, accessToken);
-}
 
 export async function appendContentWithLogo(
   documentId: string,
