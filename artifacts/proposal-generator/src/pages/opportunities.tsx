@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { useLocation } from "wouter";
+import { useLocation, useSearch } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -765,7 +765,20 @@ export default function Opportunities() {
   const { data: opportunities, isLoading } = useOpportunities();
   const [filterTab, setFilterTab] = useState<FilterTab>("all");
   const [selected, setSelected] = useState<Opportunity | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
   const { runCrawl, crawlRunning } = useRunCrawl();
+  const search = useSearch();
+  const [, setLocation] = useLocation();
+  const queryClient = useQueryClient();
+
+  // Open Add Opportunity dialog when navigated here with ?add=1
+  useEffect(() => {
+    const params = new URLSearchParams(search);
+    if (params.get("add") === "1") {
+      setShowCreate(true);
+      setLocation("/opportunities", { replace: true });
+    }
+  }, [search, setLocation]);
 
   const all = opportunities ?? [];
 
@@ -869,6 +882,15 @@ export default function Opportunities() {
           onClose={() => setSelected(null)}
         />
       )}
+
+      <CreateDialog
+        open={showCreate}
+        onClose={() => setShowCreate(false)}
+        onCreate={(id) => {
+          queryClient.invalidateQueries({ queryKey: ["opportunities"] });
+          setLocation(`/opportunities/${id}`);
+        }}
+      />
     </div>
   );
 }

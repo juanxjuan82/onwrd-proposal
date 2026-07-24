@@ -196,7 +196,8 @@ export default function NewProposal() {
     if (m === "import") return "import";
     if (m === "blank")  return "blank";
     if (m === "manual") return "manual";
-    return "form";
+    if (m === "form")   return "form";
+    return "blank"; // plain /new → blank mode per spec
   });
   const [pasteText, setPasteText] = useState("");
   const [pasteFile, setPasteFile] = useState<File | null>(null);
