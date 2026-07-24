@@ -2,23 +2,16 @@ import { useState, useEffect, useRef } from "react";
 import { Link, useLocation } from "wouter";
 import {
   Plus, Target, LayoutDashboard, BookOpen, Settings,
-  HelpCircle, X, Upload, FileText, Pencil, Link2, ChevronDown,
+  Upload, FileText, Pencil, Link2, ChevronDown,
 } from "lucide-react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
 export function MainLayout({ children }: { children: React.ReactNode }) {
   const [location, navigate] = useLocation();
-  const [showHelp, setShowHelp] = useState<boolean>(() => {
-    try { return localStorage.getItem("onwrd_show_help") !== "false"; } catch { return true; }
-  });
   const [menuOpen, setMenuOpen] = useState(false);
   const [showIntakeModal, setShowIntakeModal] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    try { localStorage.setItem("onwrd_show_help", showHelp ? "true" : "false"); } catch { /* ignore */ }
-  }, [showHelp]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -133,11 +126,6 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
                 <Target className="w-5 h-5 flex-shrink-0" />
                 <span>Opportunities</span>
               </div>
-              {showHelp && (
-                <p className="mt-0.5 ml-8 text-[11px] font-normal leading-snug text-[#555] whitespace-normal">
-                  Score, enrich and decide — then pursue or pass.
-                </p>
-              )}
             </Link>
 
             <Link href="/" className={navClass(location === "/")}>
@@ -145,11 +133,6 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
                 <LayoutDashboard className="w-5 h-5 flex-shrink-0" />
                 <span>Proposals</span>
               </div>
-              {showHelp && (
-                <p className="mt-0.5 ml-8 text-[11px] font-normal leading-snug text-[#555] whitespace-normal">
-                  In progress, ready to share, and team review.
-                </p>
-              )}
             </Link>
 
             {/* WORKSPACE section */}
@@ -164,11 +147,6 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
                 <BookOpen className="w-5 h-5 flex-shrink-0" />
                 <span>Knowledge</span>
               </div>
-              {showHelp && (
-                <p className="mt-0.5 ml-8 text-[11px] font-normal leading-snug text-[#555] whitespace-normal">
-                  Company documents the AI uses to shape proposals.
-                </p>
-              )}
             </Link>
 
             <div>
@@ -177,11 +155,6 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
                   <Settings className="w-5 h-5 flex-shrink-0" />
                   <span>Settings</span>
                 </div>
-                {showHelp && (
-                  <p className="mt-0.5 ml-8 text-[11px] font-normal leading-snug text-[#555] whitespace-normal">
-                    Google Docs integration and crawler sources.
-                  </p>
-                )}
               </Link>
               {inSettings && (
                 <div className="mb-1">
@@ -202,25 +175,6 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
             </div>
           </nav>
 
-          {/* Help toggle */}
-          <div className="-mx-6 mt-4 pt-4 border-t border-[#1a1a1a]">
-            <button
-              onClick={() => setShowHelp(v => !v)}
-              className="flex items-center gap-2.5 w-full pl-4 pr-4 py-2.5 text-[#555] hover:text-white transition-colors text-[12px] font-medium"
-            >
-              {showHelp ? (
-                <>
-                  <X className="w-4 h-4 flex-shrink-0" />
-                  Hide hints
-                </>
-              ) : (
-                <>
-                  <HelpCircle className="w-4 h-4 flex-shrink-0" />
-                  Show hints
-                </>
-              )}
-            </button>
-          </div>
         </div>
       </aside>
 
