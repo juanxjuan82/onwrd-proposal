@@ -4,8 +4,9 @@ import {
   discoveredTendersTable,
   crawlerRunsTable,
   crawlerLockTable,
+  crawlBatchesTable,
 } from "@workspace/db";
-import { eq, sql } from "drizzle-orm";
+import { eq, sql, and, isNull, or } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { WorldBankAdapter } from "./world-bank.js";
 import { UNGMAdapter } from "./ungm.js";
@@ -15,9 +16,9 @@ import { BahamasGovAdapter } from "./bahamas-gov.js";
 import { CTOAdapter } from "./cto.js";
 import { CARICOMAdapter } from "./caricom.js";
 import { EUCaribbeanAdapter } from "./eu-caribbean.js";
-import { type TenderSourceAdapter, type TenderOpportunity } from "./base-adapter.js";
-import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
-import { evaluateCrawlerEligibility } from "../lib/crawler-eligibility.js";
+import { type TenderSourceAdapter } from "./base-adapter.js";
+import { reconcileDiscovery } from "../lib/discovery-reconciler.js";
+import { scoreTender } from "../lib/discovery-scoring.js";
 
 function getAdapter(adapterType: string): TenderSourceAdapter | null {
   switch (adapterType) {
@@ -33,17 +34,6 @@ function getAdapter(adapterType: string): TenderSourceAdapter | null {
   }
 }
 
-// ── Shared scoring result type ──────────────────────────────────────────────
-interface ScoringResult {
-  fitScore: number;
-  recommendation: string;
-  reasoning: string;
-  geographyScore: number;
-  geoRegion: string;
-  bahamasAdvantageScore: number;
-  confidence: string;
-}
-
 // ── DB-backed crawl lock (prevents overlap across restarts & instances) ───────
 const CRAWL_LOCK_KEY = "default";
 const LOCK_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours — 2× max expected crawl duration
@@ -54,8 +44,6 @@ export async function acquireCrawlLock(): Promise<boolean> {
   const now = new Date();
   const expiresAt = new Date(now.getTime() + LOCK_TTL_MS);
 
-  // Delete any expired lock first (atomic read-then-delete not needed; races
-  // are resolved by the ON CONFLICT DO NOTHING in the insert below)
   await db
     .delete(crawlerLockTable)
     .where(sql`${crawlerLockTable.lockKey} = ${CRAWL_LOCK_KEY} AND ${crawlerLockTable.expiresAt} < ${now}`);
@@ -85,462 +73,324 @@ export async function isCrawlRunning(): Promise<boolean> {
   return rows.length > 0;
 }
 
-// ── Geography scoring ───────────────────────────────────────────────────────
-function computeGeoScore(country?: string | null, contextText?: string): {
-  geographyScore: number;
-  geoRegion: string;
-} {
-  const text = [country ?? "", contextText ?? ""].join(" ").toLowerCase();
-
-  const bahamasSignals = [
-    "bahamas", "nassau", "freeport", "paradise island",
-    "new providence", "grand bahama", "andros", "exuma", "eleuthera",
-  ];
-  const caribbeanSignals = [
-    "caribbean", "caricom", "oecs", "west indies",
-    "jamaica", "barbados", "trinidad", "tobago", "guyana", "belize",
-    "suriname", "haiti", "dominican republic", "antigua", "barbuda",
-    "st lucia", "st kitts", "nevis", "grenada", "dominica", "st vincent",
-    "grenadines", "montserrat", "anguilla", "cayman", "turks and caicos",
-    "aruba", "curacao", "sint maarten",
-  ];
-  const sidsSignals = [
-    "small island developing", "sids", "pacific island",
-    "maldives", "mauritius", "seychelles", "cape verde", "comoros",
-    "fiji", "vanuatu", "samoa", "tonga", "kiribati", "micronesia",
-    "atlantic caribbean",
-  ];
-  const latamSignals = [
-    "latin america", "central america", "south america",
-    "mexico", "colombia", "peru", "brazil", "ecuador", "bolivia",
-    "paraguay", "uruguay", "argentina", "chile", "venezuela",
-    "panama", "costa rica", "guatemala", "honduras", "el salvador",
-    "nicaragua", "cuba", "puerto rico",
-  ];
-
-  for (const s of bahamasSignals) {
-    if (text.includes(s)) return { geographyScore: 100, geoRegion: "bahamas" };
+// ── Rejection counts accumulator ─────────────────────────────────────────────
+function mergeRejectionCounts(
+  acc: Record<string, number>,
+  reasons: string[],
+): Record<string, number> {
+  const out = { ...acc };
+  for (const r of reasons) {
+    const key = r.slice(0, 80);
+    out[key] = (out[key] ?? 0) + 1;
   }
-  for (const s of caribbeanSignals) {
-    if (text.includes(s)) return { geographyScore: 75, geoRegion: "caribbean" };
-  }
-  for (const s of sidsSignals) {
-    if (text.includes(s)) return { geographyScore: 60, geoRegion: "sids" };
-  }
-  for (const s of latamSignals) {
-    if (text.includes(s)) return { geographyScore: 35, geoRegion: "latam" };
-  }
-  return { geographyScore: 20, geoRegion: "global" };
+  return out;
 }
 
-// ── Bahamas advantage score ─────────────────────────────────────────────────
-function computeBahamasAdvantage(geographyScore: number, rawSectorScore: number): number {
-  const geoFactor = geographyScore / 100;
-  const sectorFactor = Math.min(Math.max(rawSectorScore, 0), 100) / 100;
-  return Math.round(Math.max(0, Math.min(100, (geoFactor * 0.65 + sectorFactor * 0.35) * 100)));
+// ── Backfill / reconciliation of ALL unpromoted non-expired discoveries ───────
+// Examines every discovered_tender that has no linked canonical Opportunity
+// and is not expired. Rescores each and promotes it if it now qualifies.
+// Idempotent and safe under concurrent promotion attempts.
+export interface BackfillResult {
+  evaluated: number;
+  rescored: number;
+  promoted: number;
+  unchanged: number;
+  rejected: number;
+  rejectionCounts: Record<string, number>;
 }
 
-// ── Keyword-based scorer ─────────────────────────────────────────────────────
-function keywordScore(opp: TenderOpportunity): ScoringResult {
-  const text = [
-    opp.title, opp.description, opp.sector ?? "", opp.organization, opp.country ?? "",
-  ].join(" ").toLowerCase();
+export async function backfillPromotions(): Promise<BackfillResult> {
+  const now = new Date();
 
-  if (opp.deadline) {
-    const deadline = opp.deadline instanceof Date ? opp.deadline : new Date(opp.deadline);
-    if (deadline < new Date()) {
-      const { geographyScore, geoRegion } = computeGeoScore(opp.country, text);
-      return { fitScore: 0, recommendation: "SKIP", reasoning: "Deadline has passed — tender is expired.", geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
-    }
-  }
-
-  const marketingGate = [
-    "marketing", "communications", "branding", "brand",
-    "campaign", "public relations", "advertising", "media relations",
-    "digital marketing", "social media", "creative services",
-    "content strategy", "communications strategy", "communications plan",
-    "pr ", "rebranding", "destination marketing", "tourism marketing",
-    "awareness campaign", "visibility campaign", "community engagement",
-    "stakeholder communications", "digital communications",
-  ];
-  if (!marketingGate.some((kw) => text.includes(kw))) {
-    const { geographyScore, geoRegion } = computeGeoScore(opp.country, text);
-    return { fitScore: 0, recommendation: "SKIP", reasoning: "No marketing or communications terms — not a fit for ONWRD.", geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
-  }
-
-  const disqualifiers = [
-    "us citizen only", "u.s. citizen only",
-    "must be a resident of", "registered vendor in the state of",
-    "on-site weekly", "in-person attendance required at bi-weekly",
-    "must hold active secret clearance", "security clearance required",
-  ];
-  if (disqualifiers.some((kw) => text.includes(kw))) {
-    const { geographyScore, geoRegion } = computeGeoScore(opp.country, text);
-    return { fitScore: 0, recommendation: "SKIP", reasoning: "Hard disqualifier matched — eligibility restricted to local/US-only vendors.", geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
-  }
-
-  const { geographyScore, geoRegion } = computeGeoScore(
-    opp.country, [opp.title, opp.description, opp.sector ?? ""].join(" "),
-  );
-  const isLocalRegion = geographyScore >= 75;
-  if (!isLocalRegion) {
-    const remoteIndicators = [
-      "remote", "virtual delivery", "international bidders", "international firms",
-      "worldwide", "global firms", "open to all", "any country",
-    ];
-    const multilateralOrgs = [
-      "inter-american development bank", "idb", "world bank", "ibrd", "ifc",
-      "united nations", "undp", "unicef", "unfpa", "unwomen", "unep",
-      "european union", "eu ", "caribbean development bank", "cdb",
-      "caricom", "cto", "oecs",
-    ];
-    const hasRemote = remoteIndicators.some((kw) => text.includes(kw));
-    const isMultilateral = multilateralOrgs.some((kw) => text.includes(kw));
-    if (!hasRemote && !isMultilateral) {
-      return { fitScore: 0, recommendation: "SKIP", reasoning: "International RFP with no remote delivery or multilateral viability — delivery logistics not feasible.", geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
-    }
-  }
-
-  const geoComponent = geographyScore === 100 ? 35
-    : geographyScore >= 75 ? 28
-    : geographyScore >= 60 ? 20
-    : geographyScore >= 35 ? 15
-    : 10;
-
-  const eliteSignals = [
-    "marketing", "communications", "branding", "campaign",
-    "public relations", "media relations", "media campaign", "media strategy",
-    "communications campaign", "communications strategy",
-    "marketing campaign", "marketing strategy", "brand strategy", "brand identity",
-  ];
-  const highSignals = [
-    "communication strategy", "rebranding", "advertising", "pr campaign",
-    "creative services", "creative agency", "content strategy", "copywriting",
-    "editorial", "storytelling", "messaging", "narrative",
-    "tourism", "destination marketing", "destination branding",
-    "hospitality", "visitor experience", "travel promotion",
-    "social media", "digital marketing", "digital communications",
-    "digital campaign", "online presence", "website content", "web content",
-    "video production", "multimedia", "photography", "graphic design",
-    "public awareness", "awareness campaign", "community engagement",
-    "stakeholder engagement", "behavior change", "outreach", "sensitization",
-    "social mobilization", "advocacy", "knowledge dissemination", "visibility campaign",
-  ];
-  const mediumSignals = [
-    "consulting", "advisory", "strategic communications",
-    "communications plan", "engagement plan", "engagement strategy",
-    "market research", "visibility", "documentation", "knowledge management",
-  ];
-  const weakSignals = [
-    "capacity building", "training", "assessment", "evaluation",
-    "survey", "research", "monitoring", "reporting",
-  ];
-  const negativeSignals = [
-    "construction", "civil works", "road works", "road construction",
-    "bridge", "dam", "dredging", "excavation", "drilling",
-    "water supply", "sanitation", "sewage", "wastewater",
-    "electricity", "power plant", "energy infrastructure", "solar panel",
-    "medical equipment", "pharmaceutical", "drugs", "medicine", "health supplies",
-    "office supplies", "office furniture", "stationery", "vehicles", "fleet",
-    "food supply", "food procurement", "catering", "nutrition supplies",
-    "cleaning services", "security services", "guard services",
-    "it equipment", "hardware", "network equipment", "servers", "data center",
-    "software license", "laboratory equipment", "spare parts",
-    "financial audit", "external audit", "engineering consultancy",
-    "technical feasibility", "structural engineering", "geotechnical",
-  ];
-
-  let rawCap = 0;
-  const matchedTerms: string[] = [];
-  let hasHighSignal = false;
-
-  for (const kw of eliteSignals) {
-    if (text.includes(kw)) { rawCap += 8; matchedTerms.push(kw.trim()); hasHighSignal = true; }
-  }
-  for (const kw of highSignals) {
-    if (text.includes(kw)) { rawCap += 5; matchedTerms.push(kw.trim()); hasHighSignal = true; }
-  }
-  for (const kw of mediumSignals) {
-    if (text.includes(kw)) { rawCap += 3; matchedTerms.push(kw.trim()); }
-  }
-  if (hasHighSignal) {
-    for (const kw of weakSignals) { if (text.includes(kw)) rawCap += 2; }
-  }
-  for (const kw of negativeSignals) { if (text.includes(kw)) rawCap -= 6; }
-  const capComponent = Math.max(0, Math.min(30, rawCap));
-
-  const industryTiers: Array<{ terms: string[]; pts: number }> = [
-    { terms: ["financial services", "banking", "insurance", "fintech", "investment"], pts: 20 },
-    { terms: ["tourism", "hospitality", "hotel", "resort", "travel", "visitor economy", "destination"], pts: 20 },
-    { terms: ["ministry", "government", "public sector", "national authority", "state agency"], pts: 18 },
-    { terms: ["ngo", "non-governmental", "nonprofit", "non-profit", "civil society", "foundation"], pts: 16 },
-    { terms: ["multilateral", "idb", "world bank", "undp", "unicef", "cdb", "development bank"], pts: 16 },
-    { terms: ["health", "education", "environment", "climate", "energy transition"], pts: 10 },
-  ];
-  let industryComponent = 5;
-  for (const tier of industryTiers) {
-    if (tier.terms.some((kw) => text.includes(kw))) { industryComponent = tier.pts; break; }
-  }
-
-  const scaleIndicators = ["timeline", "milestones", "deliverables", "budget", "proposal template", "scope of work", "terms of reference", "rfp", "request for proposal"];
-  const scaleMatches = scaleIndicators.filter((kw) => text.includes(kw)).length;
-  const scaleComponent = Math.min(15, Math.round((scaleMatches / scaleIndicators.length) * 15));
-
-  const baseScore = geoComponent + capComponent + industryComponent + scaleComponent;
-
-  const urgencyBoost = (() => {
-    if (!opp.deadline) return 0;
-    const daysLeft = (opp.deadline.getTime() - Date.now()) / (1000 * 60 * 60 * 24);
-    return daysLeft <= 14 ? 5 : 0;
-  })();
-
-  const fitScore = Math.min(100, baseScore + urgencyBoost);
-  const bahamasAdvantageScore = computeBahamasAdvantage(geographyScore, Math.round((capComponent / 30) * 100));
-  const recommendation = fitScore >= 60 ? "PURSUE" : fitScore >= 40 ? "CONSIDER" : "SKIP";
-
-  const hasGeoSignal = geographyScore >= 75;
-  const hasSectorSignal = capComponent >= 10;
-  const confidence = hasGeoSignal && hasSectorSignal ? "HIGH"
-    : hasGeoSignal || hasSectorSignal ? "MEDIUM"
-    : "LOW";
-
-  const geoLabel: Record<string, string> = {
-    bahamas: "🇧🇸 Bahamas", caribbean: "🌴 Caribbean",
-    sids: "🏝️ SIDS", latam: "🌎 Latin America", global: "🌐 Global",
-  };
-  const topMatches = [...new Set(matchedTerms)].slice(0, 4);
-  const reasoning = `${geoLabel[geoRegion] ?? geoRegion} (geo ${geoComponent}/35). Capabilities ${capComponent}/30. Industry ${industryComponent}/20. Scale ${scaleComponent}/15.${urgencyBoost ? ` ⏰ Urgency +${urgencyBoost}.` : ""}${topMatches.length ? ` Keywords: ${topMatches.join(", ")}.` : ""} (Keyword engine)`;
-
-  return { fitScore, recommendation, reasoning, geographyScore, geoRegion, bahamasAdvantageScore, confidence };
-}
-
-// ── Boilerplate detection ────────────────────────────────────────────────────
-// Synthetic descriptions generated by adapters (not real opportunity content)
-// should not trigger AI scoring — the AI learns nothing useful from them.
-function isBoilerplateDescription(desc: string): boolean {
-  const t = desc.trim();
-  // Too short to contain meaningful scope information
-  if (t.length < 120) return true;
-  // Common adapter-generated stub patterns
-  const stubPatterns = [
-    /^(procurement notice|consulting services?|individual consultant|expression of interest|request for (proposals?|quotations?)|rfp|notice of (procurement|intent))\s*[:.]?\s*$/i,
-    /^\[?(no description available|n\/a|tbd|to be determined|see attached|see document)\]?\.?$/i,
-    /^(opportunity|tender|contract)\s+(ref(erence)?|no\.?|number|id)[:\s]\s*[\w-]+\s*$/i,
-  ];
-  return stubPatterns.some((p) => p.test(t));
-}
-
-// ── Backfill promotions for existing eligible discoveries ────────────────────
-// Finds all discovered_tenders that were never promoted (opportunityId IS NULL)
-// and have a CONSIDER or PURSUE recommendation, then re-evaluates eligibility
-// against the current rules and promotes any that now pass.
-// Safe to run multiple times — promotion is idempotent (opportunityId guard inside the service).
-export async function backfillPromotions(): Promise<{ evaluated: number; promoted: number; skipped: number }> {
+  // ALL unpromoted, non-expired discoveries — not pre-filtered by recommendation
   const items = await db
     .select()
     .from(discoveredTendersTable)
     .where(
-      sql`${discoveredTendersTable.opportunityId} IS NULL
-          AND ${discoveredTendersTable.recommendation} IN ('CONSIDER', 'PURSUE')`
+      and(
+        isNull(discoveredTendersTable.opportunityId),
+        or(
+          isNull(discoveredTendersTable.deadline),
+          sql`${discoveredTendersTable.deadline} > ${now}`,
+        ),
+      ),
     );
 
+  let rescored = 0;
   let promoted = 0;
-  let skipped = 0;
+  let unchanged = 0;
+  let rejected = 0;
+  let rejectionCounts: Record<string, number> = {};
 
   for (const item of items) {
+    // Recompute score from current content
+    const score = scoreTender({
+      title:        item.title,
+      description:  item.description,
+      sector:       item.sector,
+      organization: item.organization,
+      country:      item.country,
+      deadline:     item.deadline,
+    });
+
+    const scoreChanged =
+      score.recommendation !== item.recommendation ||
+      score.fitScore !== item.fitScore;
+
+    if (scoreChanged) {
+      await db.update(discoveredTendersTable).set({
+        fitScore:             score.fitScore,
+        recommendation:       score.recommendation,
+        scoringReasoning:     score.reasoning,
+        geographyScore:       score.geographyScore,
+        geoRegion:            score.geoRegion,
+        bahamasAdvantageScore: score.bahamasAdvantageScore,
+        confidence:           score.confidence,
+        updatedAt:            new Date(),
+      }).where(eq(discoveredTendersTable.id, item.id));
+      rescored++;
+    }
+
+    // Re-evaluate eligibility with freshly computed score
+    const { evaluateCrawlerEligibility } = await import("../lib/crawler-eligibility.js");
+    const { promoteDiscoveredTender } = await import("../lib/promote-discovered-tender.js");
+
     const eligibility = evaluateCrawlerEligibility({
       title:          item.title,
       description:    item.description,
-      recommendation: item.recommendation ?? "SKIP",
+      recommendation: score.recommendation,
       deadline:       item.deadline,
     });
 
-    if (eligibility.eligible) {
-      try {
-        const dest = eligibility.destination === "reviewing" ? "reviewing" : "new";
-        await promoteDiscoveredTender(item.id, dest);
-        promoted++;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[backfill] promote id=${item.id} failed: ${msg.slice(0, 80)}`);
-        skipped++;
-      }
-    } else {
-      const reason = eligibility.rejectionReasons[0] ?? "ineligible";
-      console.log(`[backfill] id=${item.id} still ineligible (${reason})`);
-      skipped++;
+    if (!eligibility.eligible) {
+      rejected++;
+      rejectionCounts = mergeRejectionCounts(rejectionCounts, eligibility.rejectionReasons);
+      await db.update(discoveredTendersTable).set({
+        rejectionReasons: JSON.stringify(eligibility.rejectionReasons),
+        updatedAt: new Date(),
+      }).where(eq(discoveredTendersTable.id, item.id));
+      continue;
+    }
+
+    // Promote idempotently
+    try {
+      const dest = eligibility.destination === "reviewing" ? "reviewing" : "new";
+      await promoteDiscoveredTender(item.id, dest);
+      promoted++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[backfill] promote id=${item.id} failed: ${msg.slice(0, 80)}`);
+      rejected++;
     }
   }
 
-  return { evaluated: items.length, promoted, skipped };
-}
+  unchanged = items.length - rescored - promoted - rejected;
+  if (unchanged < 0) unchanged = 0;
 
-// ── Rescore all existing items with keyword engine ──────────────────────────
-export async function rescoreWithKeywords(): Promise<number> {
-  const items = await db.select().from(discoveredTendersTable);
-
-  let count = 0;
-  for (const item of items) {
-    const opp: TenderOpportunity = {
-      externalId: item.externalId ?? undefined,
-      title: item.title,
-      organization: item.organization,
-      url: item.url ?? undefined,
-      description: item.description,
-      country: item.country ?? undefined,
-      sector: item.sector ?? undefined,
-      deadline: item.deadline ? new Date(item.deadline) : undefined,
-    };
-    const result = keywordScore(opp);
-    await db.update(discoveredTendersTable).set({
-      fitScore: result.fitScore,
-      recommendation: result.recommendation,
-      scoringReasoning: result.reasoning,
-      geographyScore: result.geographyScore,
-      geoRegion: result.geoRegion,
-      bahamasAdvantageScore: result.bahamasAdvantageScore,
-      confidence: result.confidence,
-      updatedAt: new Date(),
-    }).where(eq(discoveredTendersTable.id, item.id));
-    count++;
-  }
-  return count;
+  return { evaluated: items.length, rescored, promoted, unchanged, rejected, rejectionCounts };
 }
 
 // ── Main crawl runner ────────────────────────────────────────────────────────
-export async function runCrawler(sourceId?: number): Promise<{
-  total: number;
-  newItems: number;
-  sources: number;
-  aiCallCount: number;
-  aiFallbackCount: number;
-  quotaErrorHit: boolean;
-}> {
-  // DB-backed overlap prevention — atomic across restarts and instances
+export interface CrawlBatchResult {
+  batchId: string;
+  sourcesAttempted: number;
+  sourcesSucceeded: number;
+  sourcesFailed: number;
+  fetched: number;
+  inserted: number;
+  updated: number;
+  eligible: number;
+  promoted: number;
+  rejected: number;
+  unchanged: number;
+  perSourceErrors: Record<string, string>;
+  rejectionCounts: Record<string, number>;
+}
+
+export async function runCrawler(sourceId?: number): Promise<CrawlBatchResult> {
+  // DB-backed overlap prevention
   const acquired = await acquireCrawlLock();
   if (!acquired) {
     throw new Error("A crawl is already in progress — skipping to prevent overlap.");
   }
 
+  const batchId = randomUUID();
+
+  // Create a batch row so the frontend can poll it
+  await db.insert(crawlBatchesTable).values({
+    id:       batchId,
+    status:   "running",
+    startedAt: new Date(),
+  });
+
   const sources = sourceId
     ? await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.id, sourceId))
     : await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.active, true));
 
-  let totalFound = 0;
-  let totalNew = 0;
+  // Batch-level aggregates
+  let sourcesAttempted = 0;
+  let sourcesSucceeded = 0;
+  let sourcesFailed = 0;
+  let batchFetched = 0;
+  let batchInserted = 0;
+  let batchUpdated = 0;
+  let batchEligible = 0;
+  let batchPromoted = 0;
+  let batchRejected = 0;
+  let batchUnchanged = 0;
+  const perSourceErrors: Record<string, string> = {};
+  let batchRejectionCounts: Record<string, number> = {};
 
   try {
     for (const source of sources) {
       const adapter = getAdapter(source.adapterType);
       if (!adapter) continue;
 
+      sourcesAttempted++;
+
       const [run] = await db.insert(crawlerRunsTable).values({
+        batchId,
         sourceId:  source.id,
         startedAt: new Date(),
         status:    "running",
-        aiProvider: null,
-        aiModel:    null,
       }).returning();
 
+      // Per-source aggregates
+      let srcFetched = 0;
+      let srcInserted = 0;
+      let srcUpdated = 0;
+      let srcEligible = 0;
+      let srcPromoted = 0;
+      let srcRejected = 0;
+      let srcUnchanged = 0;
+      let srcRequestsAttempted = 0;
+      let srcRequestsSucceeded = 0;
+      let srcWarnings: string[] = [];
+      const srcRejectionCounts: Record<string, number> = {};
+
       try {
-        const opportunities = await adapter.fetchOpportunities();
-        totalFound += opportunities.length;
+        const fetchResult = await adapter.fetchOpportunities();
+        srcRequestsAttempted = fetchResult.requestsAttempted;
+        srcRequestsSucceeded = fetchResult.requestsSucceeded;
+        srcWarnings = fetchResult.warnings;
+        srcFetched = fetchResult.opportunities.length;
+        batchFetched += srcFetched;
 
-        let newCount = 0;
+        for (const opp of fetchResult.opportunities) {
+          try {
+            const result = await reconcileDiscovery(source.id, opp);
 
-        for (const opp of opportunities) {
-          // Deduplicate by externalId
-          if (opp.externalId) {
-            const existing = await db.select({ id: discoveredTendersTable.id })
-              .from(discoveredTendersTable)
-              .where(eq(discoveredTendersTable.externalId, opp.externalId));
-            if (existing.length > 0) continue;
-          }
-
-          // Deduplicate by URL
-          if (opp.url) {
-            const existingByUrl = await db.select({ id: discoveredTendersTable.id })
-              .from(discoveredTendersTable)
-              .where(eq(discoveredTendersTable.url, opp.url));
-            if (existingByUrl.length > 0) continue;
-          }
-
-          const result = keywordScore(opp);
-
-          const [discovery] = await db.insert(discoveredTendersTable).values({
-            sourceId:             source.id,
-            externalId:           opp.externalId ?? null,
-            title:                opp.title,
-            organization:         opp.organization,
-            url:                  opp.url ?? null,
-            deadline:             opp.deadline ?? null,
-            description:          opp.description,
-            country:              opp.country ?? null,
-            sector:               opp.sector ?? null,
-            valueAmount:          opp.valueAmount ?? null,
-            rawData:              opp.rawData ?? null,
-            status:               "new",
-            fitScore:             result.fitScore,
-            recommendation:       result.recommendation,
-            scoringReasoning:     result.reasoning,
-            geographyScore:       result.geographyScore,
-            geoRegion:            result.geoRegion,
-            bahamasAdvantageScore: result.bahamasAdvantageScore,
-            confidence:           result.confidence,
-          }).returning({ id: discoveredTendersTable.id });
-
-          // Promote only eligible discoveries to canonical Opportunities.
-          // SKIP, boilerplate, title-only, and hard-negative-dominated records
-          // are stored in discovered_tenders for human review but not promoted.
-          const eligibility = evaluateCrawlerEligibility({
-            title:          opp.title,
-            description:    opp.description,
-            recommendation: result.recommendation,
-            deadline:       opp.deadline,
-          });
-
-          if (eligibility.eligible) {
-            try {
-              const dest = eligibility.destination === "reviewing" ? "reviewing" : "new";
-              await promoteDiscoveredTender(discovery.id, dest);
-            } catch (promErr) {
-              const msg = promErr instanceof Error ? promErr.message : String(promErr);
-              console.warn(`[crawler] promote id=${discovery.id} failed: ${msg.slice(0, 80)}`);
+            switch (result.outcome) {
+              case "inserted":
+                srcInserted++;
+                // Newly inserted but ineligible — counted in rejected below via skipped
+                break;
+              case "updated":
+                srcUpdated++;
+                break;
+              case "unchanged":
+                srcUnchanged++;
+                break;
+              case "promoted":
+                srcPromoted++;
+                srcEligible++;
+                break;
+              case "skipped":
+                srcRejected++;
+                if (result.rejectionReasons) {
+                  for (const r of result.rejectionReasons) {
+                    const k = r.slice(0, 80);
+                    srcRejectionCounts[k] = (srcRejectionCounts[k] ?? 0) + 1;
+                  }
+                }
+                break;
             }
-          } else {
-            const reason = eligibility.rejectionReasons[0] ?? "ineligible";
-            console.log(`[crawler] id=${discovery.id} stored, not promoted (${reason})`);
-          }
 
-          newCount++;
-          totalNew++;
+            // Inserted items that were also promoted
+            if (result.outcome === "inserted" && result.opportunityId) {
+              srcPromoted++;
+              srcEligible++;
+            } else if (result.outcome === "inserted" && !result.opportunityId) {
+              srcRejected++;
+              if (result.rejectionReasons) {
+                for (const r of result.rejectionReasons) {
+                  const k = r.slice(0, 80);
+                  srcRejectionCounts[k] = (srcRejectionCounts[k] ?? 0) + 1;
+                }
+              }
+            }
+          } catch (itemErr) {
+            const msg = itemErr instanceof Error ? itemErr.message : String(itemErr);
+            console.warn(`[crawler] reconcile failed for source=${source.id}: ${msg.slice(0, 100)}`);
+            srcRejected++;
+          }
+        }
+
+        // Merge per-source rejection counts into batch
+        for (const [k, v] of Object.entries(srcRejectionCounts)) {
+          batchRejectionCounts[k] = (batchRejectionCounts[k] ?? 0) + v;
+        }
+
+        // Determine run status
+        const runStatus = srcRequestsAttempted > 0 && srcRequestsSucceeded === 0
+          ? "failed"
+          : srcWarnings.length > 0 ? "partial"
+          : "success";
+
+        if (runStatus === "failed" || runStatus === "partial") {
+          sourcesFailed++;
+        } else {
+          sourcesSucceeded++;
         }
 
         await db.update(crawlerRunsTable).set({
-          completedAt:    new Date(),
-          status:         "success",
-          itemsFound:     opportunities.length,
-          itemsNew:       newCount,
-          aiCallCount:    0,
-          aiFallbackCount: 0,
-          aiQuotaError:   false,
+          completedAt:         new Date(),
+          status:              runStatus,
+          requestsAttempted:   srcRequestsAttempted,
+          requestsSucceeded:   srcRequestsSucceeded,
+          warnings:            srcWarnings.length > 0 ? JSON.stringify(srcWarnings) : null,
+          itemsFound:          srcFetched,
+          itemsNew:            srcInserted,
+          itemsUpdated:        srcUpdated,
+          itemsEligible:       srcEligible,
+          itemsPromoted:       srcPromoted,
+          itemsRejected:       srcRejected,
+          itemsUnchanged:      srcUnchanged,
+          rejectionCounts:     Object.keys(srcRejectionCounts).length > 0
+            ? JSON.stringify(srcRejectionCounts)
+            : null,
+          aiCallCount:         0,
+          aiFallbackCount:     0,
+          aiQuotaError:        false,
         }).where(eq(crawlerRunsTable.id, run.id));
 
         await db.update(tenderSourcesTable).set({
           lastCheckedAt:   new Date(),
-          lastSuccessAt:   new Date(),
-          itemsFoundCount: source.itemsFoundCount + newCount,
+          ...(runStatus !== "failed" ? { lastSuccessAt: new Date() } : {}),
+          itemsFoundCount: source.itemsFoundCount + srcInserted,
           updatedAt:       new Date(),
         }).where(eq(tenderSourcesTable.id, source.id));
 
+        batchInserted += srcInserted;
+        batchUpdated  += srcUpdated;
+        batchEligible += srcEligible;
+        batchPromoted += srcPromoted;
+        batchRejected += srcRejected;
+        batchUnchanged += srcUnchanged;
+
       } catch (err) {
+        // Adapter threw — record as failed source
+        sourcesFailed++;
+        const msg = err instanceof Error ? err.message : String(err);
+        perSourceErrors[String(source.id)] = msg.slice(0, 200);
+
         await db.update(crawlerRunsTable).set({
-          completedAt:    new Date(),
-          status:         "failed",
-          errorMessage:   String(err instanceof Error ? err.message : err),
-          aiCallCount:    0,
+          completedAt:  new Date(),
+          status:       "failed",
+          errorMessage: msg.slice(0, 400),
+          aiCallCount:  0,
           aiFallbackCount: 0,
-          aiQuotaError:   false,
+          aiQuotaError: false,
         }).where(eq(crawlerRunsTable.id, run.id));
 
         await db.update(tenderSourcesTable).set({
@@ -549,18 +399,91 @@ export async function runCrawler(sourceId?: number): Promise<{
         }).where(eq(tenderSourcesTable.id, source.id));
       }
     }
+
+    // ── Run backfill after each crawl to catch any newly eligible items ──────
+    try {
+      const bf = await backfillPromotions();
+      if (bf.promoted > 0) {
+        batchPromoted  += bf.promoted;
+        batchEligible  += bf.promoted;
+        console.log(`[crawler] backfill promoted ${bf.promoted} additional items (${bf.evaluated} evaluated).`);
+      }
+    } catch (bfErr) {
+      console.warn("[crawler] backfill failed:", bfErr instanceof Error ? bfErr.message : String(bfErr));
+    }
+
+    // Determine overall batch status
+    const batchStatus = sourcesAttempted === 0 ? "failed"
+      : sourcesFailed === sourcesAttempted ? "failed"
+      : sourcesFailed > 0 ? "partial"
+      : "success";
+
+    await db.update(crawlBatchesTable).set({
+      completedAt:      new Date(),
+      status:           batchStatus,
+      sourcesAttempted,
+      sourcesSucceeded,
+      sourcesFailed,
+      fetched:          batchFetched,
+      inserted:         batchInserted,
+      updated:          batchUpdated,
+      eligible:         batchEligible,
+      promoted:         batchPromoted,
+      rejected:         batchRejected,
+      unchanged:        batchUnchanged,
+      perSourceErrors:  Object.keys(perSourceErrors).length > 0 ? JSON.stringify(perSourceErrors) : null,
+      rejectionCounts:  Object.keys(batchRejectionCounts).length > 0 ? JSON.stringify(batchRejectionCounts) : null,
+    }).where(eq(crawlBatchesTable.id, batchId));
+
   } finally {
     await releaseCrawlLock();
   }
 
   return {
-    total:          totalFound,
-    newItems:       totalNew,
-    sources:        sources.length,
-    aiCallCount:    0,
-    aiFallbackCount: 0,
-    quotaErrorHit:  false,
+    batchId,
+    sourcesAttempted,
+    sourcesSucceeded,
+    sourcesFailed,
+    fetched: batchFetched,
+    inserted: batchInserted,
+    updated: batchUpdated,
+    eligible: batchEligible,
+    promoted: batchPromoted,
+    rejected: batchRejected,
+    unchanged: batchUnchanged,
+    perSourceErrors,
+    rejectionCounts: batchRejectionCounts,
   };
+}
+
+// ── Re-score all existing discovered_tenders with current keyword engine ──────
+// Updates scores in-place but does not promote.
+// Use backfillPromotions() to also promote newly eligible records.
+export async function rescoreWithKeywords(): Promise<number> {
+  const items = await db.select().from(discoveredTendersTable);
+  let count = 0;
+  for (const item of items) {
+    const score = scoreTender({
+      title:        item.title,
+      description:  item.description,
+      sector:       item.sector,
+      organization: item.organization,
+      country:      item.country,
+      deadline:     item.deadline,
+    });
+    await db.update(discoveredTendersTable).set({
+      fitScore:             score.fitScore,
+      recommendation:       score.recommendation,
+      scoringReasoning:     score.reasoning,
+      geographyScore:       score.geographyScore,
+      geoRegion:            score.geoRegion,
+      bahamasAdvantageScore: score.bahamasAdvantageScore,
+      confidence:           score.confidence,
+      updatedAt:            new Date(),
+    }).where(eq(discoveredTendersTable.id, item.id));
+    count++;
+  }
+  return count;
 }
 
 // ── Seed default sources ─────────────────────────────────────────────────────

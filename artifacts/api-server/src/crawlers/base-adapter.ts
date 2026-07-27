@@ -11,9 +11,28 @@ export interface TenderOpportunity {
   rawData?: Record<string, unknown>;
 }
 
+/**
+ * Structured result from an adapter's fetchOpportunities() call.
+ *
+ * - requestsAttempted: number of HTTP requests (or API calls) the adapter made
+ * - requestsSucceeded: how many returned 2xx / parseable responses
+ * - warnings: non-fatal issues (e.g. a single page 404 when others succeeded)
+ *
+ * An adapter MUST throw when ALL configured requests fail so the runner can
+ * record a "failed" source run rather than a "success" with zero items.
+ * A legitimate run with zero matching opportunities returns an empty
+ * opportunities array with requestsSucceeded > 0.
+ */
+export interface AdapterFetchResult {
+  opportunities: TenderOpportunity[];
+  requestsAttempted: number;
+  requestsSucceeded: number;
+  warnings: string[];
+}
+
 export interface TenderSourceAdapter {
   adapterType: string;
-  fetchOpportunities(): Promise<TenderOpportunity[]>;
+  fetchOpportunities(): Promise<AdapterFetchResult>;
 }
 
 export async function safeFetch(url: string, opts?: RequestInit): Promise<Response> {

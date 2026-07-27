@@ -232,11 +232,37 @@ function usePursue(id: number) {
   });
 }
 
+interface CrawlBatch {
+  id: string;
+  status: string;        // "running" | "success" | "partial" | "failed"
+  sourcesAttempted: number;
+  sourcesSucceeded: number;
+  sourcesFailed: number;
+  fetched: number;
+  inserted: number;
+  updated: number;
+  promoted: number;
+  rejected: number;
+  unchanged: number;
+}
+
+function crawlBatchSummary(batch: CrawlBatch): string {
+  const { sourcesAttempted, sourcesFailed, inserted, updated, promoted } = batch;
+  const parts: string[] = [];
+  if (promoted > 0)  parts.push(`${promoted} new opportunit${promoted === 1 ? "y" : "ies"} found`);
+  else if (inserted > 0) parts.push(`${inserted} discovery${inserted === 1 ? "" : "ies"} logged`);
+  if (updated > 0)   parts.push(`${updated} updated`);
+  if (sourcesFailed > 0) parts.push(`${sourcesFailed}/${sourcesAttempted} sources failed`);
+  if (parts.length === 0) parts.push("No new opportunities found");
+  return parts.join(" · ");
+}
+
 function useRunCrawl() {
   const qc = useQueryClient();
   const { toast } = useToast();
   const [crawlRunning, setCrawlRunning] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const batchIdRef = useRef<string | null>(null);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -245,8 +271,9 @@ function useRunCrawl() {
     }
   }, []);
 
-  const startPolling = useCallback(() => {
-    const deadline = Date.now() + 5 * 60 * 1000;
+  const startPolling = useCallback((batchId: string | null) => {
+    batchIdRef.current = batchId;
+    const deadline = Date.now() + 8 * 60 * 1000; // 8-min hard timeout
     pollRef.current = setInterval(async () => {
       if (Date.now() > deadline) {
         stopPolling();
@@ -254,21 +281,41 @@ function useRunCrawl() {
         return;
       }
       try {
-        const r = await fetch(`${BASE}/api/crawler-runs`);
+        // Poll the specific batch if we have an ID; fall back to latest crawler-run
+        const pollUrl = batchIdRef.current
+          ? `${BASE}/api/tender-intelligence/crawl-batches/${batchIdRef.current}`
+          : `${BASE}/api/crawler-runs`;
+        const r = await fetch(pollUrl);
         if (!r.ok) return;
-        const runs = (await r.json()) as { status: string; startedAt: string }[];
-        const latest = runs[0];
-        if (latest && (latest.status === "success" || latest.status === "failed")) {
-          stopPolling();
-          setCrawlRunning(false);
-          await qc.invalidateQueries({ queryKey: ["opportunities"] });
-          toast({
-            title: latest.status === "success" ? "Crawl complete" : "Crawl finished with errors",
-            description: "Opportunities list refreshed.",
-          });
+
+        if (batchIdRef.current) {
+          const batch = (await r.json()) as CrawlBatch;
+          if (batch.status !== "running") {
+            stopPolling();
+            setCrawlRunning(false);
+            await qc.invalidateQueries({ queryKey: ["opportunities"] });
+            const isSuccess = batch.status === "success" || batch.status === "partial";
+            toast({
+              title: isSuccess ? "Crawl complete" : "Crawl finished with errors",
+              description: crawlBatchSummary(batch),
+            });
+          }
+        } else {
+          // Legacy fallback — poll crawler_runs list
+          const runs = (await r.json()) as { status: string }[];
+          const latest = runs[0];
+          if (latest && (latest.status === "success" || latest.status === "failed" || latest.status === "partial")) {
+            stopPolling();
+            setCrawlRunning(false);
+            await qc.invalidateQueries({ queryKey: ["opportunities"] });
+            toast({
+              title: latest.status === "success" ? "Crawl complete" : "Crawl finished with errors",
+              description: "Opportunities list refreshed.",
+            });
+          }
         }
       } catch { /* ignore poll errors */ }
-    }, 8000);
+    }, 6000);
   }, [stopPolling, qc, toast]);
 
   useEffect(() => () => stopPolling(), [stopPolling]);
@@ -282,12 +329,12 @@ function useRunCrawl() {
       });
       if (r.status === 409) throw new Error("A crawl is already in progress — try again in a moment.");
       if (!r.ok) throw new Error("Failed to start crawl");
-      return r.json() as Promise<{ message: string }>;
+      return r.json() as Promise<{ message: string; batchId: string | null }>;
     },
-    onSuccess: () => {
+    onSuccess: (data) => {
       setCrawlRunning(true);
       toast({ title: "Crawl started", description: "Scanning sources for new opportunities…" });
-      startPolling();
+      startPolling(data.batchId);
     },
     onError: (err: Error) => {
       toast({ title: "Crawl failed", description: err.message, variant: "destructive" });

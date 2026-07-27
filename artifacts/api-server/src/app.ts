@@ -36,6 +36,41 @@ export const dbReady: Promise<void> = pool
   // ── Idempotent schema migrations ─────────────────────────────────────────
   .query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS handoff_started_at TIMESTAMP`)
   .then(() => pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS generation_status TEXT`))
+  // ── Crawl batch observability ─────────────────────────────────────────────
+  .then(() => pool.query(`
+    CREATE TABLE IF NOT EXISTS crawl_batches (
+      id TEXT PRIMARY KEY,
+      started_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      completed_at TIMESTAMP,
+      status TEXT NOT NULL DEFAULT 'running',
+      sources_attempted INTEGER NOT NULL DEFAULT 0,
+      sources_succeeded INTEGER NOT NULL DEFAULT 0,
+      sources_failed INTEGER NOT NULL DEFAULT 0,
+      fetched INTEGER NOT NULL DEFAULT 0,
+      inserted INTEGER NOT NULL DEFAULT 0,
+      updated INTEGER NOT NULL DEFAULT 0,
+      eligible INTEGER NOT NULL DEFAULT 0,
+      promoted INTEGER NOT NULL DEFAULT 0,
+      rejected INTEGER NOT NULL DEFAULT 0,
+      unchanged INTEGER NOT NULL DEFAULT 0,
+      per_source_errors JSONB,
+      rejection_counts JSONB,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+  `))
+  // ── crawler_runs new columns ──────────────────────────────────────────────
+  .then(() => pool.query(`ALTER TABLE crawler_runs ADD COLUMN IF NOT EXISTS batch_id TEXT`))
+  .then(() => pool.query(`ALTER TABLE crawler_runs ADD COLUMN IF NOT EXISTS requests_attempted INTEGER NOT NULL DEFAULT 0`))
+  .then(() => pool.query(`ALTER TABLE crawler_runs ADD COLUMN IF NOT EXISTS requests_succeeded INTEGER NOT NULL DEFAULT 0`))
+  .then(() => pool.query(`ALTER TABLE crawler_runs ADD COLUMN IF NOT EXISTS warnings JSONB`))
+  .then(() => pool.query(`ALTER TABLE crawler_runs ADD COLUMN IF NOT EXISTS items_updated INTEGER NOT NULL DEFAULT 0`))
+  .then(() => pool.query(`ALTER TABLE crawler_runs ADD COLUMN IF NOT EXISTS items_eligible INTEGER NOT NULL DEFAULT 0`))
+  .then(() => pool.query(`ALTER TABLE crawler_runs ADD COLUMN IF NOT EXISTS items_promoted INTEGER NOT NULL DEFAULT 0`))
+  .then(() => pool.query(`ALTER TABLE crawler_runs ADD COLUMN IF NOT EXISTS items_rejected INTEGER NOT NULL DEFAULT 0`))
+  .then(() => pool.query(`ALTER TABLE crawler_runs ADD COLUMN IF NOT EXISTS items_unchanged INTEGER NOT NULL DEFAULT 0`))
+  .then(() => pool.query(`ALTER TABLE crawler_runs ADD COLUMN IF NOT EXISTS rejection_counts JSONB`))
+  // ── discovered_tenders: rejection_reasons column ──────────────────────────
+  .then(() => pool.query(`ALTER TABLE discovered_tenders ADD COLUMN IF NOT EXISTS rejection_reasons JSONB`))
   // ── Session table ─────────────────────────────────────────────────────────
   .then(() =>
     pool.query(

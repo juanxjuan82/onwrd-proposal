@@ -1,11 +1,14 @@
-import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
+import { TenderSourceAdapter, TenderOpportunity, AdapterFetchResult, safeFetch, stripHtml } from "./base-adapter.js";
 
 // caribank.org/procurement returns 404. This adapter targets CDB's news/projects
 // page for procurement-adjacent announcements, and falls back to press releases.
 export class CDBAdapter implements TenderSourceAdapter {
   adapterType = "cdb";
 
-  async fetchOpportunities(): Promise<TenderOpportunity[]> {
+  async fetchOpportunities(): Promise<AdapterFetchResult> {
+    const warnings: string[] = [];
+    let requestsAttempted = 0;
+    let requestsSucceeded = 0;
     const results: TenderOpportunity[] = [];
 
     const urls = [
@@ -15,18 +18,22 @@ export class CDBAdapter implements TenderSourceAdapter {
     ];
 
     for (const url of urls) {
+      requestsAttempted++;
       try {
         const r = await safeFetch(url, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)",
-            Accept: "text/html",
-          },
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)", Accept: "text/html" },
         });
-        if (!r.ok) continue;
+        if (!r.ok) {
+          warnings.push(`CDB HTTP ${r.status} for ${url}`);
+          continue;
+        }
         const html = await r.text();
-        if (html.length < 500) continue;
+        if (html.length < 500) {
+          warnings.push(`CDB returned very short response for ${url}`);
+          continue;
+        }
+        requestsSucceeded++;
 
-        // Look for article/card links mentioning procurement, tender, consulting, RFP
         const linkPattern =
           /<a[^>]+href="([^"]*(?:procur|tender|rfp|consult|bid|contract|grant|project)[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
         let match;
@@ -55,9 +62,15 @@ export class CDBAdapter implements TenderSourceAdapter {
         }
 
         if (results.length > 0) break;
-      } catch { /* try next */ }
+      } catch (err) {
+        warnings.push(`CDB fetch failed for ${url}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
-    return results;
+    if (requestsAttempted > 0 && requestsSucceeded === 0) {
+      throw new Error(`CDB: all ${requestsAttempted} requests failed. ` + warnings.join("; "));
+    }
+
+    return { opportunities: results, requestsAttempted, requestsSucceeded, warnings };
   }
 }

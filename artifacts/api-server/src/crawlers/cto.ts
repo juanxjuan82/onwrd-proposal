@@ -1,11 +1,14 @@
-import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
+import { TenderSourceAdapter, TenderOpportunity, AdapterFetchResult, safeFetch, stripHtml } from "./base-adapter.js";
 
-// Caribbean Tourism Organization — monitors destination marketing, tourism promotion,
+// Caribbean Tourism Organization — destination marketing, tourism promotion,
 // branding and comms work across the Caribbean region.
 export class CTOAdapter implements TenderSourceAdapter {
   adapterType = "cto";
 
-  async fetchOpportunities(): Promise<TenderOpportunity[]> {
+  async fetchOpportunities(): Promise<AdapterFetchResult> {
+    const warnings: string[] = [];
+    let requestsAttempted = 0;
+    let requestsSucceeded = 0;
     const results: TenderOpportunity[] = [];
 
     const urls = [
@@ -16,16 +19,21 @@ export class CTOAdapter implements TenderSourceAdapter {
     ];
 
     for (const url of urls) {
+      requestsAttempted++;
       try {
         const r = await safeFetch(url, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)",
-            Accept: "text/html",
-          },
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)", Accept: "text/html" },
         });
-        if (!r.ok) continue;
+        if (!r.ok) {
+          warnings.push(`CTO HTTP ${r.status} for ${url}`);
+          continue;
+        }
         const html = await r.text();
-        if (html.length < 500) continue;
+        if (html.length < 500) {
+          warnings.push(`CTO returned very short response for ${url}`);
+          continue;
+        }
+        requestsSucceeded++;
 
         const linkPattern =
           /<a[^>]+href="([^"]*(?:procur|tender|rfp|bid|contract|consult|market|campaign|brand|tourism)[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
@@ -46,23 +54,24 @@ export class CTOAdapter implements TenderSourceAdapter {
             title: rawTitle,
             organization: "Caribbean Tourism Organization",
             url: fullUrl,
-            // Real scope from page fetch only — no synthetic marketing assumption
             description: `Caribbean Tourism Organization procurement notice: ${rawTitle}`,
             country: "Caribbean",
             sector: "Tourism & Destination Marketing",
-            rawData: {
-              adapterContext:
-                "CTO procurement: tourism destination marketing and communications for the Caribbean region.",
-            },
           });
 
           if (results.length >= 20) break;
         }
 
         if (results.length > 0) break;
-      } catch { /* try next URL */ }
+      } catch (err) {
+        warnings.push(`CTO fetch failed for ${url}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
-    return results;
+    if (requestsAttempted > 0 && requestsSucceeded === 0) {
+      throw new Error(`CTO: all ${requestsAttempted} requests failed. ` + warnings.join("; "));
+    }
+
+    return { opportunities: results, requestsAttempted, requestsSucceeded, warnings };
   }
 }
