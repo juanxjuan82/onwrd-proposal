@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { useLocation } from "wouter";
+import { useLocation, useSearch } from "wouter";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -126,10 +126,16 @@ function ActionCell({
   item,
   onGenerate,
   generating,
+  driveFolder,
+  onShare,
+  sharing,
 }: {
   item: WorkspaceItem;
   onGenerate: (id: number) => void;
   generating: boolean;
+  driveFolder: string | null;
+  onShare: (proposalId: number) => void;
+  sharing: boolean;
 }) {
   const [, setLocation] = useLocation();
   const { proposal } = item;
@@ -150,16 +156,17 @@ function ActionCell({
     );
   }
 
-  // Ready → open proposal desk
+  // Ready → share draft to Drive for team review
   if (proposal && isReady(proposal)) {
     return (
       <Button
         size="sm"
         className="gap-1.5 text-xs bg-primary hover:bg-primary/90 whitespace-nowrap"
-        onClick={(e) => { e.stopPropagation(); setLocation(`/proposals/${proposal.id}`); }}
+        onClick={(e) => { e.stopPropagation(); onShare(proposal.id); }}
+        disabled={sharing}
       >
-        <Share2 className="w-3.5 h-3.5" />
-        Open Proposal
+        {sharing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Share2 className="w-3.5 h-3.5" />}
+        {sharing ? "Sharing…" : driveFolder ? `Share to ${driveFolder}` : "Share to Drive"}
       </Button>
     );
   }
@@ -228,13 +235,22 @@ function WorkspaceCard({
   item,
   onGenerate,
   generatingId,
+  driveFolder,
+  onShare,
+  sharingId,
+  highlighted,
 }: {
   item: WorkspaceItem;
   onGenerate: (id: number) => void;
   generatingId: number | null;
+  driveFolder: string | null;
+  onShare: (proposalId: number) => void;
+  sharingId: number | null;
+  highlighted: boolean;
 }) {
   const [, setLocation] = useLocation();
   const generating = generatingId === item.id;
+  const sharing = sharingId === (item.proposal?.id ?? -1);
 
   const handleCardClick = () => {
     if (item.proposal?.id) {
@@ -244,7 +260,7 @@ function WorkspaceCard({
 
   return (
     <div
-      className={`group bg-card border rounded-lg transition-colors ${item.proposal?.id ? "hover:border-primary/40 cursor-pointer" : ""}`}
+      className={`group bg-card border rounded-lg transition-colors ${item.proposal?.id ? "hover:border-primary/40 cursor-pointer" : ""} ${highlighted ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}
       onClick={item.proposal?.id ? handleCardClick : undefined}
     >
       <div className="flex items-center gap-4 px-5 py-4">
@@ -270,7 +286,14 @@ function WorkspaceCard({
 
         {/* Action */}
         <div className="shrink-0" onClick={(e) => e.stopPropagation()}>
-          <ActionCell item={item} onGenerate={onGenerate} generating={generating} />
+          <ActionCell
+            item={item}
+            onGenerate={onGenerate}
+            generating={generating}
+            driveFolder={driveFolder}
+            onShare={onShare}
+            sharing={sharing}
+          />
         </div>
       </div>
     </div>
@@ -283,6 +306,30 @@ export default function ProposalsWorkspace() {
   const [items, setItems] = useState<WorkspaceItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [generatingId, setGeneratingId] = useState<number | null>(null);
+  const [sharingId, setSharingId] = useState<number | null>(null);
+  const [driveFolder, setDriveFolder] = useState<string | null>(null);
+  const [highlightedId, setHighlightedId] = useState<number | null>(null);
+  const search = useSearch();
+
+  // Derive highlighted opportunity from ?opportunity= URL param
+  useEffect(() => {
+    const params = new URLSearchParams(search);
+    const oppId = params.get("opportunity");
+    if (oppId) {
+      const id = Number(oppId);
+      if (!isNaN(id)) setHighlightedId(id);
+    }
+  }, [search]);
+
+  // Fetch Drive folder name once on mount
+  useEffect(() => {
+    fetch(`${BASE}/api/settings/google-drive`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d: { folderName?: string } | null) => {
+        if (d?.folderName) setDriveFolder(d.folderName);
+      })
+      .catch(() => {});
+  }, []);
 
   const fetchWorkspace = useCallback(async () => {
     try {
@@ -308,6 +355,29 @@ export default function ProposalsWorkspace() {
     const interval = setInterval(() => { void fetchWorkspace(); }, 3000);
     return () => clearInterval(interval);
   }, [items, fetchWorkspace]);
+
+  const handleShare = async (proposalId: number) => {
+    setSharingId(proposalId);
+    try {
+      const r = await fetch(`${BASE}/api/proposals/${proposalId}/export`, { method: "POST" });
+      const body = await r.json().catch(() => ({})) as { googleDocUrl?: string; error?: string; code?: string };
+      if (!r.ok) {
+        if (body.code === "google_doc_canonical") {
+          toast({ title: "Already in Google Docs", description: "This proposal already has a Google Doc.", variant: "destructive" });
+          await fetchWorkspace();
+          return;
+        }
+        toast({ title: "Share failed", description: body.error ?? "Unknown error", variant: "destructive" });
+        return;
+      }
+      await fetchWorkspace();
+      toast({ title: "Shared to Drive", description: "The proposal is now a Google Doc." });
+    } catch (err) {
+      toast({ title: "Error", description: (err as Error).message, variant: "destructive" });
+    } finally {
+      setSharingId(null);
+    }
+  };
 
   const handleGenerate = async (opportunityId: number) => {
     setGeneratingId(opportunityId);
@@ -374,6 +444,10 @@ export default function ProposalsWorkspace() {
               item={item}
               onGenerate={handleGenerate}
               generatingId={generatingId}
+              driveFolder={driveFolder}
+              onShare={handleShare}
+              sharingId={sharingId}
+              highlighted={item.id === highlightedId}
             />
           ))}
         </div>

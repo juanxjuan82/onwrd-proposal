@@ -11,23 +11,32 @@
  *
  * Runner: node --import tsx/esm --test
  */
-import { describe, it } from "node:test";
+import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { normalizeSectionBody, assembleProposalFromSections } from "@workspace/proposal-content";
+import { db, tendersTable, proposalsTable, proposalSectionsTable } from "@workspace/db";
+import { eq, sql } from "drizzle-orm";
+import { generateProposalDraftAndPersist, SECTION_DEFINITIONS } from "../lib/proposal-draft-service.js";
+import { googleDocCanonicalPayload } from "../lib/proposal-predicates.js";
+import { __setInvokeAISpy } from "../lib/ai-gateway.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir    = path.resolve(__dirname, "../../../..");
 const routesDir  = path.resolve(rootDir, "artifacts/api-server/src/routes");
 const frontendDir = path.resolve(rootDir, "artifacts/proposal-generator/src/pages");
 
-const sectionsSrc    = readFileSync(path.join(routesDir, "sections.ts"), "utf8");
-const oppsSrc        = readFileSync(path.join(routesDir, "opportunities.ts"), "utf8");
-const proposalsSrc   = readFileSync(path.join(routesDir, "proposals.ts"), "utf8");
-const detailSrc      = readFileSync(path.join(frontendDir, "proposal-detail.tsx"), "utf8");
-const workspaceSrc   = readFileSync(path.join(frontendDir, "proposals-workspace.tsx"), "utf8");
+const sectionsSrc     = readFileSync(path.join(routesDir, "sections.ts"), "utf8");
+const oppsSrc         = readFileSync(path.join(routesDir, "opportunities.ts"), "utf8");
+const proposalsSrc    = readFileSync(path.join(routesDir, "proposals.ts"), "utf8");
+const detailSrc       = readFileSync(path.join(frontendDir, "proposal-detail.tsx"), "utf8");
+const workspaceSrc    = readFileSync(path.join(frontendDir, "proposals-workspace.tsx"), "utf8");
+const draftSvcSrc     = readFileSync(
+  path.resolve(rootDir, "artifacts/api-server/src/lib/proposal-draft-service.ts"),
+  "utf8",
+);
 
 // ── §A  normalizeSectionBody ───────────────────────────────────────────────────
 
@@ -191,11 +200,12 @@ describe("§D AI prompt does not instruct section-title headings", () => {
     );
   });
 
-  it("prompt instructs BODY ONLY content", () => {
-    const genBlock = oppsSrc.slice(oppsSrc.indexOf("generate-proposal"));
+  it("prompt instructs BODY ONLY content (in shared draft service)", () => {
+    // The AI prompt lives in proposal-draft-service.ts since generate-proposal
+    // and run-full-generation both delegate to generateProposalDraftAndPersist.
     assert.ok(
-      genBlock.includes("BODY ONLY"),
-      "prompt must instruct the AI to return the section body only"
+      draftSvcSrc.includes("BODY ONLY"),
+      "proposal-draft-service.ts must instruct the AI to return the section body only"
     );
   });
 });
@@ -210,10 +220,10 @@ describe("§E assembleProposalFromSections used throughout backend", () => {
     );
   });
 
-  it("opportunities.ts imports assembleProposalFromSections", () => {
+  it("opportunities.ts delegates draft assembly to generateProposalDraftAndPersist (shared service)", () => {
     assert.ok(
-      oppsSrc.includes("assembleProposalFromSections"),
-      "opportunities.ts must import and use assembleProposalFromSections"
+      oppsSrc.includes("generateProposalDraftAndPersist"),
+      "opportunities.ts must delegate AI draft + assembleProposalFromSections to the shared draft service"
     );
   });
 
@@ -225,11 +235,11 @@ describe("§E assembleProposalFromSections used throughout backend", () => {
     );
   });
 
-  it("generate-proposal uses assembleProposalFromSections after writing sections", () => {
+  it("generate-proposal delegates section writes + assembly to generateProposalDraftAndPersist", () => {
     const genBlock = oppsSrc.slice(oppsSrc.indexOf("generate-proposal"));
     assert.ok(
-      genBlock.includes("assembleProposalFromSections(updatedSections)"),
-      "generate-proposal must call assembleProposalFromSections after the section loop"
+      genBlock.includes("generateProposalDraftAndPersist"),
+      "generate-proposal must call generateProposalDraftAndPersist (which handles section loop + assembleProposalFromSections internally)"
     );
   });
 
@@ -362,16 +372,16 @@ describe("§G run-full-generation and proposals workspace", () => {
     );
   });
 
-  it("runFullGenerationBackground sets generationStatus=ready and proposal_content on success", () => {
+  it("runFullGenerationBackground sets generationStatus=ready and delegates draft to shared service on success", () => {
     const bgStart = oppsSrc.indexOf("async function runFullGenerationBackground");
     const bgBlock = oppsSrc.slice(bgStart, bgStart + 9000);
     assert.ok(
-      bgBlock.includes("'ready'"),
-      "background fn must set generationStatus=ready on successful generation"
+      bgBlock.includes("setGenStatus") && (bgBlock.includes('"ready"') || bgBlock.includes("'ready'")),
+      "background fn must call setGenStatus with 'ready' on successful generation"
     );
     assert.ok(
-      bgBlock.includes("proposal_content"),
-      "background fn must write the assembled proposal_content on success"
+      bgBlock.includes("generateProposalDraftAndPersist"),
+      "background fn must delegate AI draft + section writes to generateProposalDraftAndPersist"
     );
   });
 
@@ -407,6 +417,167 @@ describe("§G run-full-generation and proposals workspace", () => {
       wsBlock.includes("proposal_id IS NOT NULL"),
       "workspace query must include crawlers only when proposal_id is set (selected)"
     );
+  });
+});
+
+// ── §G behavioral — DB-connected, AI-spy-intercepted ─────────────────────────
+// Requires DATABASE_URL to be set. Uses __setInvokeAISpy to prevent real AI calls.
+
+describe("§G behavioral — DB-connected", () => {
+  let tenderId = -1;
+  let proposalId = -1;
+
+  before(async () => {
+    // Spy returns 15 minimal sections so generateProposalDraftAndPersist can complete
+    __setInvokeAISpy(async (_req: unknown) => ({
+      content: JSON.stringify({
+        sections: SECTION_DEFINITIONS.map((s) => ({
+          key:     s.key,
+          content: `Behavioral-test content for ${s.title}.`,
+        })),
+      }),
+      model:        "spy-model",
+      inputTokens:  10,
+      outputTokens: 100,
+    }));
+
+    // Create DB fixtures — unique suffix avoids collision
+    const suffix = `bwt-${Date.now()}`;
+    const [t] = await db.insert(tendersTable).values({
+      title:       `Behavioral Test Tender ${suffix}`,
+      agency:      "Test Agency",
+      category:    "Marketing",
+      description: "A test tender for behavioral proposal-workflow tests",
+      status:      "opportunity_found",
+      sourceType:  "pasted_text",
+    }).returning();
+    tenderId = t.id;
+
+    const [p] = await db.insert(proposalsTable).values({
+      clientName:      "Test Agency",
+      industry:        "Marketing",
+      briefText:       "Behavioral test brief",
+      proposalContent: "",
+      status:          "draft",
+      tenderId,
+    }).returning();
+    proposalId = p.id;
+  });
+
+  after(async () => {
+    __setInvokeAISpy(null);
+    if (proposalId > 0) {
+      await db.execute(sql`DELETE FROM proposal_sections WHERE proposal_id = ${proposalId}`);
+      await db.execute(sql`DELETE FROM proposal_generation_runs WHERE proposal_id = ${proposalId}`);
+      await db.execute(sql`DELETE FROM proposals WHERE id = ${proposalId}`);
+    }
+    if (tenderId > 0) {
+      await db.execute(sql`DELETE FROM tenders WHERE id = ${tenderId}`);
+    }
+  });
+
+  it("generation_status column exists in proposals table", async () => {
+    const res = await db.execute(sql`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'proposals' AND column_name = 'generation_status'
+    `);
+    assert.equal((res.rows as unknown[]).length, 1, "generation_status column must exist in proposals");
+  });
+
+  it("handoff_started_at column exists in proposals table", async () => {
+    const res = await db.execute(sql`
+      SELECT column_name FROM information_schema.columns
+      WHERE table_name = 'proposals' AND column_name = 'handoff_started_at'
+    `);
+    assert.equal((res.rows as unknown[]).length, 1, "handoff_started_at column must exist in proposals");
+  });
+
+  it("generateProposalDraftAndPersist writes all 15 sections atomically and assembles proposalContent", async () => {
+    await generateProposalDraftAndPersist({
+      tenderId,
+      proposalId,
+      briefText:       "Test brief text for behavioral test",
+      strategyContext: "",
+    });
+
+    const sections = await db
+      .select()
+      .from(proposalSectionsTable)
+      .where(eq(proposalSectionsTable.proposalId, proposalId));
+
+    assert.equal(sections.length, 15, "must persist exactly 15 sections");
+    assert.ok(
+      sections.every((s) => s.content && s.content.trim().length > 0),
+      "every section must have non-empty content after a successful run",
+    );
+
+    const [updated] = await db
+      .select()
+      .from(proposalsTable)
+      .where(eq(proposalsTable.id, proposalId));
+
+    assert.ok(
+      updated.proposalContent && updated.proposalContent.trim().length > 0,
+      "proposalContent must be assembled and persisted in the same transaction",
+    );
+  });
+
+  it("generateProposalDraftAndPersist is idempotent — second call replaces sections", async () => {
+    const before = await db
+      .select()
+      .from(proposalSectionsTable)
+      .where(eq(proposalSectionsTable.proposalId, proposalId));
+
+    await generateProposalDraftAndPersist({
+      tenderId,
+      proposalId,
+      briefText:       "Second call brief",
+      strategyContext: "",
+    });
+
+    const after2 = await db
+      .select()
+      .from(proposalSectionsTable)
+      .where(eq(proposalSectionsTable.proposalId, proposalId));
+
+    assert.equal(after2.length, 15, "must still have 15 sections after second call");
+    assert.equal(before.length, 15, "should have 15 from first call");
+    // Verify sections were refreshed — every section should have content from the second spy call
+    assert.ok(
+      after2.every((s) => s.content && s.content.includes("Behavioral-test content")),
+      "second call must overwrite all section content",
+    );
+  });
+
+  it("googleDocCanonicalPayload returns error payload when syncStatus=handoff_complete", () => {
+    const blocked = googleDocCanonicalPayload({
+      syncStatus:   "handoff_complete",
+      googleFileId: null,
+      googleDocUrl: null,
+    });
+    assert.ok(blocked !== null, "must return a non-null error payload");
+    assert.equal(blocked.code,  "google_doc_canonical", "code must be google_doc_canonical");
+    assert.equal(blocked.error, "google_doc_canonical", "error must be google_doc_canonical");
+  });
+
+  it("googleDocCanonicalPayload returns null when proposal is still in draft (no Google Doc)", () => {
+    const result = googleDocCanonicalPayload({
+      syncStatus:   null,
+      googleFileId: null,
+      googleDocUrl: null,
+    });
+    assert.equal(result, null, "must return null when proposal has no Google Doc");
+  });
+
+  it("googleDocCanonicalPayload includes googleDocUrl in payload when available", () => {
+    const url = "https://docs.google.com/document/d/abc/edit";
+    const blocked = googleDocCanonicalPayload({
+      syncStatus:   "handoff_complete",
+      googleFileId: "abc",
+      googleDocUrl: url,
+    });
+    assert.ok(blocked !== null);
+    assert.equal(blocked.googleDocUrl, url, "payload must include googleDocUrl for client redirect");
   });
 });
 

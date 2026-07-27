@@ -29,6 +29,58 @@ paths:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
 
+  /proposals/workspace:
+    get:
+      operationId: listProposalsWorkspace
+      tags: [proposals]
+      summary: List all opportunities with linked proposal state for the Proposals workspace
+      responses:
+        "200":
+          description: Workspace items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WorkspaceItem"
+
+  /opportunities/{id}/run-full-generation:
+    post:
+      operationId: runFullGeneration
+      tags: [tenders]
+      summary: Start the full extract → strategy → draft pipeline for an opportunity
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "202":
+          description: Generation accepted (or already running / already complete)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunFullGenerationResponse"
+        "404":
+          description: Opportunity not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Proposal is a canonical Google Doc
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /proposals:
     get:
       operationId: listProposals
@@ -351,13 +403,24 @@ components:
           type: string
         status:
           type: string
-          enum: [draft, exported]
+        generationStatus:
+          type: string
+          nullable: true
         briefText:
           type: string
         proposalContent:
           type: string
         googleDocUrl:
           type: string
+          nullable: true
+        googleFileId:
+          type: string
+          nullable: true
+        syncStatus:
+          type: string
+          nullable: true
+        tenderId:
+          type: integer
           nullable: true
         createdAt:
           type: string
@@ -374,6 +437,87 @@ components:
         - proposalContent
         - createdAt
         - updatedAt
+
+    WorkspaceProposal:
+      type: object
+      properties:
+        id:
+          type: integer
+        generationStatus:
+          type: string
+          nullable: true
+        status:
+          type: string
+        syncStatus:
+          type: string
+          nullable: true
+        googleDocUrl:
+          type: string
+          nullable: true
+        googleFileId:
+          type: string
+          nullable: true
+        updatedAt:
+          type: string
+          nullable: true
+      required:
+        - id
+        - status
+
+    WorkspaceItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        agency:
+          type: string
+        category:
+          type: string
+        status:
+          type: string
+        sourceType:
+          type: string
+          nullable: true
+        deadline:
+          type: string
+          nullable: true
+        valueAmount:
+          type: string
+          nullable: true
+        sourceUrl:
+          type: string
+          nullable: true
+        updatedAt:
+          type: string
+        createdAt:
+          type: string
+        proposalId:
+          type: integer
+          nullable: true
+        proposal:
+          $ref: "#/components/schemas/WorkspaceProposal"
+          nullable: true
+      required:
+        - id
+        - title
+        - agency
+        - category
+        - status
+        - updatedAt
+        - createdAt
+
+    RunFullGenerationResponse:
+      type: object
+      properties:
+        proposalId:
+          type: integer
+        generationStatus:
+          type: string
+      required:
+        - proposalId
+        - generationStatus
 
     CreateProposalBody:
       type: object

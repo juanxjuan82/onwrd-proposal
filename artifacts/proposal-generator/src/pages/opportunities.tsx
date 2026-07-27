@@ -595,55 +595,103 @@ function EnrichDrawer({
 
 // ── Opportunity Card ─────────────────────────────────────────────────────────
 function OpportunityCard({ opp, onReview }: { opp: Opportunity; onReview: () => void }) {
+  const [, setLocation] = useLocation();
+  const { toast } = useToast();
+  const pursue = usePursue(opp.id);
+
+  const isAlreadySelected = [
+    "bid_started", "proposal_drafting", "needs_onwrd_input",
+    "ready_for_review", "approved_for_export", "exported_to_drive",
+  ].includes(opp.status);
+
+  const handleSelect = async () => {
+    try {
+      await pursue.mutateAsync();
+      toast({ title: "Opportunity selected", description: "Added to your Proposals workspace." });
+      setLocation("/proposals");
+    } catch (err) {
+      toast({ title: "Failed to select", description: (err as Error).message, variant: "destructive" });
+    }
+  };
+
   return (
     <div className="group bg-card border rounded-lg hover:border-primary/40 transition-colors">
-      <button className="w-full text-left px-5 py-4" onClick={onReview}>
-        <div className="flex items-start gap-4">
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-              <SourceBadge opp={opp} />
-              <span className={`inline-flex items-center gap-1 text-xs ${
-                opp.status === "no_bid" ? "text-red-400"
-                  : opp.status === "bid_started" ? "text-emerald-400"
-                  : opp.status === "screened" || opp.status === "ready_for_review" ? "text-emerald-400"
-                  : opp.status === "analysing" ? "text-blue-400"
-                  : "text-muted-foreground"
-              }`}>
-                {statusIcon(opp.status)}
-                {statusLabel(opp.status)}
-              </span>
-              {opp.status === "analysing" && (
-                <Loader2 className="w-3 h-3 text-blue-400 animate-spin" />
-              )}
-              {opp.googleDocUrl && (
-                <a
-                  href={opp.googleDocUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => e.stopPropagation()}
-                  className="inline-flex items-center gap-1 text-[10px] text-emerald-400 border border-emerald-800/50 bg-emerald-950/30 rounded-full px-2 py-0.5 hover:bg-emerald-900/40 transition-colors"
-                >
-                  <FileText className="w-2.5 h-2.5" />
-                  View Bid Doc
-                </a>
-              )}
-            </div>
-            <h2 className="text-sm font-medium text-foreground group-hover:text-primary transition-colors leading-snug mb-1">
-              {opp.title}
-            </h2>
-            <p className="text-xs text-muted-foreground">
-              {opp.agency} · {opp.category}
-              {opp.deadline ? ` · Due ${format(new Date(opp.deadline), "MMM d, yyyy")}` : ""}
-              {opp.valueAmount ? ` · ${opp.valueAmount}` : ""}
-            </p>
+      <div className="flex items-start gap-4 px-5 py-4">
+        {/* Clickable info area → opens details drawer */}
+        <button className="flex-1 text-left" onClick={onReview}>
+          <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+            <SourceBadge opp={opp} />
+            <span className={`inline-flex items-center gap-1 text-xs ${
+              opp.status === "no_bid" ? "text-red-400"
+                : opp.status === "bid_started" ? "text-emerald-400"
+                : opp.status === "screened" || opp.status === "ready_for_review" ? "text-emerald-400"
+                : opp.status === "analysing" ? "text-blue-400"
+                : "text-muted-foreground"
+            }`}>
+              {statusIcon(opp.status)}
+              {statusLabel(opp.status)}
+            </span>
+            {opp.status === "analysing" && (
+              <Loader2 className="w-3 h-3 text-blue-400 animate-spin" />
+            )}
+            {opp.googleDocUrl && (
+              <a
+                href={opp.googleDocUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="inline-flex items-center gap-1 text-[10px] text-emerald-400 border border-emerald-800/50 bg-emerald-950/30 rounded-full px-2 py-0.5 hover:bg-emerald-900/40 transition-colors"
+              >
+                <FileText className="w-2.5 h-2.5" />
+                View Bid Doc
+              </a>
+            )}
           </div>
+          <h2 className="text-sm font-medium text-foreground group-hover:text-primary transition-colors leading-snug mb-1">
+            {opp.title}
+          </h2>
+          <p className="text-xs text-muted-foreground">
+            {opp.agency} · {opp.category}
+            {opp.deadline ? ` · Due ${format(new Date(opp.deadline), "MMM d, yyyy")}` : ""}
+            {opp.valueAmount ? ` · ${opp.valueAmount}` : ""}
+          </p>
+        </button>
 
-          <div className="flex items-center gap-3 shrink-0">
-            <ScoreColumn opp={opp} />
-            <ChevronRight className="w-4 h-4 text-muted-foreground group-hover:text-primary transition-colors" />
-          </div>
+        {/* Right: score + primary action */}
+        <div className="flex items-center gap-3 shrink-0">
+          <ScoreColumn opp={opp} />
+          {isAlreadySelected ? (
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5 text-xs text-emerald-400 border-emerald-800/50 whitespace-nowrap"
+              onClick={() => setLocation("/proposals")}
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" /> In Proposals
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              className="gap-1.5 text-xs bg-emerald-600 hover:bg-emerald-500 text-white whitespace-nowrap"
+              onClick={(e) => { e.stopPropagation(); void handleSelect(); }}
+              disabled={pursue.isPending}
+            >
+              {pursue.isPending
+                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Selecting…</>
+                : <><Zap className="w-3.5 h-3.5" /> Select</>
+              }
+            </Button>
+          )}
+          <button
+            type="button"
+            onClick={onReview}
+            title="View Details"
+            className="text-muted-foreground hover:text-foreground transition-colors p-1"
+          >
+            <ChevronRight className="w-4 h-4" />
+          </button>
         </div>
-      </button>
+      </div>
     </div>
   );
 }

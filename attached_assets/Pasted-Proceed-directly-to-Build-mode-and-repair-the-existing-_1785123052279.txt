@@ -1,0 +1,297 @@
+Proceed directly to Build mode and repair the existing Task #33 implementation. Do not return another plan.
+
+Repository: `juanxjuan82/onwrd-proposal`
+
+The reviewed `main` head was:
+
+`98201849bebb28e682f16ce5dfe1c9abc515b452`
+
+First verify the current `main` head. If it differs, report the new commits and stop before editing. Do not use the stale `replit/workflow-navigation-intake-consolidation` branch, which remains at `9325a55`.
+
+Create a new branch from the verified current `main` head:
+
+`replit/task-33-correctness-repair`
+
+Do not commit directly to `main`. Do not merge or deploy.
+
+## Objective
+
+Finish Task #33 correctly. Preserve Task #23’s Google handoff state machine and Task #32’s shared assembler, body-only section contract and pre-handoff editing functionality.
+
+The current implementation has the right shell, but it has database, orchestration, transactional, immutability, UI and test defects. Fix the defects below without changing scoring, crawler relevance, intake semantics, OAuth, Picker or folder validation.
+
+## 1. Add the missing database migration
+
+`generation_status` exists in the Drizzle schema but is not guaranteed to exist in an existing database.
+
+Add an idempotent, awaited migration:
+
+```sql
+ALTER TABLE proposals
+ADD COLUMN IF NOT EXISTS generation_status TEXT;
+```
+
+Use the repository’s migration convention if one exists. If startup DDL is the established convention, include this migration in the awaited database-readiness path so the API does not begin listening before the column exists.
+
+Do not rely on a manual Replit schema push.
+
+Add verification proving startup readiness includes `generation_status`.
+
+## 2. Restore the API specification as the source of truth
+
+Update `lib/api-spec/openapi.yaml` with:
+
+* `generationStatus` on Proposal
+* The Proposals workspace response model
+* `GET /proposals/workspace`
+* `POST /opportunities/{id}/run-full-generation`
+* Its `202`, `404`, `409` and `500` responses
+* The returned `proposalId` and persisted generation status values
+
+Regenerate the API Zod/client artifacts using the repository’s normal generator. Do not hand-edit generated files when a generator exists.
+
+Remove unnecessary `Record<string, unknown>` casts and raw local API types where the generated contract can be used.
+
+## 3. Repair the generation orchestrator
+
+Keep:
+
+`POST /api/opportunities/:id/run-full-generation`
+
+It must return `202 Accepted` quickly and execute generation in the background.
+
+Preserve the concurrent-safe canonical Proposal creation and row locking, but change the phase behavior as follows.
+
+### Completion evidence
+
+Requirements are complete only when:
+
+* At least one persisted requirement exists.
+* `requirementsExtractedAt` is set.
+
+Strategy is complete only when a meaningful persisted strategy exists.
+
+Draft is complete only when:
+
+* Meaningful section content exists.
+* The assembled snapshot matches `assembleProposalFromSections`.
+* The Proposal is in a terminal ready state.
+
+Do not infer completion from status strings alone.
+
+### Retry and idempotency
+
+* If generation is active and not stale, return the existing Proposal and active status without starting another job.
+* If all phases are complete, return the existing ready Proposal without AI calls or content mutations.
+* Retry must begin at the first incomplete phase.
+* Do not delete sections when claiming generation.
+* Do not delete and recreate sections before the draft AI call.
+* Do not discard an existing good draft when extraction, strategy, scheduling or drafting fails.
+* If extraction produces zero persisted requirements, mark generation failed and stop. Do not continue to strategy or drafting.
+* A failed draft retry may rerun the draft AI call, but completed extraction and strategy must not be repeated.
+* Concurrent Generate or Retry requests must start one background job and create one linked Proposal.
+* A canonical Google Doc must continue to return HTTP 409 with code `google_doc_canonical`.
+
+### Remove duplicated draft-generation logic
+
+The old `generate-proposal` route and `runFullGenerationBackground` currently contain parallel copies of the drafting prompt, AI parsing and section-writing logic.
+
+Extract one shared backend draft-generation service and have both compatibility and orchestrated routes call it. Do not retain two copies of the prompt and persistence loop.
+
+No compatibility route should be deleted.
+
+## 4. Make section persistence genuinely transactional
+
+The AI call must happen outside the database transaction.
+
+After valid AI output is available, one transaction must perform:
+
+1. Upsert or replace all affected section rows.
+2. Read all ordered sections.
+3. Assemble content with `assembleProposalFromSections`.
+4. Update `proposals.proposalContent`.
+5. Update Proposal and Opportunity terminal statuses.
+6. Commit everything together.
+
+If snapshot assembly or update fails, section changes must roll back.
+
+Apply the same rule to:
+
+* Initial/orchestrated draft generation
+* The legacy generation compatibility route
+* AI improve/rewrite
+* Any other app-controlled section-content mutation
+
+The current AI-improve implementation writes individual sections before opening the snapshot transaction. Fix that.
+
+Do not destroy existing section content until replacement AI output has been successfully parsed and validated.
+
+## 5. Complete Google-canonical immutability
+
+Create or reuse one shared `googleDocCanonicalPayload`/predicate.
+
+After `handoff_complete` or for a legacy-linked Google Doc, reject all app-side proposal content, review and generation mutations with:
+
+* HTTP 409
+* Code `google_doc_canonical`
+* Existing Google Doc URL when available
+
+At minimum, guard:
+
+* `PUT /api/proposals/:id`
+* Section update
+* Run critic
+* AI improve/rewrite
+* Approve for export
+* Legacy proposal regeneration
+* Full generation orchestration
+
+Do not block `pending_first_write` or `handoff_in_progress` behavior beyond Task #23’s existing rules.
+
+On the frontend, once Google Docs is canonical:
+
+* Render the app view as read-only.
+* Hide Save, section editing, critic, improve, approve and generation controls.
+* Do not show editable client or industry fields.
+* Make Open Google Doc the only primary workflow action.
+* Do not perform Google mutations when opening an existing document.
+
+## 6. Actually simplify Discover
+
+The Discover page must contain only crawler-sourced Opportunities.
+
+Each row must show useful read-only metadata and one obvious action:
+
+**Select**
+
+Selecting must remain idempotent and put the crawler Opportunity into Proposals. It may create the empty linked Proposal through the existing concurrency-safe `/pursue` compatibility logic, because Generate Proposal will create or return the same canonical Proposal.
+
+Remove the Enrich drawer from the primary flow. Do not expose these as primary Discover actions:
+
+* Re-score
+* Save Changes
+* Full Detail
+* Editable metadata fields
+* Analyze
+* Extract
+* Strategy
+
+Keep Run Crawl and the global Add RFP menu. A subtle source-document link may remain.
+
+After Select, remove the item from Discover and navigate to or highlight it in Proposals.
+
+## 7. Finish the Proposals state-driven actions
+
+`/proposals` remains canonical.
+
+Each eligible Opportunity must have exactly one state-driven primary action:
+
+| State                            | Action                            |
+| -------------------------------- | --------------------------------- |
+| No linked Proposal or idle draft | Generate Proposal                 |
+| Extracting                       | Reading RFP status only           |
+| Strategizing                     | Developing strategy status only   |
+| Drafting                         | Writing proposal status only      |
+| Failed                           | Retry                             |
+| Ready                            | Share to [configured folder name] |
+| Google handoff complete          | Open Google Doc                   |
+
+Do not show Open Proposal as the ready-state primary action.
+
+Load the configured Drive folder name and allow Share directly from the ready card using Task #23’s existing export/handoff endpoint. Refresh the card after success so it becomes Open Google Doc.
+
+The card itself may still open the proposal detail page for review.
+
+After paste or upload creation, redirect to:
+
+`/proposals?opportunity={createdOpportunityId}`
+
+Highlight or scroll to the new item. Do not redirect merely to an unmarked list.
+
+## 8. Simplify proposal detail
+
+When generation becomes ready, render the assembled proposal preview automatically.
+
+Remove the Full Proposal Preview / Sections tab switcher. Seeing the proposal must require no tab or preview action.
+
+Before handoff:
+
+* Show the assembled preview as the default view.
+* Provide at most one secondary Edit Proposal disclosure/button if section editing is required.
+* Move critic, auto-improve, approval and section-management controls inside that secondary editing area.
+* Keep Share to [folder] as the clear primary action.
+
+After handoff:
+
+* Show only the read-only preview/status and Open Google Doc.
+* Do not expose app-side editing controls.
+
+Preserve the blank/freeform Proposal fallback and loading guard from Task #32.
+
+## 9. Replace structural-only Task #33 tests
+
+The current Task #33 tests mainly read source files and assert that strings exist. That is not sufficient evidence.
+
+Add substantive behavioral tests using imported production services/routes and a transaction-capable database fixture or faithful database mock.
+
+Cover:
+
+* Existing database receives `generation_status` before the server accepts requests.
+* Concurrent Generate calls create one Proposal and one generation job.
+* The endpoint returns `202` before AI completion.
+* Completed extraction and strategy are skipped on retry.
+* A completed draft causes zero new AI calls and zero section mutations.
+* Zero extracted requirements fails before strategy.
+* Draft failure preserves prior section content and snapshot.
+* Successful draft section writes and snapshot update commit atomically.
+* Forced snapshot failure rolls back section changes.
+* AI improve section writes and snapshot update commit atomically.
+* Refreshable statuses advance through extracting, strategizing, drafting, ready and failed.
+* Canonical Google Docs reject Proposal PUT, section, critic, improve, approve and generation mutations.
+* `pending_first_write` remains allowed.
+* Non-crawler Opportunities appear directly in Proposals.
+* Only crawler Opportunities appear in Discover.
+* Select is idempotent.
+* Upload and paste redirect/highlight the new Proposals item.
+* Ready cards expose Share to the configured folder.
+* Completed handoffs expose Open Google Doc.
+* Removed phase buttons and the Preview/Sections tab switcher are absent from the primary UI.
+
+Structural assertions may supplement these tests, but they cannot be the primary evidence.
+
+## 10. Verification
+
+Run and require exit code 0 for:
+
+1. Frontend typecheck
+2. API typecheck
+3. Complete API test suite twice consecutively
+4. Frontend production build
+5. API production build
+
+Also confirm:
+
+* The OpenAPI-generated artifacts are current.
+* The database migration is committed.
+* No duplicate draft-generation prompt/persistence implementation remains.
+* No unrelated files changed.
+* Working tree is clean after commit.
+
+Do not push until every required check passes.
+
+Then push only:
+
+`replit/task-33-correctness-repair`
+
+Do not merge or deploy.
+
+Report:
+
+* Final commit SHA
+* Exact changed files
+* Migration applied
+* New behavioral test names and totals
+* Raw exit codes for every required command
+* Confirmation that both full test runs passed
+* Clean working-tree status
+* Confirmation that `main` and production were not changed

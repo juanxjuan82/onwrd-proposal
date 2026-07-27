@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { googleDocCanonicalPayload } from "../lib/proposal-predicates.js";
 import { db } from "@workspace/db";
 import {
   proposalSectionsTable,
@@ -20,29 +21,7 @@ type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 // ── Immutability guard helper ─────────────────────────────────────────────
 // Returns a 409-ready payload when the proposal has a canonical Google Doc,
-// or null if mutations are still permitted.
-function googleDocCanonicalPayload(proposal: {
-  syncStatus: string | null;
-  googleFileId: string | null;
-  googleDocUrl: string | null;
-}): { error: string; googleDocUrl: string | null } | null {
-  const isHandoffComplete = proposal.syncStatus === "handoff_complete";
-  const isLegacyLinked =
-    !!proposal.googleFileId &&
-    proposal.syncStatus !== "pending_first_write" &&
-    proposal.syncStatus !== "handoff_in_progress" &&
-    !isHandoffComplete;
-
-  if (isHandoffComplete || isLegacyLinked) {
-    const googleDocUrl =
-      proposal.googleDocUrl ??
-      (proposal.googleFileId
-        ? `https://docs.google.com/document/d/${proposal.googleFileId}/edit`
-        : null);
-    return { error: "google_doc_canonical", googleDocUrl };
-  }
-  return null;
-}
+// (googleDocCanonicalPayload imported from ../lib/proposal-predicates.js)
 
 // ── List sections for a proposal ──────────────────────────────────────────
 router.get("/proposals/:id/sections", async (req, res) => {
@@ -279,6 +258,13 @@ router.post("/proposals/:id/approve-for-export", async (req, res) => {
 
   if (!proposal) {
     res.status(404).json({ error: "Proposal not found" });
+    return;
+  }
+
+  // ── Immutability guard ─────────────────────────────────────────────────
+  const blocked = googleDocCanonicalPayload(proposal);
+  if (blocked) {
+    res.status(409).json(blocked);
     return;
   }
 
@@ -671,27 +657,30 @@ Return JSON with an "improvements" array. Each element:
       const data = JSON.parse(raw);
       const improvements: { sectionKey: string; content: string; changesSummary: string }[] = data.improvements ?? [];
 
-      for (const improvement of improvements) {
-        const section = sectionsToImprove.find((s) => s.sectionKey === improvement.sectionKey);
-        if (!section || !improvement.content) continue;
-
-        const hasBlocker = improvement.content.includes("[NEEDS ONWRD INPUT");
-        await db
-          .update(proposalSectionsTable)
-          .set({
-            content: improvement.content,
-            status: hasBlocker ? "blocked_missing_input" : "drafted",
-            criticFindings: null,
-            updatedAt: new Date(),
-          })
-          .where(and(
-            eq(proposalSectionsTable.id, section.id),
-            eq(proposalSectionsTable.proposalId, proposalId)
-          ));
-      }
-
-      // Rebuild proposalContent atomically after all section improvements
+      // Atomic: write all improved sections AND rebuild snapshot in one transaction.
+      // If anything fails, no section writes are committed and the prior
+      // snapshot is preserved.
       await db.transaction(async (tx: DbTx) => {
+        for (const improvement of improvements) {
+          const section = sectionsToImprove.find((s) => s.sectionKey === improvement.sectionKey);
+          if (!section || !improvement.content) continue;
+
+          const hasBlocker = improvement.content.includes("[NEEDS ONWRD INPUT");
+          await tx
+            .update(proposalSectionsTable)
+            .set({
+              content:        improvement.content,
+              status:         hasBlocker ? "blocked_missing_input" : "drafted",
+              criticFindings: null,
+              updatedAt:      new Date(),
+            })
+            .where(and(
+              eq(proposalSectionsTable.id, section.id),
+              eq(proposalSectionsTable.proposalId, proposalId),
+            ));
+        }
+
+        // Rebuild snapshot from all sections (including unchanged ones)
         const allSections = await tx
           .select()
           .from(proposalSectionsTable)
