@@ -330,6 +330,51 @@ function isBoilerplateDescription(desc: string): boolean {
   return stubPatterns.some((p) => p.test(t));
 }
 
+// ── Backfill promotions for existing eligible discoveries ────────────────────
+// Finds all discovered_tenders that were never promoted (opportunityId IS NULL)
+// and have a CONSIDER or PURSUE recommendation, then re-evaluates eligibility
+// against the current rules and promotes any that now pass.
+// Safe to run multiple times — promotion is idempotent (opportunityId guard inside the service).
+export async function backfillPromotions(): Promise<{ evaluated: number; promoted: number; skipped: number }> {
+  const items = await db
+    .select()
+    .from(discoveredTendersTable)
+    .where(
+      sql`${discoveredTendersTable.opportunityId} IS NULL
+          AND ${discoveredTendersTable.recommendation} IN ('CONSIDER', 'PURSUE')`
+    );
+
+  let promoted = 0;
+  let skipped = 0;
+
+  for (const item of items) {
+    const eligibility = evaluateCrawlerEligibility({
+      title:          item.title,
+      description:    item.description,
+      recommendation: item.recommendation ?? "SKIP",
+      deadline:       item.deadline,
+    });
+
+    if (eligibility.eligible) {
+      try {
+        const dest = eligibility.destination === "reviewing" ? "reviewing" : "new";
+        await promoteDiscoveredTender(item.id, dest);
+        promoted++;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.warn(`[backfill] promote id=${item.id} failed: ${msg.slice(0, 80)}`);
+        skipped++;
+      }
+    } else {
+      const reason = eligibility.rejectionReasons[0] ?? "ineligible";
+      console.log(`[backfill] id=${item.id} still ineligible (${reason})`);
+      skipped++;
+    }
+  }
+
+  return { evaluated: items.length, promoted, skipped };
+}
+
 // ── Rescore all existing items with keyword engine ──────────────────────────
 export async function rescoreWithKeywords(): Promise<number> {
   const items = await db.select().from(discoveredTendersTable);

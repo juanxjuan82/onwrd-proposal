@@ -8,7 +8,7 @@ import {
   tenderDigestSettingsTable,
 } from "@workspace/db";
 import { eq, desc, and, gte } from "drizzle-orm";
-import { runCrawler, rescoreWithKeywords, isCrawlRunning } from "../crawlers/index.js";
+import { runCrawler, rescoreWithKeywords, backfillPromotions, isCrawlRunning } from "../crawlers/index.js";
 import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
 
 const router = Router();
@@ -53,6 +53,22 @@ router.post("/tender-intelligence/rescore", async (req, res) => {
   try {
     const count = await rescoreWithKeywords();
     res.json({ message: `Re-scored ${count} items using keyword engine`, count });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+// ── Backfill: promote existing eligible discoveries ────────────────────────
+// Finds all discovered_tenders with CONSIDER/PURSUE recommendation that were
+// never promoted (opportunityId IS NULL) and promotes the eligible ones.
+// Safe to run multiple times — idempotent.
+router.post("/tender-intelligence/backfill-promotions", async (req, res) => {
+  try {
+    const result = await backfillPromotions();
+    res.json({
+      message: `Backfill complete: ${result.promoted} promoted, ${result.skipped} skipped (${result.evaluated} evaluated)`,
+      ...result,
+    });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
   }
