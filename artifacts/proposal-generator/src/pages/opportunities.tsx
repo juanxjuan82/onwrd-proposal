@@ -367,15 +367,15 @@ function EnrichDrawer({
 
   const handleStartBid = async () => {
     try {
-      const result = await pursue.mutateAsync();
+      await pursue.mutateAsync();
       toast({
-        title: "Bid workspace created",
-        description: "Opening the proposal workspace…",
+        title: "Opportunity selected",
+        description: "Added to your Proposals workspace.",
       });
       onClose();
-      setLocation(`/proposals/${result.proposalId}`);
+      setLocation("/proposals");
     } catch (err) {
-      toast({ title: "Failed to pursue opportunity", description: (err as Error).message, variant: "destructive" });
+      toast({ title: "Failed to select opportunity", description: (err as Error).message, variant: "destructive" });
     }
   };
 
@@ -562,8 +562,8 @@ function EnrichDrawer({
             disabled={pursue.isPending}
           >
             {pursue.isPending
-              ? <><Loader2 className="w-4 h-4 animate-spin" /> Opening workspace…</>
-              : <><Zap className="w-4 h-4" /> Pursue this Opportunity</>
+              ? <><Loader2 className="w-4 h-4 animate-spin" /> Selecting…</>
+              : <><Zap className="w-4 h-4" /> Select this Opportunity</>
             }
           </Button>
 
@@ -780,7 +780,8 @@ export default function Opportunities() {
     }
   }, [search, setLocation]);
 
-  const all = opportunities ?? [];
+  // Only crawler-sourced opportunities appear in Discover
+  const all = (opportunities ?? []).filter((o) => o.sourceType === "crawler");
 
   const tabCounts = Object.fromEntries(
     FILTER_TABS.map((t) => [t.key, all.filter(t.test).length]),
@@ -792,8 +793,8 @@ export default function Opportunities() {
     <div className="p-8 max-w-6xl mx-auto">
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-white mb-1 tracking-tight">Opportunities</h1>
-          <p className="text-muted-foreground text-sm">Score, enrich, and decide — then pursue or pass.</p>
+          <h1 className="text-3xl font-bold text-white mb-1 tracking-tight">Discover</h1>
+          <p className="text-muted-foreground text-sm">Review crawler discoveries — select the ones worth pursuing.</p>
         </div>
         <Button
           variant="outline"

@@ -1493,6 +1493,350 @@ ${SECTION_DEFINITIONS.map((s) => `- ${s.key}: ${s.title}`).join("\n")}`,
   })();
 });
 
+// ── Full generation pipeline (extract → strategy → draft) ────────────────
+// Returns 202 immediately. Background chaining handles all three phases with
+// phase-skip via persisted completion evidence (Task #32).
+
+const FULL_GEN_STALE_MS = 5 * 60 * 1000; // 5 minutes
+
+async function runFullGenerationBackground(
+  tenderId: number,
+  proposalId: number,
+): Promise<void> {
+  const setGenStatus = async (status: string) => {
+    await db.execute(
+      sql`UPDATE proposals SET generation_status = ${status}, updated_at = NOW() WHERE id = ${proposalId}`,
+    );
+  };
+
+  const fail = async (err: unknown) => {
+    const { code } = classifyError(err);
+    console.error(
+      `[full-gen] proposal=${proposalId} code=${code}:`,
+      (err instanceof Error ? err.message : String(err)).slice(0, 200),
+    );
+    await db.execute(
+      sql`UPDATE proposals SET generation_status = 'failed', status = 'draft', updated_at = NOW() WHERE id = ${proposalId}`,
+    );
+  };
+
+  try {
+    // Phase 1: Requirements extraction — skip if persisted evidence exists
+    const [reqCount] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(tenderRequirementsTable)
+      .where(eq(tenderRequirementsTable.tenderId, tenderId));
+    const [tenderMeta] = await db
+      .select({ requirementsExtractedAt: tendersTable.requirementsExtractedAt })
+      .from(tendersTable)
+      .where(eq(tendersTable.id, tenderId));
+    const extractionComplete =
+      (reqCount?.count ?? 0) > 0 && !!tenderMeta?.requirementsExtractedAt;
+
+    if (!extractionComplete) {
+      const inserted = await runExtractRequirements(tenderId);
+      if (inserted.length === 0) {
+        console.warn(`[full-gen] tender=${tenderId}: no requirements extracted, continuing`);
+      }
+    }
+
+    // Phase 2: Strategy generation — skip if strategy row exists
+    await setGenStatus("strategizing");
+
+    const [existingStrategy] = await db
+      .select({ id: proposalStrategiesTable.id })
+      .from(proposalStrategiesTable)
+      .where(eq(proposalStrategiesTable.tenderId, tenderId))
+      .orderBy(desc(proposalStrategiesTable.createdAt))
+      .limit(1);
+
+    if (!existingStrategy) {
+      await runGenerateStrategy(tenderId);
+    }
+
+    // Phase 3: Proposal draft — reload everything freshly after prior phases
+    await setGenStatus("drafting");
+
+    const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, tenderId));
+    if (!tender) throw new Error(`Tender ${tenderId} not found during full-gen draft phase`);
+
+    const requirements = await db
+      .select()
+      .from(tenderRequirementsTable)
+      .where(eq(tenderRequirementsTable.tenderId, tenderId))
+      .orderBy(tenderRequirementsTable.orderIndex);
+
+    const [latestStrategy] = await db
+      .select()
+      .from(proposalStrategiesTable)
+      .where(eq(proposalStrategiesTable.tenderId, tenderId))
+      .orderBy(desc(proposalStrategiesTable.createdAt))
+      .limit(1);
+
+    const fullBriefText = `TENDER OPPORTUNITY — ${tender.title}
+
+Issuing Agency: ${tender.agency}
+Category: ${tender.category}
+${tender.deadline ? `Submission Deadline: ${new Date(tender.deadline).toDateString()}` : ""}
+${tender.valueAmount ? `Estimated Value: ${tender.valueAmount}` : ""}
+${tender.contactInfo ? `Contact: ${tender.contactInfo}` : ""}
+${tender.sourceUrl ? `Source: ${tender.sourceUrl}` : ""}
+
+SCOPE / DESCRIPTION:
+${tender.description}
+
+${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i) => `${i + 1}. [${r.category}${r.isMandatory ? ", MANDATORY" : ""}] ${r.requirementText}`).join("\n")}` : ""}`;
+
+    const fullStrategyContext = latestStrategy
+      ? `\nPROPOSAL STRATEGY BRIEF:\nPositioning: ${latestStrategy.positioning}\nWin Themes: ${JSON.parse(latestStrategy.winThemes ?? "[]").join(", ")}\nRecommended Case Studies: ${JSON.parse(latestStrategy.recommendedCaseStudies ?? "[]").join(", ")}\nMessaging Guidance: ${latestStrategy.messagingGuidance}\nRisks to Address: ${JSON.parse(latestStrategy.risks ?? "[]").join(", ")}`
+      : "";
+
+    // Reset + seed blank section shells
+    await db.execute(sql`DELETE FROM proposal_sections WHERE proposal_id = ${proposalId}`);
+    await db
+      .insert(proposalSectionsTable)
+      .values(
+        SECTION_DEFINITIONS.map((s) => ({
+          proposalId,
+          sectionKey: s.key,
+          title:      s.title,
+          content:    "",
+          status:     "not_started",
+          orderIndex: s.order,
+        })),
+      );
+
+    // AI call — same prompt as generate-proposal
+    const genAiResult = await invokeAI({
+      feature: "proposal_generation",
+      messages: [
+        {
+          role: "system",
+          content: `You are a senior proposal writer at ONWRD, a full-service marketing and strategy agency in the Bahamas. Write a complete, professional proposal responding to a public tender opportunity.
+
+RULES:
+- Write in plain, direct English. No jargon, no waffle, no filler.
+- Do NOT invent ONWRD credentials, metrics, clients, or outcomes not supported by the case studies below.
+- If a section requires specific ONWRD information you don't have (specific pricing, team member names, certifications), insert [NEEDS ONWRD INPUT: brief description of what is needed].
+- Never fabricate specific numbers, dates, or facts about the tender that aren't in the brief.
+- The Case Studies section MUST cite real ONWRD work from the list below.
+- Follow the proposal strategy brief closely — use the positioning, win themes, and recommended case studies provided.
+
+${ONWRD_CASE_STUDIES}
+
+Return JSON with a "sections" array. Each element:
+- key: the section key
+- content: the section BODY ONLY — do NOT start with the section title as a heading. Internal subheadings should use ### (level 3 only). Use markdown bold with ** and bullets with -.`,
+        },
+        {
+          role: "user",
+          content: `Write all 15 sections of a proposal for this tender:
+
+${fullBriefText}
+${fullStrategyContext}
+
+Sections to write (return all 15):
+${SECTION_DEFINITIONS.map((s) => `- ${s.key}: ${s.title}`).join("\n")}`,
+        },
+      ],
+      maxTokens:      16000,
+      responseFormat: { type: "json_object" },
+      proposalId,
+    });
+
+    const rawContent = genAiResult.content;
+    const genData = JSON.parse(rawContent) as { sections?: { key: string; content: string }[] };
+    const genSections: { key: string; content: string }[] = genData.sections ?? [];
+
+    const [genRun] = await db
+      .insert(proposalGenerationRunsTable)
+      .values({
+        proposalId,
+        model:                 genAiResult.model,
+        promptVersion:         "2.0",
+        retrievedKnowledgeIds: "[]",
+        status:                "completed",
+      })
+      .returning();
+
+    let hasBlockedSections = false;
+    for (const sectionDef of SECTION_DEFINITIONS) {
+      const generated  = genSections.find((s) => s.key === sectionDef.key);
+      const content    = generated?.content ?? `[NEEDS ONWRD INPUT: ${sectionDef.title} section not generated]`;
+      const hasBlocker = content.includes("[NEEDS ONWRD INPUT");
+      if (hasBlocker) hasBlockedSections = true;
+      const secStatus  = hasBlocker ? "blocked_missing_input" : "drafted";
+      await db
+        .update(proposalSectionsTable)
+        .set({ content, status: secStatus, generationRunId: genRun.id, updatedAt: new Date() })
+        .where(and(
+          eq(proposalSectionsTable.proposalId, proposalId),
+          eq(proposalSectionsTable.sectionKey, sectionDef.key),
+        ));
+    }
+
+    const updatedSections = await db
+      .select()
+      .from(proposalSectionsTable)
+      .where(eq(proposalSectionsTable.proposalId, proposalId))
+      .orderBy(proposalSectionsTable.orderIndex);
+
+    const finalStatus = hasBlockedSections ? "needs_onwrd_input" : "ready_for_review";
+
+    await db.execute(sql`
+      UPDATE proposals
+      SET proposal_content = ${assembleProposalFromSections(updatedSections)},
+          generation_status = 'ready',
+          status = ${finalStatus},
+          updated_at = NOW()
+      WHERE id = ${proposalId}
+    `);
+
+    await db
+      .update(tendersTable)
+      .set({ status: finalStatus, updatedAt: new Date() })
+      .where(eq(tendersTable.id, tenderId));
+
+  } catch (err) {
+    await fail(err);
+  }
+}
+
+router.post("/opportunities/:id/run-full-generation", async (req, res) => {
+  const id = Number(req.params.id);
+  if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, id));
+  if (!tender) { res.status(404).json({ error: "Opportunity not found" }); return; }
+
+  const initBriefText = `TENDER OPPORTUNITY — ${tender.title}
+
+Issuing Agency: ${tender.agency}
+Category: ${tender.category}
+${tender.deadline ? `Submission Deadline: ${new Date(tender.deadline).toDateString()}` : ""}
+${tender.valueAmount ? `Estimated Value: ${tender.valueAmount}` : ""}
+
+SCOPE / DESCRIPTION:
+${tender.description}`;
+
+  type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+  let proposalId: number;
+  let currentGenStatus: string;
+
+  try {
+    const result = await db.transaction(async (tx: DbTx) => {
+      // 1. Ensure canonical proposal row exists — ON CONFLICT DO NOTHING is race-safe
+      await tx.execute(sql`
+        INSERT INTO proposals (client_name, industry, brief_text, proposal_content, status, tender_id, created_at, updated_at)
+        VALUES (${tender.agency}, ${tender.category}, ${initBriefText}, ${""},  ${"draft"}, ${id}, NOW(), NOW())
+        ON CONFLICT (tender_id) DO NOTHING
+      `);
+
+      // 2. Lock the row
+      const lockedResult = await tx.execute(sql`
+        SELECT id, status, generation_status, updated_at, sync_status, google_file_id, google_doc_url
+        FROM proposals WHERE tender_id = ${id} FOR UPDATE
+      `);
+      const locked = lockedResult.rows[0] as {
+        id: number;
+        status: string;
+        generation_status: string | null;
+        updated_at: string | null;
+        sync_status: string | null;
+        google_file_id: string | null;
+        google_doc_url: string | null;
+      } | undefined;
+      if (!locked) throw new Error("Proposal row missing after concurrent-safe insert");
+
+      // 3. Guard: don't overwrite a canonical Google Doc
+      {
+        const isHandoffComplete = locked.sync_status === "handoff_complete";
+        const isLegacyLinked =
+          !!locked.google_file_id &&
+          locked.sync_status !== "pending_first_write" &&
+          locked.sync_status !== "handoff_in_progress" &&
+          !isHandoffComplete;
+        if (isHandoffComplete || isLegacyLinked) {
+          const e = new Error("GOOGLE_DOC_CANONICAL") as NodeJS.ErrnoException & { googleDocUrl?: string };
+          e.code       = "GOOGLE_DOC_CANONICAL";
+          e.googleDocUrl = locked.google_doc_url ?? (locked.google_file_id ? `https://docs.google.com/document/d/${locked.google_file_id}/edit` : undefined);
+          throw e;
+        }
+      }
+
+      // 4. If generation is active and not stale, return current status without relaunching
+      const ACTIVE_GEN_STATUSES = ["extracting", "strategizing", "drafting"];
+      if (ACTIVE_GEN_STATUSES.includes(locked.generation_status ?? "")) {
+        const startedAt = locked.updated_at ? new Date(locked.updated_at).getTime() : 0;
+        if (Date.now() - startedAt < FULL_GEN_STALE_MS) {
+          return { proposalId: locked.id, generationStatus: locked.generation_status as string, alreadyRunning: true };
+        }
+      }
+
+      // 5. Claim generation — atomically set extracting + proposal_drafting
+      await tx.execute(sql`
+        UPDATE proposals
+        SET generation_status = 'extracting',
+            status            = 'proposal_drafting',
+            client_name       = ${tender.agency},
+            industry          = ${tender.category},
+            brief_text        = ${initBriefText},
+            updated_at        = NOW()
+        WHERE id = ${locked.id}
+      `);
+
+      // 6. Link tender → proposal; mark tender as in-progress
+      await tx.execute(sql`
+        UPDATE tenders
+        SET proposal_id = ${locked.id}, status = 'proposal_drafting', updated_at = NOW()
+        WHERE id = ${id}
+      `);
+
+      // 7. Reset section shells idempotently
+      await tx.execute(sql`DELETE FROM proposal_sections WHERE proposal_id = ${locked.id}`);
+      await tx
+        .insert(proposalSectionsTable)
+        .values(
+          SECTION_DEFINITIONS.map((s) => ({
+            proposalId: locked.id,
+            sectionKey: s.key,
+            title:      s.title,
+            content:    "",
+            status:     "not_started",
+            orderIndex: s.order,
+          })),
+        );
+
+      return { proposalId: locked.id, generationStatus: "extracting", alreadyRunning: false };
+    });
+
+    proposalId      = result.proposalId;
+    currentGenStatus = result.generationStatus;
+
+    if (result.alreadyRunning) {
+      res.status(202).json({ proposalId, generationStatus: currentGenStatus });
+      return;
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "GOOGLE_DOC_CANONICAL") {
+      const e = err as NodeJS.ErrnoException & { googleDocUrl?: string };
+      res.status(409).json({
+        error:        "google_doc_canonical",
+        code:         "google_doc_canonical",
+        googleDocUrl: e.googleDocUrl,
+      });
+      return;
+    }
+    req.log.error({ err }, "Error in run-full-generation transaction");
+    res.status(500).json({ error: "Failed to start generation" });
+    return;
+  }
+
+  res.status(202).json({ proposalId, generationStatus: "extracting" });
+  void runFullGenerationBackground(id, proposalId);
+});
+
 // ── Manual tender import ───────────────────────────────────────────────────
 const manualUpload = multer({
   storage: multer.memoryStorage(),

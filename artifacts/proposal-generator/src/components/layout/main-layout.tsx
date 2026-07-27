@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { Link, useLocation } from "wouter";
 import {
   Plus, Target, LayoutDashboard, BookOpen, Settings,
-  Upload, FileText, Pencil, Link2, ChevronDown, X,
+  Upload, FileText, Link2, ChevronDown, X,
 } from "lucide-react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -43,7 +43,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
 
   const menuItems: { label: string; icon: React.ElementType; action: () => void }[] = [
     {
-      label: "Import RFP",
+      label: "Upload Document",
       icon: Upload,
       action: () => { navigate("/new?mode=import"); setMenuOpen(false); },
     },
@@ -53,17 +53,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
       action: () => { navigate("/new?mode=paste"); setMenuOpen(false); },
     },
     {
-      label: "Add Opportunity Manually",
-      icon: Pencil,
-      action: () => { navigate("/new?mode=manual"); setMenuOpen(false); },
-    },
-    {
-      label: "Create Blank Proposal",
-      icon: LayoutDashboard,
-      action: () => { navigate("/new?mode=blank"); setMenuOpen(false); },
-    },
-    {
-      label: "Prospect Intake Link",
+      label: "Copy Client Intake Link",
       icon: Link2,
       action: () => { setMenuOpen(false); setShowIntakeModal(true); },
     },
@@ -124,11 +114,11 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
             <Link href="/opportunities" className={navClass(isActive("/opportunities"))}>
               <div className="flex items-center gap-3">
                 <Target className="w-5 h-5 flex-shrink-0" />
-                <span>Opportunities</span>
+                <span>Discover</span>
               </div>
             </Link>
 
-            <Link href="/" className={navClass(location === "/")}>
+            <Link href="/proposals" className={navClass(location === "/proposals" || location === "/")}>
               <div className="flex items-center gap-3">
                 <LayoutDashboard className="w-5 h-5 flex-shrink-0" />
                 <span>Proposals</span>

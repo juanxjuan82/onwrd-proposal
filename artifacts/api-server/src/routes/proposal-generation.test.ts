@@ -26,6 +26,7 @@ const authSrc          = readFileSync(path.join(routesDir, "auth.ts"), "utf8");
 const appSrc           = readFileSync(path.join(apiSrcDir, "app.ts"), "utf8");
 const indexSrc         = readFileSync(path.join(apiSrcDir, "index.ts"), "utf8");
 const detailSrc        = readFileSync(path.join(frontendDir, "proposal-detail.tsx"), "utf8");
+const workspaceSrc     = readFileSync(path.join(frontendDir, "proposals-workspace.tsx"), "utf8");
 
 // ── §12  Generate-proposal — canonical-proposal resolution ─────────────────────
 
@@ -350,25 +351,27 @@ describe("§16 proposal-detail — polling and form sync", () => {
     );
   });
 
-  it("generation failure banner appears when proposalContent starts with Generation failed", () => {
+  it("generation failed state is surfaced via generationStatus in the status panel", () => {
+    // The simplified workflow shows gen status via generationStatus=failed
     assert.ok(
-      detailSrc.includes('startsWith("Generation failed")'),
-      "failure banner must check proposalContent.startsWith('Generation failed')"
+      detailSrc.includes('generationStatus === "failed"'),
+      "proposal-detail.tsx must show failed state by checking generationStatus === 'failed'"
     );
     assert.ok(
-      detailSrc.includes("generation-failure-banner"),
-      "failure banner must have data-testid=generation-failure-banner"
+      detailSrc.includes("gen-status-text"),
+      "gen-status-text testid must be present for the status label"
     );
   });
 
-  it("generation_in_progress 409 is handled with an informational toast, not an error", () => {
+  it("proposals-workspace uses run-full-generation to launch generation", () => {
+    // The workspace page (not proposal-detail) now drives generation via run-full-generation
     assert.ok(
-      detailSrc.includes('"generation_in_progress"'),
-      "handleGenerateDraft must handle the generation_in_progress 409 code"
+      workspaceSrc.includes("run-full-generation"),
+      "proposals-workspace.tsx must call the run-full-generation endpoint"
     );
     assert.ok(
-      detailSrc.includes("Already generating"),
-      "generation_in_progress must show an informational toast, not a destructive one"
+      workspaceSrc.includes("Generate Proposal"),
+      "proposals-workspace.tsx must show a Generate Proposal action"
     );
   });
 });

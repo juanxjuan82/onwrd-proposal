@@ -428,10 +428,6 @@ export default function ProposalDetail() {
   const [, setLocation] = useLocation();
   const [previewMode, setPreviewMode] = useState(false);
   const [activeTab, setActiveTab] = useState<"preview" | "sections">("preview");
-  const [extracting, setExtracting]                     = useState(false);
-  const [generatingStrategy, setGeneratingStrategy]     = useState(false);
-  const [generatingDraft, setGeneratingDraft]           = useState(false);
-  const [strategyPending, setStrategyPending]           = useState(false);
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -459,26 +455,9 @@ export default function ProposalDetail() {
     },
   });
 
-  // Derived from proposal — drives the readiness query below
+  // Derived from proposal
   const linkedTenderId = (proposal as Record<string, unknown> | undefined)?.tenderId as number | null | undefined;
-
-  const { data: readiness } = useQuery<{
-    tenderStatus: string;
-    isActive: boolean;
-    requirementsCount: number;
-    requirementsComplete: boolean;
-    strategyComplete: boolean;
-  } | null>({
-    queryKey: ["opportunity-readiness", linkedTenderId],
-    queryFn: async () => {
-      if (!linkedTenderId) return null;
-      const r = await fetch(`${BASE}/api/opportunities/${linkedTenderId}/readiness`);
-      if (!r.ok) return null;
-      return r.json();
-    },
-    enabled: !!linkedTenderId,
-    refetchInterval: strategyPending ? 3000 : false,
-  });
+  const generationStatus = (proposal as Record<string, unknown> | undefined)?.generationStatus as string | null | undefined;
 
   const hasSections = sectionsLoaded && sections && sections.length > 0;
 
@@ -526,21 +505,22 @@ export default function ProposalDetail() {
 
   // ── Continuous polling while proposal is being generated ──────────────────
   const isDrafting = (proposal?.status as string | undefined) === "proposal_drafting";
+  const isGenActive = isDrafting || ["extracting", "strategizing", "drafting"].includes(generationStatus ?? "");
   useEffect(() => {
-    if (!isDrafting) return;
+    if (!isGenActive) return;
     const poll = setInterval(() => {
       void queryClient.invalidateQueries({ queryKey: getGetProposalQueryKey(id) });
       void queryClient.invalidateQueries({ queryKey: ["proposal-sections", id] });
     }, 2500);
     return () => clearInterval(poll);
-  }, [isDrafting, id, queryClient]);
+  }, [isGenActive, id, queryClient]);
 
-  // ── Clear strategy-pending flag when readiness confirms strategy is done ──
+  // ── Auto-switch to preview when generation completes ─────────────────────
   useEffect(() => {
-    if (strategyPending && readiness?.strategyComplete) {
-      setStrategyPending(false);
+    if (generationStatus === "ready" && hasSections) {
+      setActiveTab("preview");
     }
-  }, [strategyPending, readiness?.strategyComplete]);
+  }, [generationStatus, hasSections]);
 
   const isFreeform = sectionsLoaded && (!sections || sections.length === 0) && !isDrafting;
 
@@ -611,67 +591,6 @@ export default function ProposalDetail() {
         toast({ title, description, variant: "destructive" });
       }
     });
-  };
-
-  const handleExtractRequirements = async () => {
-    if (!linkedTenderId) return;
-    setExtracting(true);
-    try {
-      const res = await fetch(`${BASE}/api/opportunities/${linkedTenderId}/extract-requirements`, { method: "POST" });
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) {
-        toast({ title: "Failed to start extraction", description: body.error ?? "Unknown error", variant: "destructive" });
-        return;
-      }
-      toast({ title: "Extracting requirements…", description: "AI is analysing the RFP — requirements will appear in the Opportunity." });
-      void queryClient.invalidateQueries({ queryKey: ["opportunity-readiness", linkedTenderId] });
-    } finally {
-      setExtracting(false);
-    }
-  };
-
-  const handleGenerateStrategy = async () => {
-    if (!linkedTenderId) return;
-    setGeneratingStrategy(true);
-    try {
-      const res = await fetch(`${BASE}/api/opportunities/${linkedTenderId}/generate-strategy`, { method: "POST" });
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      if (!res.ok) {
-        toast({ title: "Failed to start strategy", description: body.error ?? "Unknown error", variant: "destructive" });
-        return;
-      }
-      toast({ title: "Generating strategy…", description: "AI is building the strategy brief." });
-      setStrategyPending(true);
-    } finally {
-      setGeneratingStrategy(false);
-    }
-  };
-
-  const handleGenerateDraft = async () => {
-    if (!linkedTenderId) return;
-    setGeneratingDraft(true);
-    try {
-      const res = await fetch(`${BASE}/api/opportunities/${linkedTenderId}/generate-proposal`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ proposalId: id }),
-      });
-      const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
-      if (!res.ok) {
-        if (body.code === "generation_in_progress") {
-          toast({ title: "Already generating", description: "Generation is already in progress — this page will update automatically." });
-          return;
-        }
-        toast({ title: "Failed to generate draft", description: body.error ?? "Unknown error", variant: "destructive" });
-        return;
-      }
-      // Kick off first poll immediately; the polling effect takes over
-      void queryClient.invalidateQueries({ queryKey: getGetProposalQueryKey(id) });
-      void queryClient.invalidateQueries({ queryKey: ["proposal-sections", id] });
-      toast({ title: "Draft generation started", description: "Generating your proposal — this page will update automatically." });
-    } finally {
-      setGeneratingDraft(false);
-    }
   };
 
   const handleDelete = () => {
@@ -787,7 +706,7 @@ export default function ProposalDetail() {
         </div>
       </div>
 
-      {/* ── AI actions panel — shown when linked to an Opportunity ─────────────── */}
+      {/* ── Generation status panel — shown when linked to an Opportunity ──────── */}
       {linkedTenderId && (
         <div className="mb-6 p-4 border border-primary/20 rounded-lg bg-primary/5">
           <div className="flex flex-wrap items-center gap-3">
@@ -795,79 +714,44 @@ export default function ProposalDetail() {
               Linked to Opportunity <span className="text-foreground font-medium">#{linkedTenderId}</span>
             </p>
             {(() => {
-              const isHandoffDone =
-                proposal.syncStatus === "handoff_complete" ||
-                (!!proposal.googleFileId &&
-                  proposal.syncStatus !== "pending_first_write" &&
-                  proposal.syncStatus !== "handoff_in_progress");
-              return (
-                <>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => void handleExtractRequirements()}
-                    disabled={extracting || isHandoffDone}
-                    data-testid="button-extract-requirements"
-                    title={isHandoffDone ? "Proposal is in Google Docs" : undefined}
-                  >
-                    {extracting ? (
-                      <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> Extracting…</>
-                    ) : readiness?.requirementsComplete ? (
-                      <><CheckCircle2 className="w-3 h-3 mr-1 text-green-400" /> Requirements Extracted</>
-                    ) : (
-                      <><Sparkles className="w-3 h-3 mr-1" /> Extract Requirements</>
-                    )}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => void handleGenerateStrategy()}
-                    disabled={generatingStrategy || strategyPending || !readiness?.requirementsComplete || isHandoffDone}
-                    data-testid="button-generate-strategy"
-                    title={
-                      isHandoffDone ? "Proposal is in Google Docs" :
-                      !readiness?.requirementsComplete ? "Extract requirements first" :
-                      undefined
-                    }
-                  >
-                    {generatingStrategy || strategyPending ? (
-                      <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> {strategyPending ? "Generating…" : "Starting…"}</>
-                    ) : readiness?.strategyComplete ? (
-                      <><CheckCircle2 className="w-3 h-3 mr-1 text-green-400" /> Strategy Complete</>
-                    ) : (
-                      <><Sparkles className="w-3 h-3 mr-1" /> Generate Strategy</>
-                    )}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => void handleGenerateDraft()}
-                    disabled={generatingDraft || isDrafting || !readiness?.strategyComplete || isHandoffDone}
-                    data-testid="button-generate-draft"
-                    title={
-                      isHandoffDone ? "Proposal is in Google Docs" :
-                      !readiness?.strategyComplete ? "Generate a strategy first" :
-                      undefined
-                    }
-                  >
-                    {generatingDraft || isDrafting ? (
-                      <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> {isDrafting ? "Generating…" : "Drafting…"}</>
-                    ) : hasSections ? (
-                      <><CheckCircle2 className="w-3 h-3 mr-1 text-green-400" /> Draft Generated</>
-                    ) : (
-                      <><Sparkles className="w-3 h-3 mr-1" /> Generate Draft</>
-                    )}
-                  </Button>
-                </>
-              );
+              if (generationStatus === "extracting") {
+                return (
+                  <span className="inline-flex items-center gap-1.5 text-sm text-blue-400" data-testid="gen-status-text">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> Extracting requirements…
+                  </span>
+                );
+              }
+              if (generationStatus === "strategizing") {
+                return (
+                  <span className="inline-flex items-center gap-1.5 text-sm text-violet-400" data-testid="gen-status-text">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> Building strategy…
+                  </span>
+                );
+              }
+              if (generationStatus === "drafting" || isDrafting) {
+                return (
+                  <span className="inline-flex items-center gap-1.5 text-sm text-amber-400" data-testid="gen-status-text">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" /> Writing draft…
+                  </span>
+                );
+              }
+              if (generationStatus === "ready") {
+                return (
+                  <span className="inline-flex items-center gap-1.5 text-sm text-emerald-400" data-testid="gen-status-text">
+                    <CheckCircle2 className="w-3.5 h-3.5" /> Proposal ready
+                  </span>
+                );
+              }
+              if (generationStatus === "failed") {
+                return (
+                  <span className="inline-flex items-center gap-1.5 text-sm text-red-400" data-testid="gen-status-text">
+                    <AlertCircle className="w-3.5 h-3.5" /> Generation failed — retry from Proposals
+                  </span>
+                );
+              }
+              return null;
             })()}
           </div>
-          {proposal?.proposalContent?.startsWith("Generation failed") && (
-            <div className="flex items-center gap-2 mt-2 text-sm text-destructive" data-testid="generation-failure-banner">
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              <span>Generation failed. Click <strong>Generate Draft</strong> to retry.</span>
-            </div>
-          )}
         </div>
       )}
 

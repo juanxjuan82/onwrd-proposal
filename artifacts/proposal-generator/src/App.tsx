@@ -7,6 +7,7 @@ import NotFound from "@/pages/not-found";
 
 import { MainLayout } from "./components/layout/main-layout";
 import Home from "./pages/home";
+import ProposalsWorkspace from "./pages/proposals-workspace";
 import NewProposal from "./pages/new-proposal";
 import ProposalDetail from "./pages/proposal-detail";
 import Intake from "./pages/intake";
@@ -48,7 +49,8 @@ function Router() {
       <Route>
         <MainLayout>
           <Switch>
-            <Route path="/" component={Home} />
+            <Route path="/" component={() => <Redirect to="/proposals" />} />
+            <Route path="/proposals" component={ProposalsWorkspace} />
             <Route path="/new" component={NewProposal} />
             <Route path="/proposals/:id" component={ProposalDetail} />
             {/* Legacy routes → canonical */}

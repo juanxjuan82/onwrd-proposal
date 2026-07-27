@@ -432,6 +432,77 @@ router.post("/proposals", async (req, res) => {
   }
 });
 
+// ── Proposals workspace ────────────────────────────────────────────────────
+// Returns eligible opportunities with their linked proposals.
+// Non-crawler opps appear directly; crawler discoveries appear only after
+// they've been selected (proposal_id IS NOT NULL on the tender).
+router.get("/proposals/workspace", async (req, res) => {
+  try {
+    const result = await db.execute(sql`
+      SELECT
+        t.id,
+        t.title,
+        t.agency,
+        t.category,
+        t.status,
+        t.source_type,
+        t.deadline,
+        t.value_amount,
+        t.source_url,
+        t.updated_at,
+        t.created_at,
+        t.proposal_id              AS tender_proposal_id,
+        p.id                       AS p_id,
+        p.generation_status        AS p_generation_status,
+        p.status                   AS p_status,
+        p.sync_status              AS p_sync_status,
+        p.google_doc_url           AS p_google_doc_url,
+        p.google_file_id           AS p_google_file_id,
+        p.updated_at               AS p_updated_at
+      FROM tenders t
+      LEFT JOIN proposals p ON p.tender_id = t.id
+      WHERE t.source_type != 'crawler' OR t.proposal_id IS NOT NULL
+      ORDER BY t.updated_at DESC
+    `);
+
+    res.json(
+      result.rows.map((row) => {
+        const r = row as Record<string, unknown>;
+        const proposal = r.p_id != null
+          ? {
+              id:               r.p_id as number,
+              generationStatus: r.p_generation_status as string | null,
+              status:           r.p_status as string,
+              syncStatus:       r.p_sync_status as string | null,
+              googleDocUrl:     r.p_google_doc_url as string | null,
+              googleFileId:     r.p_google_file_id as string | null,
+              updatedAt:        r.p_updated_at as string | null,
+            }
+          : null;
+
+        return {
+          id:         r.id,
+          title:      r.title,
+          agency:     r.agency,
+          category:   r.category,
+          status:     r.status,
+          sourceType: r.source_type,
+          deadline:   r.deadline,
+          valueAmount: r.value_amount,
+          sourceUrl:  r.source_url,
+          updatedAt:  r.updated_at,
+          createdAt:  r.created_at,
+          proposalId: r.tender_proposal_id,
+          proposal,
+        };
+      }),
+    );
+  } catch (err) {
+    req.log.error({ err }, "Error loading proposals workspace");
+    res.status(500).json({ error: "Failed to load proposals workspace" });
+  }
+});
+
 router.get("/proposals/:id", async (req, res) => {
   const parsed = GetProposalParams.safeParse({ id: Number(req.params.id) });
   if (!parsed.success) {

@@ -17,6 +17,7 @@ export const proposalsTable = pgTable("proposals", {
   dirtySince: timestamp("dirty_since"),
   handoffStartedAt: timestamp("handoff_started_at"),
   tenderId: integer("tender_id"),
+  generationStatus: text("generation_status"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (t) => [

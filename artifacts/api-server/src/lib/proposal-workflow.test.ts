@@ -23,9 +23,11 @@ const rootDir    = path.resolve(__dirname, "../../../..");
 const routesDir  = path.resolve(rootDir, "artifacts/api-server/src/routes");
 const frontendDir = path.resolve(rootDir, "artifacts/proposal-generator/src/pages");
 
-const sectionsSrc = readFileSync(path.join(routesDir, "sections.ts"), "utf8");
-const oppsSrc     = readFileSync(path.join(routesDir, "opportunities.ts"), "utf8");
-const detailSrc   = readFileSync(path.join(frontendDir, "proposal-detail.tsx"), "utf8");
+const sectionsSrc    = readFileSync(path.join(routesDir, "sections.ts"), "utf8");
+const oppsSrc        = readFileSync(path.join(routesDir, "opportunities.ts"), "utf8");
+const proposalsSrc   = readFileSync(path.join(routesDir, "proposals.ts"), "utf8");
+const detailSrc      = readFileSync(path.join(frontendDir, "proposal-detail.tsx"), "utf8");
+const workspaceSrc   = readFileSync(path.join(frontendDir, "proposals-workspace.tsx"), "utf8");
 
 // ── §A  normalizeSectionBody ───────────────────────────────────────────────────
 
@@ -248,41 +250,216 @@ describe("§E assembleProposalFromSections used throughout backend", () => {
   });
 });
 
+// ── §G  run-full-generation endpoint + workspace (Task #33) ──────────────────
+
+describe("§G run-full-generation and proposals workspace", () => {
+
+  // ── Backend: opportunities.ts ────────────────────────────────────────────
+
+  it("opportunities.ts registers POST /run-full-generation endpoint", () => {
+    assert.ok(
+      oppsSrc.includes('"/opportunities/:id/run-full-generation"'),
+      "POST /opportunities/:id/run-full-generation must be registered"
+    );
+  });
+
+  it("run-full-generation returns HTTP 202 immediately", () => {
+    assert.ok(
+      oppsSrc.includes("res.status(202)"),
+      "run-full-generation must respond with 202 Accepted"
+    );
+    assert.ok(
+      oppsSrc.includes('generationStatus: "extracting"'),
+      "run-full-generation must return generationStatus: extracting in the 202 body"
+    );
+  });
+
+  it("run-full-generation uses ON CONFLICT DO NOTHING for idempotent proposal creation", () => {
+    const genBlock = oppsSrc.slice(oppsSrc.indexOf("run-full-generation"));
+    assert.ok(
+      genBlock.includes("ON CONFLICT") && genBlock.includes("DO NOTHING"),
+      "run-full-generation must use INSERT … ON CONFLICT (tender_id) DO NOTHING"
+    );
+  });
+
+  it("run-full-generation prevents re-launch when active generation is not stale", () => {
+    assert.ok(
+      oppsSrc.includes("FULL_GEN_STALE_MS"),
+      "run-full-generation must define and check FULL_GEN_STALE_MS for stale detection"
+    );
+    assert.ok(
+      oppsSrc.includes("ACTIVE_GEN_STATUSES"),
+      "run-full-generation must check ACTIVE_GEN_STATUSES before relaunching"
+    );
+    assert.ok(
+      oppsSrc.includes("alreadyRunning"),
+      "run-full-generation must set alreadyRunning:true and return early when not stale"
+    );
+  });
+
+  it("run-full-generation returns 409 when a canonical Google Doc exists", () => {
+    const genBlock = oppsSrc.slice(oppsSrc.indexOf("run-full-generation"));
+    assert.ok(
+      genBlock.includes("GOOGLE_DOC_CANONICAL"),
+      "run-full-generation must guard against overwriting a canonical Google Doc"
+    );
+    assert.ok(
+      genBlock.includes("res.status(409)"),
+      "Google Doc canonical guard must return 409"
+    );
+  });
+
+  it("runFullGenerationBackground is invoked with void after 202 response", () => {
+    assert.ok(
+      oppsSrc.includes("void runFullGenerationBackground(id, proposalId)"),
+      "background pipeline must be launched with void (fire-and-forget) after responding 202"
+    );
+  });
+
+  // ── Backend: runFullGenerationBackground phase-skip logic ────────────────
+
+  it("runFullGenerationBackground skips extraction when requirementsExtractedAt is set and rows exist", () => {
+    const bgStart = oppsSrc.indexOf("async function runFullGenerationBackground");
+    const bgBlock = oppsSrc.slice(bgStart, bgStart + 3000);
+    assert.ok(
+      bgBlock.includes("requirementsExtractedAt"),
+      "background fn must check requirementsExtractedAt for extraction phase-skip"
+    );
+    assert.ok(
+      bgBlock.includes("extractionComplete"),
+      "background fn must gate runExtractRequirements on extractionComplete flag"
+    );
+  });
+
+  it("runFullGenerationBackground skips strategy when existing strategy row found", () => {
+    const bgStart = oppsSrc.indexOf("async function runFullGenerationBackground");
+    const bgBlock = oppsSrc.slice(bgStart, bgStart + 4000);
+    assert.ok(
+      bgBlock.includes("existingStrategy"),
+      "background fn must query for existingStrategy before calling runGenerateStrategy"
+    );
+    assert.ok(
+      bgBlock.includes("if (!existingStrategy)"),
+      "background fn must only call runGenerateStrategy when no strategy exists"
+    );
+  });
+
+  it("runFullGenerationBackground sets generationStatus=strategizing before strategy phase", () => {
+    const bgStart = oppsSrc.indexOf("async function runFullGenerationBackground");
+    const bgBlock = oppsSrc.slice(bgStart, bgStart + 4000);
+    assert.ok(
+      bgBlock.includes('"strategizing"') || bgBlock.includes("'strategizing'"),
+      "background fn must call setGenStatus('strategizing') between extraction and strategy"
+    );
+  });
+
+  it("runFullGenerationBackground sets generationStatus=drafting before the AI draft call", () => {
+    const bgStart = oppsSrc.indexOf("async function runFullGenerationBackground");
+    const bgBlock = oppsSrc.slice(bgStart, bgStart + 6000);
+    assert.ok(
+      bgBlock.includes('"drafting"') || bgBlock.includes("'drafting'"),
+      "background fn must call setGenStatus('drafting') before the draft AI invocation"
+    );
+  });
+
+  it("runFullGenerationBackground sets generationStatus=ready and proposal_content on success", () => {
+    const bgStart = oppsSrc.indexOf("async function runFullGenerationBackground");
+    const bgBlock = oppsSrc.slice(bgStart, bgStart + 9000);
+    assert.ok(
+      bgBlock.includes("'ready'"),
+      "background fn must set generationStatus=ready on successful generation"
+    );
+    assert.ok(
+      bgBlock.includes("proposal_content"),
+      "background fn must write the assembled proposal_content on success"
+    );
+  });
+
+  it("runFullGenerationBackground sets generationStatus=failed on error", () => {
+    const bgStart = oppsSrc.indexOf("async function runFullGenerationBackground");
+    const failBlock = oppsSrc.slice(bgStart, bgStart + 1000);
+    assert.ok(
+      failBlock.includes("generation_status = 'failed'"),
+      "background fn fail() helper must set generationStatus=failed in the proposals table"
+    );
+  });
+
+  // ── Backend: proposals.ts workspace endpoint ─────────────────────────────
+
+  it("proposals.ts registers /proposals/workspace before /proposals/:id", () => {
+    const workspaceIdx = proposalsSrc.indexOf('"/proposals/workspace"');
+    const idRouteIdx   = proposalsSrc.indexOf('"/proposals/:id"');
+    assert.ok(workspaceIdx !== -1, "workspace endpoint must be registered");
+    assert.ok(idRouteIdx   !== -1, ":id route must exist");
+    assert.ok(
+      workspaceIdx < idRouteIdx,
+      "workspace endpoint must appear before /:id route to prevent shadowing"
+    );
+  });
+
+  it("workspace query includes non-crawler tenders and promoted crawlers, excludes bare crawlers", () => {
+    const wsBlock = proposalsSrc.slice(proposalsSrc.indexOf("proposals/workspace"));
+    assert.ok(
+      wsBlock.includes("source_type != 'crawler'") || wsBlock.includes("source_type != \"crawler\""),
+      "workspace query must pass through non-crawler tenders"
+    );
+    assert.ok(
+      wsBlock.includes("proposal_id IS NOT NULL"),
+      "workspace query must include crawlers only when proposal_id is set (selected)"
+    );
+  });
+});
+
 // ── §F  Frontend workflow gating ──────────────────────────────────────────────
 
 describe("§F Frontend workflow gating", () => {
-  it("handleExtractRequirements calls /extract-requirements (not /analyze)", () => {
+  it("generationStatus is derived from proposal for linked tenders", () => {
     assert.ok(
-      detailSrc.includes("/extract-requirements"),
-      "handleExtractRequirements must call /extract-requirements"
+      detailSrc.includes("generationStatus"),
+      "proposal-detail.tsx must derive generationStatus from the proposal object"
     );
-    // Verify /analyze does not appear inside the handler (only after its closing brace)
-    const handlerStart = detailSrc.indexOf("handleExtractRequirements");
-    const handlerBody  = detailSrc.slice(handlerStart, handlerStart + 600);
     assert.ok(
-      !handlerBody.includes("/analyze"),
-      "handleExtractRequirements must not call /analyze"
+      detailSrc.includes("linkedTenderId"),
+      "proposal-detail.tsx must derive linkedTenderId to identify linked opportunities"
     );
   });
 
-  it("Generate Strategy button is gated on readiness.requirementsComplete", () => {
+  it("isGenActive combines isDrafting with active generation status values", () => {
     assert.ok(
-      detailSrc.includes("readiness?.requirementsComplete"),
-      "Generate Strategy must check readiness.requirementsComplete"
+      detailSrc.includes("isGenActive"),
+      "proposal-detail.tsx must define isGenActive to track generation in flight"
+    );
+    assert.ok(
+      detailSrc.includes("isDrafting"),
+      "isGenActive must incorporate isDrafting"
     );
   });
 
-  it("Generate Draft button is gated on readiness.strategyComplete", () => {
+  it("gen-status-text testid marks the generation phase label in the action panel", () => {
     assert.ok(
-      detailSrc.includes("readiness?.strategyComplete"),
-      "Generate Draft must check readiness.strategyComplete"
+      detailSrc.includes("gen-status-text"),
+      "generation status panel must have data-testid=gen-status-text"
     );
   });
 
-  it("strategyPending drives refetchInterval on the readiness query", () => {
+  it("polling interval fires when isGenActive is true", () => {
+    // The effect that drives polling must reference isGenActive
+    const effectIdx = detailSrc.indexOf("isGenActive");
+    const effectBody = detailSrc.slice(effectIdx, effectIdx + 400);
     assert.ok(
-      detailSrc.includes("strategyPending ? 3000 : false"),
-      "readiness query must use strategyPending for refetchInterval"
+      effectBody.includes("setInterval") || detailSrc.includes("isGenActive, id, queryClient"),
+      "polling effect must use isGenActive to decide when to poll"
+    );
+  });
+
+  it("auto-switches active tab to preview when generationStatus becomes ready", () => {
+    assert.ok(
+      detailSrc.includes('generationStatus === "ready"'),
+      "detail page must detect generationStatus=ready to auto-switch tab"
+    );
+    assert.ok(
+      detailSrc.includes("setActiveTab"),
+      "detail page must call setActiveTab to switch to the preview tab"
     );
   });
 
@@ -297,13 +474,6 @@ describe("§F Frontend workflow gating", () => {
     assert.ok(
       detailSrc.includes("isFreeform"),
       "proposal-detail.tsx must define and use isFreeform"
-    );
-  });
-
-  it("readiness endpoint is queried for linked tenders", () => {
-    assert.ok(
-      detailSrc.includes("/readiness"),
-      "proposal-detail.tsx must query the /readiness endpoint"
     );
   });
 });

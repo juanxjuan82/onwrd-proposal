@@ -392,8 +392,8 @@ export default function NewProposal() {
         toast({ title: "Failed to create opportunity", description: body.error ?? "Unknown error", variant: "destructive" });
         return;
       }
-      toast({ title: "Opportunity created", description: "Review the details and pursue when ready." });
-      if (body.id) setLocation(`/opportunities/${body.id}`);
+      toast({ title: "Opportunity created", description: "Ready to generate a proposal." });
+      setLocation("/proposals");
     } finally {
       setCreatingOpportunity(false);
     }
@@ -435,8 +435,8 @@ export default function NewProposal() {
         toast({ title: "Failed to create opportunity", description: body.error ?? "Unknown error", variant: "destructive" });
         return;
       }
-      toast({ title: "Opportunity created", description: "Review the details and pursue when ready." });
-      if (body.id) setLocation(`/opportunities/${body.id}`);
+      toast({ title: "Opportunity created", description: "Ready to generate a proposal." });
+      setLocation("/proposals");
     } finally {
       setCreatingOpportunity(false);
     }
