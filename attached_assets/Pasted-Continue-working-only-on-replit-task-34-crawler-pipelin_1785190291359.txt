@@ -1,0 +1,120 @@
+Continue working only on `replit/task-34-crawler-pipeline`. Do not create another branch or PR, and do not modify Task #33’s proposal workflow.
+
+Task #34 is not merge-ready. Fix the following confirmed defects.
+
+## 1. Fix the crawl batch-ID race
+
+The current POST `/api/tender-intelligence/crawl` starts `runCrawler()` and then queries the latest `crawl_batches` row. This can return the previous completed batch ID, causing the frontend to poll stale state and finish before the active crawl completes.
+
+Refactor the lifecycle so that:
+
+* The current batch ID is generated before background work starts.
+* The exact batch row is persisted before the endpoint responds.
+* That batch ID is passed directly into the crawl executor.
+* The endpoint returns that exact ID with `202 Accepted`.
+* Never query the latest batch row to infer the current batch.
+* Remove the 300ms polling loop and completion-assigned local `batchId` variable.
+* Concurrent crawl requests return `409` when the crawl lock cannot be acquired.
+* Any failure after lock acquisition marks the correct batch failed and releases the lock through a comprehensive `try/finally`.
+
+Add tests proving:
+
+* Two consecutive crawls return two distinct IDs.
+* Each response ID belongs to the crawl it started.
+* An older completed batch can never be returned for a new crawl.
+* Lock contention returns `409`, not `202` with a stale or null ID.
+* Startup/source-query failures mark the batch failed and release the lock.
+
+## 2. Complete adapter enrichment
+
+Only UNDP currently performs meaningful detail-page extraction. Several adapters still create title-repeating stubs, including:
+
+* IDB: `IDB project: ${title}`
+* CDB: `Caribbean Development Bank announcement: ${title}`
+* other listing-only fallbacks in Bahamas, CTO, CARICOM and EU Caribbean
+
+Audit all eight adapters. When a listing does not contain real scope, fetch the linked detail page, PDF or procurement document and extract:
+
+* actual scope/description
+* deadline
+* organization
+* country
+* sector
+* stable external ID
+* canonical source URL
+
+Do not fabricate or pad descriptions. Source and sector labels are not scope content.
+
+If an existing URL is obsolete, blocked, or only provides generic news, replace it with a functioning procurement feed, API or tender page. Do not treat generic news pages as successful procurement sources.
+
+If detail content cannot be retrieved, store the discovery as raw/title-only with a diagnostic reason, but do not promote it.
+
+Use bounded concurrency and timeouts. Adapter tests must use stored HTML/JSON/PDF fixtures, not live network calls.
+
+## 3. Correct reconciliation accounting
+
+The current `ReconcileOutcome` conflates database insertion with eligibility outcome. A newly inserted but rejected discovery is returned as `skipped`, causing `inserted` to undercount real inserts.
+
+Return independent facts such as:
+
+```ts
+{
+  discoveryId,
+  inserted,
+  updated,
+  changed,
+  eligible,
+  promoted,
+  unchanged,
+  rejectionReasons
+}
+```
+
+Ensure batch totals accurately count:
+
+* fetched
+* inserted
+* updated
+* eligible
+* promoted
+* rejected
+* unchanged
+
+Store objects directly in JSONB columns. Do not `JSON.stringify` values before writing them through Drizzle’s JSONB fields.
+
+## 4. Preserve quality and workflow boundaries
+
+Do not:
+
+* weaken the 120-character content-quality gate
+* inject ONWRD keywords into descriptions
+* promote title-only records
+* modify Task #33 proposal generation
+* create another branch
+* merge the PR
+
+## 5. Verification
+
+Add deterministic end-to-end coverage proving a representative eligible adapter record flows through:
+
+adapter → discovery insert/update → scoring → eligibility → canonical crawler Opportunity → Discover
+
+Also prove an ineligible title-only record remains raw-only.
+
+Run:
+
+* full API suite twice consecutively
+* frontend tests
+* both typechecks
+* both production builds
+
+Perform two consecutive manual crawls and report:
+
+* both returned batch IDs
+* whether the IDs were distinct
+* per-source request status
+* fetched/inserted/updated/promoted/rejected counts
+* rejection breakdown
+* number of crawler Opportunities visible through `/api/opportunities`
+
+Commit and push all corrections to `replit/task-34-crawler-pipeline` so the existing draft PR updates automatically. Return the commit SHA and complete verification report.
