@@ -1,0 +1,261 @@
+#34 — Fix Crawl Ingestion and Discover Visibility
+
+## What & Why
+
+The crawler can currently finish successfully while Discover remains empty.
+
+This is not primarily a keyword problem. The current pipeline has four structural defects:
+
+1. Most source adapters return short, title-repeating summaries instead of actual opportunity scope. The eligibility gate correctly classifies these records as `title_only` and refuses to promote them.
+2. Existing discoveries are skipped as soon as their external ID or URL is found. They are never refreshed, enriched, rescored, or reconsidered for promotion.
+3. Adapters swallow HTTP and parsing failures and return an empty array. The crawler therefore records a successful zero-result run when a source actually failed.
+4. Discover reads promoted crawler Opportunities, while crawl reporting exposes no fetched, rejected, updated, or promoted counts. Users cannot distinguish “the source had no opportunities” from “the adapter failed” or “everything was filtered.”
+
+Fix the ingestion and reconciliation pipeline without weakening the content-quality or relevance gates and without changing Task #33’s RFP-to-proposal workflow.
+
+## Done Looks Like
+
+* Clicking **Run Crawl** starts one background crawl batch and returns immediately.
+* Every source produces an explicit result: `success`, `failed`, or `partial`.
+* A source cannot be recorded as successful merely because its adapter swallowed an HTTP or parsing error.
+* Crawl reporting distinguishes:
+
+  * fetched from source
+  * newly inserted
+  * existing records updated
+  * eligible
+  * promoted into Discover
+  * rejected
+  * duplicates unchanged
+  * source failures
+* Rejection counts are grouped by reason, including:
+
+  * expired
+  * `SKIP`
+  * title-only or boilerplate
+  * missing core-service signal
+  * hard negative
+* Adapters fetch the opportunity detail page or attached document when necessary and persist real scope content.
+* Do not fabricate, pad, or inject marketing language into descriptions merely to pass the 120-character gate.
+* Existing discoveries are upserted and refreshed rather than skipped.
+* Any new or materially updated discovery is rescored and re-evaluated for promotion.
+* A previously unpromoted record can become eligible after its content is enriched or source data changes.
+* Promotion remains concurrency-safe and idempotent. One discovery creates at most one canonical crawler Opportunity.
+* Eligible crawler Opportunities appear in Discover automatically.
+* Ineligible raw discoveries remain stored for diagnostics but do not appear in Discover.
+* Re-running a crawl does not create duplicate discoveries or Opportunities.
+* The existing backfill endpoint recalculates scores and eligibility for all unpromoted, non-expired discoveries—including records currently marked `SKIP`—instead of selecting only existing `CONSIDER` and `PURSUE` rows.
+* The reconciliation/backfill operation is invoked automatically after a crawl and remains safe to run manually.
+* The Discover page shows the latest crawl summary and does not display a generic “Crawl complete” message when every source failed or every record was rejected.
+* Task #33’s Discover → Select → Proposals behavior remains unchanged.
+
+## Implementation Requirements
+
+### 1. Introduce an explicit adapter result contract
+
+Replace the bare `TenderOpportunity[]` return contract with a structured result such as:
+
+```ts
+interface AdapterFetchResult {
+  opportunities: TenderOpportunity[];
+  requestsAttempted: number;
+  requestsSucceeded: number;
+  warnings: string[];
+}
+```
+
+Adapters must throw or return an explicit failure when no configured source request succeeds.
+
+A legitimate successful request with zero matching opportunities may return an empty `opportunities` array, but it must be distinguishable from an upstream failure.
+
+Remove empty `catch {}` blocks and silent `if (!response.ok) continue` behavior. Capture the source URL, HTTP status, timeout, parse failure, and a sanitized error message.
+
+One failed source must not prevent the remaining sources from running.
+
+### 2. Fetch real opportunity content
+
+Audit every adapter:
+
+* World Bank
+* UNDP
+* IDB
+* CDB
+* Bahamas Government
+* CTO
+* CARICOM
+* EU Caribbean
+
+Listing pages may be used to discover links, but adapters must fetch the detail page or linked PDF/document when the listing only contains a title.
+
+Extract, where available:
+
+* title
+* issuing organization
+* actual scope/description
+* deadline
+* country
+* sector
+* canonical source URL
+* stable external ID
+
+Apply bounded concurrency and timeouts when fetching detail pages.
+
+If detail content cannot be retrieved, store the record as raw/title-only with a diagnostic reason. Do not synthesize scope based on the source organization or sector.
+
+For World Bank, verify the current upstream API response and query parameters. The global pass must actually filter or locally select communications, marketing, public-awareness, creative, media, branding, tourism-marketing, outreach, and related notices instead of simply taking the latest 20 general procurement records.
+
+### 3. Replace skip-on-duplicate with upsert-and-reconcile
+
+In `runCrawler`, do not immediately `continue` when `externalId` or URL already exists.
+
+Resolve the existing discovery and:
+
+* update mutable source fields
+* preserve its canonical identity
+* detect whether relevant content changed
+* rescore when new or changed content is available
+* re-run eligibility when the record has no linked Opportunity
+* promote it if it now qualifies
+
+Use a stable database uniqueness strategy for source plus external ID, with normalized URL as a fallback.
+
+Do not create duplicate records under concurrent or repeated crawls.
+
+### 4. Centralize discovery reconciliation
+
+Create one shared service responsible for:
+
+1. normalizing fetched source data
+2. upserting the discovery
+3. running deterministic keyword scoring
+4. evaluating content quality and eligibility
+5. persisting rejection evidence
+6. promoting eligible discoveries idempotently
+
+Use this service from:
+
+* normal crawling
+* backfill/reconciliation
+* any source-specific recovery process
+
+Do not maintain separate scoring or eligibility behavior between live crawling and backfill.
+
+### 5. Repair backfill behavior
+
+Update `backfillPromotions()` so that it does not pre-filter by the existing recommendation.
+
+It must examine all unpromoted, non-expired discoveries and recompute the current recommendation and eligibility from persisted content.
+
+Return:
+
+```ts
+{
+  evaluated,
+  rescored,
+  promoted,
+  unchanged,
+  rejected,
+  rejectionCounts
+}
+```
+
+Run this reconciliation automatically after each crawl batch. It must remain idempotent and safe under concurrent promotion attempts.
+
+### 6. Add crawl-batch observability
+
+Give each manual or scheduled crawl invocation a stable batch ID shared by its source runs.
+
+Persist or reconstruct an aggregate batch result containing:
+
+* batch status
+* started/completed timestamps
+* sources attempted/succeeded/failed
+* fetched
+* inserted
+* updated
+* eligible
+* promoted
+* rejected
+* unchanged
+* per-source errors
+* rejection counts
+
+The manual crawl endpoint should return `202 Accepted` with the batch ID.
+
+The frontend should poll that batch, not whichever individual source run happens to be newest.
+
+Use these user-facing outcomes:
+
+* `Crawl complete — 8 opportunities added to Discover`
+* `Crawl complete — 24 checked, none matched ONWRD’s criteria`
+* `Crawl completed with errors — 5 of 8 sources succeeded`
+* `Crawl failed — no source could be reached`
+
+Do not expose internal scoring phases as additional buttons.
+
+### 7. Preserve eligibility quality
+
+Do not solve this by:
+
+* removing the 120-character content-quality requirement
+* treating a source’s sector label as real scope
+* injecting phrases such as “destination marketing” into descriptions
+* automatically promoting all raw discoveries
+* changing crawler relevance thresholds without evidence
+
+The repair must improve source extraction and replay behavior while preserving the distinction between real scope and listing-page metadata.
+
+## Behavioral Coverage
+
+Add tests proving:
+
+1. An adapter whose requests all fail produces a failed source run, not successful zero results.
+2. A successful source request with no listings produces an explicit successful zero-result run.
+3. A listing with title-only content is stored but not promoted.
+4. A detail page with meaningful scope is scored and promoted when eligible.
+5. Repeating the same crawl updates the existing discovery without duplication.
+6. A previously title-only or `SKIP` discovery can be enriched, rescored, and promoted.
+7. Backfill evaluates existing `SKIP` records rather than excluding them before rescoring.
+8. An unchanged duplicate performs no duplicate scoring or promotion work.
+9. Concurrent crawl attempts respect the existing database crawl lock.
+10. Concurrent promotion attempts create one canonical crawler Opportunity.
+11. One source failure does not stop successful sources.
+12. Batch totals equal the sum of their source-run totals.
+13. Discover receives an eligible promoted crawler Opportunity.
+14. Raw-only records do not appear in Discover.
+15. The UI reconstructs the latest crawl batch after refresh.
+16. Task #33’s Select and Proposals behavior remains unchanged.
+
+Use deterministic stored HTML/JSON fixtures for adapter tests. Tests must not depend on live upstream websites.
+
+## Verification
+
+Run and report:
+
+* the full API test suite twice consecutively
+* the frontend test suite
+* both typechecks
+* both production builds
+
+Also perform one manual crawl and report its aggregate and per-source counts. Do not claim the crawler is fixed merely because the request returned successfully.
+
+If the manual crawl produces no promoted results, the batch diagnostics must identify whether the cause was upstream failure, zero listings, title-only content, expiry, relevance rejection, or another recorded reason.
+
+## Relevant Files
+
+* `artifacts/api-server/src/crawlers/base-adapter.ts`
+* `artifacts/api-server/src/crawlers/index.ts`
+* `artifacts/api-server/src/crawlers/scheduler.ts`
+* `artifacts/api-server/src/crawlers/world-bank.ts`
+* `artifacts/api-server/src/crawlers/ungm.ts`
+* `artifacts/api-server/src/crawlers/idb.ts`
+* `artifacts/api-server/src/crawlers/cdb.ts`
+* `artifacts/api-server/src/crawlers/bahamas-gov.ts`
+* `artifacts/api-server/src/crawlers/cto.ts`
+* `artifacts/api-server/src/crawlers/caricom.ts`
+* `artifacts/api-server/src/crawlers/eu-caribbean.ts`
+* `artifacts/api-server/src/lib/crawler-eligibility.ts`
+* `artifacts/api-server/src/lib/promote-discovered-tender.ts`
+* `artifacts/api-server/src/routes/tender-intelligence.ts`
+* `artifacts/proposal-generator/src/pages/opportunities.tsx`
+* crawler database schema and migrations

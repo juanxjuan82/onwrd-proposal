@@ -1,11 +1,14 @@
-import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
+import { TenderSourceAdapter, TenderOpportunity, AdapterFetchResult, safeFetch, stripHtml } from "./base-adapter.js";
 
-// CARICOM Secretariat — monitors regional communications, public awareness,
+// CARICOM Secretariat — regional communications, public awareness,
 // stakeholder engagement and policy communications across the Caribbean Community.
 export class CARICOMAdapter implements TenderSourceAdapter {
   adapterType = "caricom";
 
-  async fetchOpportunities(): Promise<TenderOpportunity[]> {
+  async fetchOpportunities(): Promise<AdapterFetchResult> {
+    const warnings: string[] = [];
+    let requestsAttempted = 0;
+    let requestsSucceeded = 0;
     const results: TenderOpportunity[] = [];
 
     const urls = [
@@ -17,16 +20,21 @@ export class CARICOMAdapter implements TenderSourceAdapter {
     ];
 
     for (const url of urls) {
+      requestsAttempted++;
       try {
         const r = await safeFetch(url, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)",
-            Accept: "text/html",
-          },
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)", Accept: "text/html" },
         });
-        if (!r.ok) continue;
+        if (!r.ok) {
+          warnings.push(`CARICOM HTTP ${r.status} for ${url}`);
+          continue;
+        }
         const html = await r.text();
-        if (html.length < 500) continue;
+        if (html.length < 500) {
+          warnings.push(`CARICOM returned very short response for ${url}`);
+          continue;
+        }
+        requestsSucceeded++;
 
         const linkPattern =
           /<a[^>]+href="([^"]*(?:procur|tender|rfp|bid|consult|communic|campaign|awareness|engagement)[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
@@ -43,27 +51,28 @@ export class CARICOMAdapter implements TenderSourceAdapter {
           const fullUrl = href.startsWith("http") ? href : `https://caricom.org${href}`;
 
           results.push({
-            externalId: `caricom-${Buffer.from(rawTitle.slice(0, 40)).toString("base64").slice(0, 16)}`,
+            externalId: `caricom-${Buffer.from((rawTitle + href).slice(0, 40)).toString("base64").slice(0, 16)}`,
             title: rawTitle,
             organization: "CARICOM Secretariat",
             url: fullUrl,
-            // Real scope from page fetch only — no synthetic marketing assumption
-            description: `CARICOM Secretariat procurement notice: ${rawTitle}`,
+            description: `CARICOM procurement notice: ${rawTitle}`,
             country: "Caribbean",
-            sector: "Government & Public Communications",
-            rawData: {
-              adapterContext:
-                "CARICOM procurement: regional Caribbean Community communications and public awareness work.",
-            },
+            sector: "Regional Development",
           });
 
-          if (results.length >= 15) break;
+          if (results.length >= 20) break;
         }
 
         if (results.length > 0) break;
-      } catch { /* try next URL */ }
+      } catch (err) {
+        warnings.push(`CARICOM fetch failed for ${url}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
-    return results;
+    if (requestsAttempted > 0 && requestsSucceeded === 0) {
+      throw new Error(`CARICOM: all ${requestsAttempted} requests failed. ` + warnings.join("; "));
+    }
+
+    return { opportunities: results, requestsAttempted, requestsSucceeded, warnings };
   }
 }

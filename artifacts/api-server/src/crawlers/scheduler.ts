@@ -136,11 +136,10 @@ export async function startScheduler(): Promise<void> {
     try {
       const result = await runCrawler();
       console.log(
-        `[tender-cron] Done. ${result.newItems} new. ` +
-        `AI calls: ${result.aiCallCount}, fallbacks: ${result.aiFallbackCount}` +
-        `${result.quotaErrorHit ? " ⚠ quota error — circuit opened" : ""}`
+        `[tender-cron] Done. batch=${result.batchId} inserted=${result.inserted} ` +
+        `promoted=${result.promoted} failed-sources=${result.sourcesFailed}`
       );
-      await sendDigestEmail(result.newItems);
+      await sendDigestEmail(result.inserted);
     } catch (err) {
       if (err instanceof Error && err.message.includes("already in progress")) {
         console.warn("[tender-cron] Skipped — crawl already running.");

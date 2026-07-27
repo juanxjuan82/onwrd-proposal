@@ -1,4 +1,4 @@
-import { TenderSourceAdapter, TenderOpportunity, safeFetch } from "./base-adapter.js";
+import { TenderSourceAdapter, TenderOpportunity, AdapterFetchResult, safeFetch } from "./base-adapter.js";
 
 // Correct field names from World Bank procnotices API (verified Jul 2026):
 // id, notice_type, noticedate, project_id, project_name, bid_reference_no,
@@ -25,30 +25,40 @@ const CARIBBEAN_COUNTRIES = [
   "Cayman Islands", "Suriname", "Dominica", "St. Kitts and Nevis",
 ];
 
+// Communications/marketing-related keywords for filtering global notices
+const COMMS_KEYWORDS = [
+  "communications", "marketing", "campaign", "media", "branding",
+  "outreach", "awareness", "public relations", "digital", "tourism",
+  "promotional", "creative", "content", "engagement",
+];
+
 export class WorldBankAdapter implements TenderSourceAdapter {
   adapterType = "world_bank";
 
-  async fetchOpportunities(): Promise<TenderOpportunity[]> {
+  async fetchOpportunities(): Promise<AdapterFetchResult> {
     // World Bank procnotices API: q param is not reliable for filtering.
     // Use fq (Solr filter query) with project_ctry_name for country targeting.
     // Fetch Bahamas-specific first, then Caribbean-wide comms work.
-    const queries: Array<{ fq: string; label: string }> = [
+    const queries: Array<{ fq: string; label: string; filterComms: boolean }> = [
       // Bahamas-specific — highest priority
-      { fq: "project_ctry_name:Bahamas", label: "Bahamas" },
-      // Broader Caribbean comms/tourism
+      { fq: "project_ctry_name:Bahamas", label: "Bahamas", filterComms: false },
+      // Broader Caribbean
       {
         fq: `project_ctry_name:(${CARIBBEAN_COUNTRIES.map((c) => `"${c}"`).join(" OR ")})`,
         label: "Caribbean",
+        filterComms: false,
       },
-      // Global comms/marketing (no country filter) — for high-value remote-eligible work
-      { fq: "", label: "Global" },
+      // Global comms/marketing only — must contain a comms keyword
+      { fq: "", label: "Global", filterComms: true },
     ];
 
     const seen = new Set<string>();
     const results: TenderOpportunity[] = [];
+    const warnings: string[] = [];
+    let requestsAttempted = 0;
+    let requestsSucceeded = 0;
 
-    for (const { fq, label } of queries) {
-      // For the global pass, only take comms/tourism notices — use notice_text filter
+    for (const { fq, label, filterComms } of queries) {
       const base =
         `https://search.worldbank.org/api/v2/procnotices` +
         `?format=json&rows=20` +
@@ -56,52 +66,81 @@ export class WorldBankAdapter implements TenderSourceAdapter {
         `&srt=submission_date&order=desc`;
 
       const url = fq ? `${base}&fq=${encodeURIComponent(fq)}` : base;
+      requestsAttempted++;
 
+      let r: Response;
       try {
-        const r = await safeFetch(url, {
+        r = await safeFetch(url, {
           headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
         });
-        if (!r.ok) continue;
+      } catch (err) {
+        warnings.push(`World Bank ${label} query failed: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
 
-        const data = (await r.json()) as { procnotices?: WBNotice[]; total?: number };
-        const notices = data?.procnotices ?? [];
+      if (!r.ok) {
+        warnings.push(`World Bank ${label} query HTTP ${r.status}`);
+        continue;
+      }
 
-        for (const n of notices) {
-          const id = String(n.id ?? n.project_id ?? "");
-          if (!id || seen.has(id)) continue;
-          seen.add(id);
+      let data: { procnotices?: WBNotice[] };
+      try {
+        data = (await r.json()) as typeof data;
+      } catch (err) {
+        warnings.push(`World Bank ${label} JSON parse failed: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
 
-          const countryName = String(n.project_ctry_name ?? label);
-          const description = String(
-            n.bid_description ?? n.notice_text ?? n.project_name ?? ""
-          ).slice(0, 600);
-          const projectId = String(n.project_id ?? "");
-          const noticeId = String(n.id ?? "");
+      requestsSucceeded++;
+      const notices = data?.procnotices ?? [];
 
-          results.push({
-            externalId: `wb-${noticeId || projectId}`,
-            title: String(n.project_name ?? n.bid_description ?? "World Bank Procurement Notice"),
-            organization: "World Bank",
-            url: noticeId
-              ? `https://projects.worldbank.org/en/projects-operations/procurement/noticedetails?id=${noticeId}`
-              : projectId
-              ? `https://projects.worldbank.org/en/projects-operations/project-detail/${projectId}`
-              : "https://projects.worldbank.org/en/projects-operations/procurement",
-            deadline: n.submission_date ? new Date(String(n.submission_date)) : undefined,
-            description: `World Bank procurement — ${description}. Country: ${countryName}`,
-            country: countryName,
-            sector: n.notice_type ?? "Procurement",
-            rawData: n as Record<string, unknown>,
-          });
+      for (const n of notices) {
+        const id = String(n.id ?? n.project_id ?? "");
+        if (!id || seen.has(id)) continue;
+
+        // For the global pass, only keep notices with comms-relevant content
+        if (filterComms) {
+          const noticeText = [n.bid_description, n.notice_text, n.project_name].join(" ").toLowerCase();
+          if (!COMMS_KEYWORDS.some((kw) => noticeText.includes(kw))) continue;
         }
-      } catch {
-        /* skip failed query */
+
+        seen.add(id);
+
+        const countryName = String(n.project_ctry_name ?? label);
+        const rawDesc = String(n.bid_description ?? n.notice_text ?? n.project_name ?? "").slice(0, 600);
+        const projectId = String(n.project_id ?? "");
+        const noticeId = String(n.id ?? "");
+
+        // Use the actual bid_description / notice_text as the description — never prefix with "World Bank procurement —"
+        // This preserves real scope content for the content-quality gate.
+        const description = rawDesc.trim();
+
+        results.push({
+          externalId: `wb-${noticeId || projectId}`,
+          title: String(n.project_name ?? n.bid_description ?? "World Bank Procurement Notice"),
+          organization: "World Bank",
+          url: noticeId
+            ? `https://projects.worldbank.org/en/projects-operations/procurement/noticedetails?id=${noticeId}`
+            : projectId
+            ? `https://projects.worldbank.org/en/projects-operations/project-detail/${projectId}`
+            : "https://projects.worldbank.org/en/projects-operations/procurement",
+          deadline: n.submission_date ? new Date(String(n.submission_date)) : undefined,
+          description,
+          country: countryName,
+          sector: n.notice_type ?? "Procurement",
+          rawData: n as Record<string, unknown>,
+        });
       }
 
       // Stop after Caribbean pass if we have Bahamas results — avoid diluting with global noise
       if (label === "Caribbean" && results.some((r) => r.country === "Bahamas")) break;
     }
 
-    return results;
+    // Throw if every request failed — caller records a failed source run
+    if (requestsAttempted > 0 && requestsSucceeded === 0) {
+      throw new Error(`World Bank API: all ${requestsAttempted} requests failed. ` + warnings.join("; "));
+    }
+
+    return { opportunities: results, requestsAttempted, requestsSucceeded, warnings };
   }
 }
