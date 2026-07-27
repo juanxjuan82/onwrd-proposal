@@ -36,6 +36,13 @@ pool.query(
   logger.error({ err }, "Failed to apply handoff_started_at migration");
 });
 
+// Add generation_status column if it doesn't exist (idempotent startup migration)
+pool.query(
+  `ALTER TABLE proposals ADD COLUMN IF NOT EXISTS generation_status TEXT`,
+).catch((err: unknown) => {
+  logger.error({ err }, "Failed to apply generation_status migration");
+});
+
 // Ensure session table exists before accepting requests — connect-pg-simple's
 // internal DDL is unreliable at startup; await this in index.ts before listen.
 export const dbReady: Promise<void> = pool
