@@ -13,37 +13,34 @@
  *  5. Persist rejection reasons for diagnostics
  *  6. Promote eligible discoveries idempotently
  *
- * Returns an outcome per item so the caller can aggregate batch-level counts.
+ * Returns independent boolean flags per item so the caller can aggregate
+ * batch-level counts without conflating DB insertion with eligibility.
  */
 
 import { db, discoveredTendersTable } from "@workspace/db";
-import { eq, sql, and } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { type TenderOpportunity } from "../crawlers/base-adapter.js";
 import { evaluateCrawlerEligibility } from "./crawler-eligibility.js";
 import { promoteDiscoveredTender } from "./promote-discovered-tender.js";
-
-// ── Re-export the keyword scorer from crawlers/index so the reconciler
-// can call it without creating a circular import.  The scorer is a pure
-// function so the import is safe.
-// We inline a lightweight version here to avoid circular deps.
-// (The full keywordScore function lives in crawlers/index.ts.)
-// We import it via a dynamic path that TypeScript can resolve.
 import type { ScoredResult } from "./discovery-scoring.js";
 import { scoreTender } from "./discovery-scoring.js";
 
-export type ReconcileOutcome =
-  | "inserted"    // new discovery, never seen before
-  | "updated"     // existing discovery whose content changed — rescored
-  | "unchanged"   // existing discovery, no meaningful change
-  | "promoted"    // was ineligible/unlinked, now eligible and linked to a canonical Opportunity
-  | "skipped";    // ineligible after scoring (stored for diagnostics)
-
 export interface ReconcileResult {
-  outcome: ReconcileOutcome;
   discoveryId: number;
-  opportunityId?: number;
+  /** A new discovered_tender row was inserted (DB INSERT). */
+  inserted: boolean;
+  /** An existing row was updated — content changed, row was rescored. */
+  updated: boolean;
+  /** No meaningful content change — row left untouched. */
+  unchanged: boolean;
+  /** Passed the eligibility gate (regardless of insert/update/unchanged). */
+  eligible: boolean;
+  /** An Opportunity was created/linked (implies eligible === true). */
+  promoted: boolean;
+  /** Populated when eligible === false. */
   rejectionReasons?: string[];
   score?: ScoredResult;
+  opportunityId?: number;
 }
 
 // ── Materialised-content hash ─────────────────────────────────────────────────
@@ -102,23 +99,23 @@ export async function reconcileDiscovery(
 
   // ③ Determine whether content changed (existing) or is brand new
   let discoveryId: number;
-  let isNew = false;
+  let inserted = false;
+  let updated = false;
+  let unchanged = false;
 
   if (existing) {
     const prevKey = contentKey(existing.title, existing.description, existing.deadline);
     const newKey = contentKey(opp.title, opp.description, opp.deadline ?? null);
 
     if (prevKey === newKey) {
-      // No meaningful change — skip rescoring / re-promotion work
-      // but still re-evaluate eligibility if the record was never promoted
       discoveryId = existing.id;
+      unchanged = true;
 
       if (existing.opportunityId !== null) {
         // Already promoted — nothing to do
-        return { outcome: "unchanged", discoveryId };
+        return { discoveryId, inserted: false, updated: false, unchanged: true, eligible: true, promoted: true, opportunityId: existing.opportunityId ?? undefined, score };
       }
-      // Fall through to eligibility check below (content unchanged but maybe
-      // a rule change since last run makes it eligible now)
+      // Fall through to eligibility check below (rule change may make it eligible now)
     } else {
       // Content changed — update and rescore
       await db.update(discoveredTendersTable).set({
@@ -141,10 +138,11 @@ export async function reconcileDiscovery(
         updatedAt:            new Date(),
       }).where(eq(discoveredTendersTable.id, existing.id));
       discoveryId = existing.id;
+      updated = true;
     }
   } else {
     // Brand new — insert
-    const [inserted] = await db.insert(discoveredTendersTable).values({
+    const [ins] = await db.insert(discoveredTendersTable).values({
       sourceId,
       externalId:           opp.externalId ?? null,
       title:                opp.title,
@@ -165,8 +163,8 @@ export async function reconcileDiscovery(
       bahamasAdvantageScore: score.bahamasAdvantageScore,
       confidence:           score.confidence,
     }).returning({ id: discoveredTendersTable.id });
-    discoveryId = inserted.id;
-    isNew = true;
+    discoveryId = ins.id;
+    inserted = true;
   }
 
   // ④ Evaluate eligibility
@@ -177,16 +175,20 @@ export async function reconcileDiscovery(
     deadline:       opp.deadline,
   });
 
-  // Persist rejection reasons (overwrite on each reconcile)
+  // Persist rejection reasons — pass JS array directly to JSONB column (no JSON.stringify)
   await db.update(discoveredTendersTable).set({
-    rejectionReasons: eligibility.eligible ? null : JSON.stringify(eligibility.rejectionReasons),
+    rejectionReasons: eligibility.eligible ? null : eligibility.rejectionReasons,
     updatedAt: new Date(),
   }).where(eq(discoveredTendersTable.id, discoveryId));
 
   if (!eligibility.eligible) {
     return {
-      outcome: "skipped",
       discoveryId,
+      inserted,
+      updated,
+      unchanged,
+      eligible: false,
+      promoted: false,
       rejectionReasons: eligibility.rejectionReasons,
       score,
     };
@@ -201,15 +203,26 @@ export async function reconcileDiscovery(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[reconciler] promote id=${discoveryId} failed: ${msg.slice(0, 100)}`);
-    return { outcome: "skipped", discoveryId, rejectionReasons: [`Promotion failed: ${msg.slice(0, 80)}`], score };
+    return {
+      discoveryId,
+      inserted,
+      updated,
+      unchanged,
+      eligible: false,
+      promoted: false,
+      rejectionReasons: [`Promotion failed: ${msg.slice(0, 80)}`],
+      score,
+    };
   }
 
-  // ⑥ Return outcome
-  if (isNew) return { outcome: "inserted", discoveryId, opportunityId, score };
-
-  // Existing record that was previously unlinked and just got promoted
-  const wasLinked = (existing?.opportunityId ?? null) !== null;
-  if (!wasLinked) return { outcome: "promoted", discoveryId, opportunityId, score };
-
-  return { outcome: "updated", discoveryId, opportunityId, score };
+  return {
+    discoveryId,
+    inserted,
+    updated,
+    unchanged,
+    eligible: true,
+    promoted: true,
+    opportunityId,
+    score,
+  };
 }

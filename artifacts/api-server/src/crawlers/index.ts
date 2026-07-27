@@ -20,6 +20,18 @@ import { type TenderSourceAdapter } from "./base-adapter.js";
 import { reconcileDiscovery } from "../lib/discovery-reconciler.js";
 import { scoreTender } from "../lib/discovery-scoring.js";
 
+// ── Test DB override ──────────────────────────────────────────────────────────
+// Mirrors the AI-gateway spy pattern. Null in production; test files call
+// __setCrawlDbForTesting(mockDb) before exercising the lifecycle functions and
+// must call __setCrawlDbForTesting(null) in afterEach to prevent cross-test bleed.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _testDb: any = null;
+/** @internal Exported for tests only — never set in production code. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function __setCrawlDbForTesting(mock: any): void { _testDb = mock; }
+/** Returns the injected test DB when set, otherwise the real production DB. */
+function _crawlDb(): typeof db { return (_testDb ?? db) as typeof db; }
+
 function getAdapter(adapterType: string): TenderSourceAdapter | null {
   switch (adapterType) {
     case "world_bank":   return new WorldBankAdapter();
@@ -34,21 +46,21 @@ function getAdapter(adapterType: string): TenderSourceAdapter | null {
   }
 }
 
-// ── DB-backed crawl lock (prevents overlap across restarts & instances) ───────
+// ── DB-backed crawl lock ──────────────────────────────────────────────────────
 const CRAWL_LOCK_KEY = "default";
-const LOCK_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours — 2× max expected crawl duration
+const LOCK_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 const INSTANCE_ID = randomUUID();
 
-/** @internal Exported for testing only — prefer testing behaviour through runCrawler(). */
+/** @internal Exported for testing only. */
 export async function acquireCrawlLock(): Promise<boolean> {
   const now = new Date();
   const expiresAt = new Date(now.getTime() + LOCK_TTL_MS);
 
-  await db
+  await _crawlDb()
     .delete(crawlerLockTable)
     .where(sql`${crawlerLockTable.lockKey} = ${CRAWL_LOCK_KEY} AND ${crawlerLockTable.expiresAt} < ${now}`);
 
-  const result = await db
+  const result = await _crawlDb()
     .insert(crawlerLockTable)
     .values({ lockKey: CRAWL_LOCK_KEY, acquiredAt: now, expiresAt, instanceId: INSTANCE_ID })
     .onConflictDoNothing()
@@ -59,21 +71,21 @@ export async function acquireCrawlLock(): Promise<boolean> {
 
 /** @internal Exported for testing only. */
 export async function releaseCrawlLock(): Promise<void> {
-  await db
+  await _crawlDb()
     .delete(crawlerLockTable)
     .where(sql`${crawlerLockTable.lockKey} = ${CRAWL_LOCK_KEY} AND ${crawlerLockTable.instanceId} = ${INSTANCE_ID}`);
 }
 
 export async function isCrawlRunning(): Promise<boolean> {
   const now = new Date();
-  const rows = await db
+  const rows = await _crawlDb()
     .select({ expiresAt: crawlerLockTable.expiresAt })
     .from(crawlerLockTable)
     .where(sql`${crawlerLockTable.lockKey} = ${CRAWL_LOCK_KEY} AND ${crawlerLockTable.expiresAt} > ${now}`);
   return rows.length > 0;
 }
 
-// ── Rejection counts accumulator ─────────────────────────────────────────────
+// ── Rejection counts accumulator ──────────────────────────────────────────────
 function mergeRejectionCounts(
   acc: Record<string, number>,
   reasons: string[],
@@ -86,111 +98,31 @@ function mergeRejectionCounts(
   return out;
 }
 
-// ── Backfill / reconciliation of ALL unpromoted non-expired discoveries ───────
-// Examines every discovered_tender that has no linked canonical Opportunity
-// and is not expired. Rescores each and promotes it if it now qualifies.
-// Idempotent and safe under concurrent promotion attempts.
-export interface BackfillResult {
-  evaluated: number;
-  rescored: number;
-  promoted: number;
-  unchanged: number;
-  rejected: number;
-  rejectionCounts: Record<string, number>;
-}
+// ── startCrawl ────────────────────────────────────────────────────────────────
+// Atomically acquires the crawl lock, generates a batch UUID, persists the
+// batch row, and returns the exact batchId. Returns null without throwing if
+// the lock is already held (caller maps this to a 409 response).
+export async function startCrawl(sourceId?: number): Promise<string | null> {
+  const acquired = await acquireCrawlLock();
+  if (!acquired) return null;
 
-export async function backfillPromotions(): Promise<BackfillResult> {
-  const now = new Date();
-
-  // ALL unpromoted, non-expired discoveries — not pre-filtered by recommendation
-  const items = await db
-    .select()
-    .from(discoveredTendersTable)
-    .where(
-      and(
-        isNull(discoveredTendersTable.opportunityId),
-        or(
-          isNull(discoveredTendersTable.deadline),
-          sql`${discoveredTendersTable.deadline} > ${now}`,
-        ),
-      ),
-    );
-
-  let rescored = 0;
-  let promoted = 0;
-  let unchanged = 0;
-  let rejected = 0;
-  let rejectionCounts: Record<string, number> = {};
-
-  for (const item of items) {
-    // Recompute score from current content
-    const score = scoreTender({
-      title:        item.title,
-      description:  item.description,
-      sector:       item.sector,
-      organization: item.organization,
-      country:      item.country,
-      deadline:     item.deadline,
+  const batchId = randomUUID();
+  try {
+    await _crawlDb().insert(crawlBatchesTable).values({
+      id:        batchId,
+      status:    "running",
+      startedAt: new Date(),
     });
-
-    const scoreChanged =
-      score.recommendation !== item.recommendation ||
-      score.fitScore !== item.fitScore;
-
-    if (scoreChanged) {
-      await db.update(discoveredTendersTable).set({
-        fitScore:             score.fitScore,
-        recommendation:       score.recommendation,
-        scoringReasoning:     score.reasoning,
-        geographyScore:       score.geographyScore,
-        geoRegion:            score.geoRegion,
-        bahamasAdvantageScore: score.bahamasAdvantageScore,
-        confidence:           score.confidence,
-        updatedAt:            new Date(),
-      }).where(eq(discoveredTendersTable.id, item.id));
-      rescored++;
-    }
-
-    // Re-evaluate eligibility with freshly computed score
-    const { evaluateCrawlerEligibility } = await import("../lib/crawler-eligibility.js");
-    const { promoteDiscoveredTender } = await import("../lib/promote-discovered-tender.js");
-
-    const eligibility = evaluateCrawlerEligibility({
-      title:          item.title,
-      description:    item.description,
-      recommendation: score.recommendation,
-      deadline:       item.deadline,
-    });
-
-    if (!eligibility.eligible) {
-      rejected++;
-      rejectionCounts = mergeRejectionCounts(rejectionCounts, eligibility.rejectionReasons);
-      await db.update(discoveredTendersTable).set({
-        rejectionReasons: JSON.stringify(eligibility.rejectionReasons),
-        updatedAt: new Date(),
-      }).where(eq(discoveredTendersTable.id, item.id));
-      continue;
-    }
-
-    // Promote idempotently
-    try {
-      const dest = eligibility.destination === "reviewing" ? "reviewing" : "new";
-      await promoteDiscoveredTender(item.id, dest);
-      promoted++;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[backfill] promote id=${item.id} failed: ${msg.slice(0, 80)}`);
-      rejected++;
-    }
+  } catch (insertErr) {
+    // Release the lock before rethrowing so subsequent calls can proceed.
+    await releaseCrawlLock();
+    throw insertErr;
   }
 
-  unchanged = items.length - rescored - promoted - rejected;
-  if (unchanged < 0) unchanged = 0;
-
-  return { evaluated: items.length, rescored, promoted, unchanged, rejected, rejectionCounts };
+  return batchId;
 }
 
-// ── Main crawl runner ────────────────────────────────────────────────────────
+// ── CrawlBatchResult ──────────────────────────────────────────────────────────
 export interface CrawlBatchResult {
   batchId: string;
   sourcesAttempted: number;
@@ -207,27 +139,15 @@ export interface CrawlBatchResult {
   rejectionCounts: Record<string, number>;
 }
 
-export async function runCrawler(sourceId?: number): Promise<CrawlBatchResult> {
-  // DB-backed overlap prevention
-  const acquired = await acquireCrawlLock();
-  if (!acquired) {
-    throw new Error("A crawl is already in progress — skipping to prevent overlap.");
-  }
-
-  const batchId = randomUUID();
-
-  // Create a batch row so the frontend can poll it
-  await db.insert(crawlBatchesTable).values({
-    id:       batchId,
-    status:   "running",
-    startedAt: new Date(),
-  });
-
+// ── executeCrawlBatch ─────────────────────────────────────────────────────────
+// Performs all adapter work for the given batchId (already created by startCrawl).
+// Always releases the crawl lock in `finally`. On fatal error, marks the batch
+// `failed` before rethrowing.
+export async function executeCrawlBatch(batchId: string, sourceId?: number): Promise<CrawlBatchResult> {
   const sources = sourceId
-    ? await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.id, sourceId))
-    : await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.active, true));
+    ? await _crawlDb().select().from(tenderSourcesTable).where(eq(tenderSourcesTable.id, sourceId))
+    : await _crawlDb().select().from(tenderSourcesTable).where(eq(tenderSourcesTable.active, true));
 
-  // Batch-level aggregates
   let sourcesAttempted = 0;
   let sourcesSucceeded = 0;
   let sourcesFailed = 0;
@@ -248,14 +168,13 @@ export async function runCrawler(sourceId?: number): Promise<CrawlBatchResult> {
 
       sourcesAttempted++;
 
-      const [run] = await db.insert(crawlerRunsTable).values({
+      const [run] = await _crawlDb().insert(crawlerRunsTable).values({
         batchId,
         sourceId:  source.id,
         startedAt: new Date(),
         status:    "running",
       }).returning();
 
-      // Per-source aggregates
       let srcFetched = 0;
       let srcInserted = 0;
       let srcUpdated = 0;
@@ -280,43 +199,22 @@ export async function runCrawler(sourceId?: number): Promise<CrawlBatchResult> {
           try {
             const result = await reconcileDiscovery(source.id, opp);
 
-            switch (result.outcome) {
-              case "inserted":
-                srcInserted++;
-                // Newly inserted but ineligible — counted in rejected below via skipped
-                break;
-              case "updated":
-                srcUpdated++;
-                break;
-              case "unchanged":
-                srcUnchanged++;
-                break;
-              case "promoted":
-                srcPromoted++;
-                srcEligible++;
-                break;
-              case "skipped":
-                srcRejected++;
-                if (result.rejectionReasons) {
-                  for (const r of result.rejectionReasons) {
-                    const k = r.slice(0, 80);
-                    srcRejectionCounts[k] = (srcRejectionCounts[k] ?? 0) + 1;
-                  }
-                }
-                break;
-            }
-
-            // Inserted items that were also promoted
-            if (result.outcome === "inserted" && result.opportunityId) {
-              srcPromoted++;
-              srcEligible++;
-            } else if (result.outcome === "inserted" && !result.opportunityId) {
+            // Independent booleans — an inserted-but-ineligible item counts as
+            // both inserted AND rejected, fixing the old outcome="skipped" undercount.
+            if (result.inserted)  srcInserted++;
+            if (result.updated)   srcUpdated++;
+            if (result.unchanged) srcUnchanged++;
+            if (result.eligible)  srcEligible++;
+            if (result.promoted)  srcPromoted++;
+            if (!result.eligible) {
               srcRejected++;
-              if (result.rejectionReasons) {
-                for (const r of result.rejectionReasons) {
-                  const k = r.slice(0, 80);
-                  srcRejectionCounts[k] = (srcRejectionCounts[k] ?? 0) + 1;
-                }
+              batchRejectionCounts = mergeRejectionCounts(
+                batchRejectionCounts,
+                result.rejectionReasons ?? [],
+              );
+              for (const r of (result.rejectionReasons ?? [])) {
+                const k = r.slice(0, 80);
+                srcRejectionCounts[k] = (srcRejectionCounts[k] ?? 0) + 1;
               }
             }
           } catch (itemErr) {
@@ -326,12 +224,6 @@ export async function runCrawler(sourceId?: number): Promise<CrawlBatchResult> {
           }
         }
 
-        // Merge per-source rejection counts into batch
-        for (const [k, v] of Object.entries(srcRejectionCounts)) {
-          batchRejectionCounts[k] = (batchRejectionCounts[k] ?? 0) + v;
-        }
-
-        // Determine run status
         const runStatus = srcRequestsAttempted > 0 && srcRequestsSucceeded === 0
           ? "failed"
           : srcWarnings.length > 0 ? "partial"
@@ -343,82 +235,68 @@ export async function runCrawler(sourceId?: number): Promise<CrawlBatchResult> {
           sourcesSucceeded++;
         }
 
-        await db.update(crawlerRunsTable).set({
-          completedAt:         new Date(),
-          status:              runStatus,
-          requestsAttempted:   srcRequestsAttempted,
-          requestsSucceeded:   srcRequestsSucceeded,
-          warnings:            srcWarnings.length > 0 ? JSON.stringify(srcWarnings) : null,
-          itemsFound:          srcFetched,
-          itemsNew:            srcInserted,
-          itemsUpdated:        srcUpdated,
-          itemsEligible:       srcEligible,
-          itemsPromoted:       srcPromoted,
-          itemsRejected:       srcRejected,
-          itemsUnchanged:      srcUnchanged,
-          rejectionCounts:     Object.keys(srcRejectionCounts).length > 0
-            ? JSON.stringify(srcRejectionCounts)
-            : null,
-          aiCallCount:         0,
-          aiFallbackCount:     0,
-          aiQuotaError:        false,
+        await _crawlDb().update(crawlerRunsTable).set({
+          completedAt:        new Date(),
+          status:             runStatus,
+          requestsAttempted:  srcRequestsAttempted,
+          requestsSucceeded:  srcRequestsSucceeded,
+          // Pass arrays/objects directly to JSONB columns — no JSON.stringify
+          warnings:           srcWarnings.length > 0 ? srcWarnings : null,
+          itemsFound:         srcFetched,
+          itemsNew:           srcInserted,
+          itemsUpdated:       srcUpdated,
+          itemsEligible:      srcEligible,
+          itemsPromoted:      srcPromoted,
+          itemsRejected:      srcRejected,
+          itemsUnchanged:     srcUnchanged,
+          rejectionCounts:    Object.keys(srcRejectionCounts).length > 0 ? srcRejectionCounts : null,
+          aiCallCount:        0,
+          aiFallbackCount:    0,
+          aiQuotaError:       false,
         }).where(eq(crawlerRunsTable.id, run.id));
 
-        await db.update(tenderSourcesTable).set({
+        await _crawlDb().update(tenderSourcesTable).set({
           lastCheckedAt:   new Date(),
           ...(runStatus !== "failed" ? { lastSuccessAt: new Date() } : {}),
           itemsFoundCount: source.itemsFoundCount + srcInserted,
           updatedAt:       new Date(),
         }).where(eq(tenderSourcesTable.id, source.id));
 
-        batchInserted += srcInserted;
-        batchUpdated  += srcUpdated;
-        batchEligible += srcEligible;
-        batchPromoted += srcPromoted;
-        batchRejected += srcRejected;
+        batchInserted  += srcInserted;
+        batchUpdated   += srcUpdated;
+        batchEligible  += srcEligible;
+        batchPromoted  += srcPromoted;
+        batchRejected  += srcRejected;
         batchUnchanged += srcUnchanged;
 
       } catch (err) {
-        // Adapter threw — record as failed source
         sourcesFailed++;
         const msg = err instanceof Error ? err.message : String(err);
         perSourceErrors[String(source.id)] = msg.slice(0, 200);
 
-        await db.update(crawlerRunsTable).set({
-          completedAt:  new Date(),
-          status:       "failed",
-          errorMessage: msg.slice(0, 400),
-          aiCallCount:  0,
+        await _crawlDb().update(crawlerRunsTable).set({
+          completedAt:     new Date(),
+          status:          "failed",
+          errorMessage:    msg.slice(0, 400),
+          aiCallCount:     0,
           aiFallbackCount: 0,
-          aiQuotaError: false,
+          aiQuotaError:    false,
         }).where(eq(crawlerRunsTable.id, run.id));
 
-        await db.update(tenderSourcesTable).set({
+        await _crawlDb().update(tenderSourcesTable).set({
           lastCheckedAt: new Date(),
           updatedAt:     new Date(),
         }).where(eq(tenderSourcesTable.id, source.id));
       }
     }
 
-    // ── Run backfill after each crawl to catch any newly eligible items ──────
-    try {
-      const bf = await backfillPromotions();
-      if (bf.promoted > 0) {
-        batchPromoted  += bf.promoted;
-        batchEligible  += bf.promoted;
-        console.log(`[crawler] backfill promoted ${bf.promoted} additional items (${bf.evaluated} evaluated).`);
-      }
-    } catch (bfErr) {
-      console.warn("[crawler] backfill failed:", bfErr instanceof Error ? bfErr.message : String(bfErr));
-    }
-
-    // Determine overall batch status
     const batchStatus = sourcesAttempted === 0 ? "failed"
       : sourcesFailed === sourcesAttempted ? "failed"
       : sourcesFailed > 0 ? "partial"
       : "success";
 
-    await db.update(crawlBatchesTable).set({
+    // Pass objects directly to JSONB columns — no JSON.stringify
+    await _crawlDb().update(crawlBatchesTable).set({
       completedAt:      new Date(),
       status:           batchStatus,
       sourcesAttempted,
@@ -431,11 +309,21 @@ export async function runCrawler(sourceId?: number): Promise<CrawlBatchResult> {
       promoted:         batchPromoted,
       rejected:         batchRejected,
       unchanged:        batchUnchanged,
-      perSourceErrors:  Object.keys(perSourceErrors).length > 0 ? JSON.stringify(perSourceErrors) : null,
-      rejectionCounts:  Object.keys(batchRejectionCounts).length > 0 ? JSON.stringify(batchRejectionCounts) : null,
+      perSourceErrors:  Object.keys(perSourceErrors).length > 0 ? perSourceErrors : null,
+      rejectionCounts:  Object.keys(batchRejectionCounts).length > 0 ? batchRejectionCounts : null,
     }).where(eq(crawlBatchesTable.id, batchId));
 
+  } catch (fatalErr) {
+    // Best-effort: mark the batch failed before the finally block releases the lock
+    try {
+      await _crawlDb().update(crawlBatchesTable).set({
+        completedAt: new Date(),
+        status:      "failed",
+      }).where(eq(crawlBatchesTable.id, batchId));
+    } catch { /* secondary failure — ignore */ }
+    throw fatalErr;
   } finally {
+    // Always release the lock regardless of success or failure
     await releaseCrawlLock();
   }
 
@@ -444,23 +332,131 @@ export async function runCrawler(sourceId?: number): Promise<CrawlBatchResult> {
     sourcesAttempted,
     sourcesSucceeded,
     sourcesFailed,
-    fetched: batchFetched,
-    inserted: batchInserted,
-    updated: batchUpdated,
-    eligible: batchEligible,
-    promoted: batchPromoted,
-    rejected: batchRejected,
-    unchanged: batchUnchanged,
+    fetched:          batchFetched,
+    inserted:         batchInserted,
+    updated:          batchUpdated,
+    eligible:         batchEligible,
+    promoted:         batchPromoted,
+    rejected:         batchRejected,
+    unchanged:        batchUnchanged,
     perSourceErrors,
     rejectionCounts: batchRejectionCounts,
   };
 }
 
+// ── Backfill ──────────────────────────────────────────────────────────────────
+export interface BackfillResult {
+  evaluated: number;
+  rescored: number;
+  promoted: number;
+  unchanged: number;
+  rejected: number;
+  rejectionCounts: Record<string, number>;
+}
+
+export async function backfillPromotions(): Promise<BackfillResult> {
+  const now = new Date();
+
+  const items = await _crawlDb()
+    .select()
+    .from(discoveredTendersTable)
+    .where(
+      and(
+        isNull(discoveredTendersTable.opportunityId),
+        or(
+          isNull(discoveredTendersTable.deadline),
+          sql`${discoveredTendersTable.deadline} > ${now}`,
+        ),
+      ),
+    );
+
+  let rescored = 0;
+  let promoted = 0;
+  let unchanged = 0;
+  let rejected = 0;
+  let rejectionCounts: Record<string, number> = {};
+
+  for (const item of items) {
+    const score = scoreTender({
+      title:        item.title,
+      description:  item.description,
+      sector:       item.sector,
+      organization: item.organization,
+      country:      item.country,
+      deadline:     item.deadline,
+    });
+
+    const scoreChanged =
+      score.recommendation !== item.recommendation ||
+      score.fitScore !== item.fitScore;
+
+    if (scoreChanged) {
+      await _crawlDb().update(discoveredTendersTable).set({
+        fitScore:              score.fitScore,
+        recommendation:        score.recommendation,
+        scoringReasoning:      score.reasoning,
+        geographyScore:        score.geographyScore,
+        geoRegion:             score.geoRegion,
+        bahamasAdvantageScore: score.bahamasAdvantageScore,
+        confidence:            score.confidence,
+        updatedAt:             new Date(),
+      }).where(eq(discoveredTendersTable.id, item.id));
+      rescored++;
+    }
+
+    const { evaluateCrawlerEligibility } = await import("../lib/crawler-eligibility.js");
+    const { promoteDiscoveredTender } = await import("../lib/promote-discovered-tender.js");
+
+    const eligibility = evaluateCrawlerEligibility({
+      title:          item.title,
+      description:    item.description,
+      recommendation: score.recommendation,
+      deadline:       item.deadline,
+    });
+
+    if (!eligibility.eligible) {
+      rejected++;
+      rejectionCounts = mergeRejectionCounts(rejectionCounts, eligibility.rejectionReasons);
+      // Pass array directly to JSONB column — no JSON.stringify
+      await _crawlDb().update(discoveredTendersTable).set({
+        rejectionReasons: eligibility.rejectionReasons,
+        updatedAt: new Date(),
+      }).where(eq(discoveredTendersTable.id, item.id));
+      continue;
+    }
+
+    try {
+      const dest = eligibility.destination === "reviewing" ? "reviewing" : "new";
+      await promoteDiscoveredTender(item.id, dest);
+      promoted++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[backfill] promote id=${item.id} failed: ${msg.slice(0, 80)}`);
+      rejected++;
+    }
+  }
+
+  unchanged = Math.max(0, items.length - rescored - promoted - rejected);
+
+  return { evaluated: items.length, rescored, promoted, unchanged, rejected, rejectionCounts };
+}
+
+// ── runCrawler: backward-compat wrapper for ai-integration.test.ts ───────────
+// The old monolithic runCrawler() has been replaced by the two-phase
+// startCrawl() + executeCrawlBatch() pair.  This shim keeps existing callers
+// and tests working: it acquires the lock, runs the batch, and throws on lock
+// contention (matching the contract the existing tests assert on).
+export async function runCrawler(sourceId?: number): Promise<CrawlBatchResult> {
+  const batchId = await startCrawl(sourceId);
+  if (batchId === null) {
+    throw new Error("Crawl already in progress — lock is held by another instance.");
+  }
+  return executeCrawlBatch(batchId, sourceId);
+}
+
 // ── Re-score all existing discovered_tenders with current keyword engine ──────
-// Updates scores in-place but does not promote.
-// Use backfillPromotions() to also promote newly eligible records.
 export async function rescoreWithKeywords(): Promise<number> {
-  const items = await db.select().from(discoveredTendersTable);
+  const items = await _crawlDb().select().from(discoveredTendersTable);
   let count = 0;
   for (const item of items) {
     const score = scoreTender({
@@ -471,24 +467,24 @@ export async function rescoreWithKeywords(): Promise<number> {
       country:      item.country,
       deadline:     item.deadline,
     });
-    await db.update(discoveredTendersTable).set({
-      fitScore:             score.fitScore,
-      recommendation:       score.recommendation,
-      scoringReasoning:     score.reasoning,
-      geographyScore:       score.geographyScore,
-      geoRegion:            score.geoRegion,
+    await _crawlDb().update(discoveredTendersTable).set({
+      fitScore:              score.fitScore,
+      recommendation:        score.recommendation,
+      scoringReasoning:      score.reasoning,
+      geographyScore:        score.geographyScore,
+      geoRegion:             score.geoRegion,
       bahamasAdvantageScore: score.bahamasAdvantageScore,
-      confidence:           score.confidence,
-      updatedAt:            new Date(),
+      confidence:            score.confidence,
+      updatedAt:             new Date(),
     }).where(eq(discoveredTendersTable.id, item.id));
     count++;
   }
   return count;
 }
 
-// ── Seed default sources ─────────────────────────────────────────────────────
+// ── Seed default sources ──────────────────────────────────────────────────────
 export async function seedDefaultSources(): Promise<void> {
-  const existing = await db.select().from(tenderSourcesTable);
+  const existing = await _crawlDb().select().from(tenderSourcesTable);
   if (existing.length > 0) {
     const existingTypes = new Set(existing.map((s) => s.adapterType));
     const newSources = [
@@ -498,7 +494,7 @@ export async function seedDefaultSources(): Promise<void> {
     ];
     for (const s of newSources) {
       if (!existingTypes.has(s.adapterType)) {
-        await db.insert(tenderSourcesTable).values({ ...s, active: true });
+        await _crawlDb().insert(tenderSourcesTable).values({ ...s, active: true });
       }
     }
     return;
@@ -516,14 +512,14 @@ export async function seedDefaultSources(): Promise<void> {
   ];
 
   for (const s of defaults) {
-    await db.insert(tenderSourcesTable).values({ ...s, active: true });
+    await _crawlDb().insert(tenderSourcesTable).values({ ...s, active: true });
   }
 }
 
-// ── Seed default search profiles ─────────────────────────────────────────────
+// ── Seed default search profiles ──────────────────────────────────────────────
 export async function seedDefaultSearchProfiles(): Promise<void> {
   const { tenderSearchProfilesTable } = await import("@workspace/db");
-  const existing = await db.select().from(tenderSearchProfilesTable);
+  const existing = await _crawlDb().select().from(tenderSearchProfilesTable);
   if (existing.length > 0) return;
 
   const profiles = [
@@ -554,6 +550,6 @@ export async function seedDefaultSearchProfiles(): Promise<void> {
   ];
 
   for (const p of profiles) {
-    await db.insert(tenderSearchProfilesTable).values(p);
+    await _crawlDb().insert(tenderSearchProfilesTable).values(p);
   }
 }

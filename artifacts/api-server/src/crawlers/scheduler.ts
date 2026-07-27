@@ -1,5 +1,5 @@
 import cron from "node-cron";
-import { runCrawler, seedDefaultSources, seedDefaultSearchProfiles } from "./index.js";
+import { startCrawl, executeCrawlBatch, seedDefaultSources, seedDefaultSearchProfiles } from "./index.js";
 import { Resend } from "resend";
 import { db } from "@workspace/db";
 import { discoveredTendersTable, tenderDigestSettingsTable, intakeDraftsTable } from "@workspace/db";
@@ -133,19 +133,24 @@ export async function startScheduler(): Promise<void> {
 
   cron.schedule("0 6 * * *", async () => {
     console.log("[tender-cron] Starting daily crawl…");
+
+    // Use the same startCrawl/executeCrawlBatch lifecycle as the HTTP route.
+    // startCrawl returns null if a crawl is already in progress.
+    const batchId = await startCrawl();
+    if (!batchId) {
+      console.warn("[tender-cron] Skipped — crawl already running.");
+      return;
+    }
+
     try {
-      const result = await runCrawler();
+      const result = await executeCrawlBatch(batchId);
       console.log(
         `[tender-cron] Done. batch=${result.batchId} inserted=${result.inserted} ` +
-        `promoted=${result.promoted} failed-sources=${result.sourcesFailed}`
+        `promoted=${result.promoted} failed-sources=${result.sourcesFailed}`,
       );
       await sendDigestEmail(result.inserted);
     } catch (err) {
-      if (err instanceof Error && err.message.includes("already in progress")) {
-        console.warn("[tender-cron] Skipped — crawl already running.");
-      } else {
-        console.error("[tender-cron] Crawl failed:", err);
-      }
+      console.error("[tender-cron] Crawl failed:", err);
     }
   });
 

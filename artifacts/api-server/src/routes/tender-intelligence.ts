@@ -9,7 +9,7 @@ import {
   tenderDigestSettingsTable,
 } from "@workspace/db";
 import { eq, desc, and, gte, isNull, or, sql } from "drizzle-orm";
-import { runCrawler, rescoreWithKeywords, backfillPromotions, isCrawlRunning } from "../crawlers/index.js";
+import { startCrawl, executeCrawlBatch, rescoreWithKeywords, backfillPromotions } from "../crawlers/index.js";
 import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
 
 const router = Router();
@@ -60,8 +60,6 @@ router.post("/tender-intelligence/rescore", async (req, res) => {
 });
 
 // ── Backfill: evaluate ALL unpromoted non-expired discoveries ──────────────
-// Idempotent — safe to run at any time. Rescores every discovery and promotes
-// any that now pass the eligibility gate.
 router.post("/tender-intelligence/backfill-promotions", async (req, res) => {
   try {
     const result = await backfillPromotions();
@@ -74,49 +72,30 @@ router.post("/tender-intelligence/backfill-promotions", async (req, res) => {
   }
 });
 
-// ── Manual crawl trigger ── returns 202 + batchId immediately ─────────────
+// ── Manual crawl trigger ── returns 202 + exact batchId immediately ────────
+// startCrawl() atomically acquires the lock, persists the batch row, and
+// returns the exact batchId. If the lock is already held it returns null
+// (mapped to 409). executeCrawlBatch() runs in the background.
 router.post("/tender-intelligence/crawl", async (req, res) => {
-  if (await isCrawlRunning()) {
+  const sourceId = req.body?.sourceId ? Number(req.body.sourceId) : undefined;
+
+  const batchId = await startCrawl(sourceId);
+  if (!batchId) {
     res.status(409).json({ error: "A crawl is already in progress. Please wait for it to finish." });
     return;
   }
 
-  const sourceId = req.body?.sourceId ? Number(req.body.sourceId) : undefined;
-
-  // Fire-and-forget; batchId lets the client poll for completion
-  let batchId: string | undefined;
-  const crawlPromise = runCrawler(sourceId).then((result) => {
-    batchId = result.batchId;
+  // Fire-and-forget — the batch row already exists with status "running"
+  void executeCrawlBatch(batchId, sourceId).then((result) => {
     console.log(
       `[manual-crawl] Done. batch=${result.batchId} inserted=${result.inserted} ` +
-      `promoted=${result.promoted} failed-sources=${result.sourcesFailed}`
+      `promoted=${result.promoted} failed-sources=${result.sourcesFailed}`,
     );
   }).catch((err) => {
     console.error("[manual-crawl] failed:", err instanceof Error ? err.message : String(err));
   });
 
-  // We need the batchId before responding. Because runCrawler() inserts the
-  // batch row synchronously before any async adapter work, we wait just long
-  // enough for the INSERT to complete (typically <50 ms).
-  // Strategy: wait up to 300 ms for the batchId to appear in the DB.
-  let resolvedBatchId: string | null = null;
-  const deadline = Date.now() + 300;
-  while (Date.now() < deadline) {
-    const rows = await db
-      .select({ id: crawlBatchesTable.id })
-      .from(crawlBatchesTable)
-      .orderBy(desc(crawlBatchesTable.startedAt))
-      .limit(1);
-    if (rows[0]) { resolvedBatchId = rows[0].id; break; }
-    await new Promise((r) => setTimeout(r, 30));
-  }
-
-  res.status(202).json({
-    message: "Crawl started in background",
-    batchId: resolvedBatchId,
-  });
-
-  void crawlPromise; // keep the promise alive
+  res.status(202).json({ message: "Crawl started in background", batchId });
 });
 
 // ── Poll crawl batch status ────────────────────────────────────────────────
@@ -219,7 +198,6 @@ router.post("/admin/send-quota-alert", async (req, res) => {
   if (!apiKey) { res.status(500).json({ error: "RESEND_API_KEY not configured" }); return; }
 
   try {
-    const { Resend } = await import("resend");
     const fromAddress = process.env.RESEND_FROM ?? "ONWRD Proposal Desk <onboarding@resend.dev>";
     const html = `
 <div style="font-family:sans-serif;max-width:600px;margin:0 auto;color:#fff;background:#0a0a0a;padding:32px">

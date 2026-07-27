@@ -1,7 +1,15 @@
-import { TenderSourceAdapter, TenderOpportunity, AdapterFetchResult, safeFetch, stripHtml } from "./base-adapter.js";
+import { TenderSourceAdapter, TenderOpportunity, AdapterFetchResult, FetchFn, safeFetch, stripHtml, fetchDetailDescription } from "./base-adapter.js";
 
+// EU Caribbean Development Fund (CARIFORUM) adapter.
+//
+// NOTE: cariforum.org is unreachable (connection timeout) from this environment
+// as of July 2026. The adapter is kept active so that fixture-based tests
+// exercise the real parsing path. Do NOT report this source as fixed;
+// live data is unavailable from Replit.
 export class EUCaribbeanAdapter implements TenderSourceAdapter {
   adapterType = "eu_caribbean";
+
+  constructor(private fetchFn: FetchFn = safeFetch) {}
 
   async fetchOpportunities(): Promise<AdapterFetchResult> {
     const warnings: string[] = [];
@@ -18,16 +26,20 @@ export class EUCaribbeanAdapter implements TenderSourceAdapter {
     const relevantTerms = [
       "communic", "visib", "awareness", "outreach", "campaign",
       "brand", "media", "engagement", "consult", "tender", "rfp",
+      "procur", "market", "strateg",
     ];
 
     for (const url of urls) {
       requestsAttempted++;
       try {
-        const r = await safeFetch(url, {
+        const r = await this.fetchFn(url, {
           headers: { "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)", Accept: "text/html" },
         });
         if (!r.ok) {
-          warnings.push(`EU Caribbean HTTP ${r.status} for ${url}`);
+          const hint = r.status === 0 || !r.status
+            ? "site unreachable (connection timeout) from this environment"
+            : `HTTP ${r.status}`;
+          warnings.push(`EU Caribbean ${hint} for ${url}`);
           continue;
         }
         const html = await r.text();
@@ -58,12 +70,22 @@ export class EUCaribbeanAdapter implements TenderSourceAdapter {
             ? href
             : `${new URL(url).origin}${href.startsWith("/") ? "" : "/"}${href}`;
 
+          // Fetch detail page for real scope content
+          let description = "";
+          const detail = await fetchDetailDescription(fullUrl, this.fetchFn);
+          if (detail && detail.length >= 120) {
+            description = detail;
+          } else {
+            // Fall back to title — eligibility gate marks as title_only
+            description = rawTitle;
+          }
+
           results.push({
             externalId: `eucari-${Buffer.from((rawTitle + href).slice(0, 40)).toString("base64").slice(0, 16)}`,
             title: rawTitle,
             organization: "EU Caribbean Development Fund",
             url: fullUrl,
-            description: `EU Caribbean funding notice: ${rawTitle}`,
+            description,
             country: "Caribbean",
             sector: "Development Communications",
           });
@@ -78,7 +100,11 @@ export class EUCaribbeanAdapter implements TenderSourceAdapter {
     }
 
     if (requestsAttempted > 0 && requestsSucceeded === 0) {
-      throw new Error(`EU Caribbean: all ${requestsAttempted} requests failed. ` + warnings.join("; "));
+      throw new Error(
+        `EU Caribbean: all ${requestsAttempted} request(s) failed. ` +
+        `cariforum.org is unreachable from this environment (connection timeout). ` +
+        warnings.join("; "),
+      );
     }
 
     return { opportunities: results, requestsAttempted, requestsSucceeded, warnings };
