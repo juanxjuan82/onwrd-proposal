@@ -236,9 +236,12 @@ describe("evaluateCrawlerEligibility — hard negative categories", () => {
 // ── Generic terms alone cannot qualify ───────────────────────────────────────
 
 describe("evaluateCrawlerEligibility — generic terms alone do not qualify", () => {
-  test("'communications' alone → no positive signals → raw_only", () => {
+  test("'communications' alone in body without recognised phrase → no positive signals → raw_only", () => {
+    // The single word "communications" in the body does not qualify,
+    // but the multi-word phrase "communications consultant" in the title now IS
+    // a recognised CORE_SERVICE_PHRASE — so we use a title that avoids it.
     const r = evaluateCrawlerEligibility({
-      title:          "Communications Consultant",
+      title:          "Advisory Support Services",
       description:
         "The organization seeks a consultant to support communications activities. " +
         "The consultant will provide communications advisory services as needed. " +
@@ -247,6 +250,21 @@ describe("evaluateCrawlerEligibility — generic terms alone do not qualify", ()
     });
     assert.equal(r.positiveSignals.length, 0);
     assert.equal(r.eligible, false);
+  });
+
+  test("'Communications Consultant' title → recognised phrase → eligible", () => {
+    // "communications consultant" is a multi-word CORE_SERVICE_PHRASE — a
+    // development-sector posting with this title is a legitimate comms contract.
+    const r = evaluateCrawlerEligibility({
+      title:          "Communications Consultant",
+      description:
+        "The organization seeks a consultant to support communications activities. " +
+        "The consultant will provide communications advisory services as needed. " +
+        "Deliverables include regular updates and stakeholder briefings over 6 months.",
+      recommendation: PURSUE,
+    });
+    assert.ok(r.positiveSignals.length >= 1);
+    assert.equal(r.eligible, true);
   });
 
   test("'campaign' alone → no positive signals → raw_only", () => {
