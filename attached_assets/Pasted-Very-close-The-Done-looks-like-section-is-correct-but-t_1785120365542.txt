@@ -1,0 +1,42 @@
+Very close. The “Done looks like” section is correct, but two old contradictions remain in the implementation steps, and the card actions can be simplified further.
+
+### 1. Replace the orchestration step
+
+The current wording still says “in one HTTP call” and “streams or polls.” Those are conflicting approaches. Use a short `202` request plus polling:
+
+> **Orchestrating backend endpoint** — Add `POST /api/opportunities/:id/run-full-generation`. The endpoint atomically creates or returns the Opportunity’s single linked Proposal, acquires the existing generation lock, starts background execution and returns `202 Accepted` with the Proposal ID and persisted generation status. It must not keep the HTTP request open while AI phases run.
+>
+> Concurrent calls must return the existing Proposal and active generation state without starting another job. The background workflow sequences extraction, strategy and drafting using the underlying service functions, not loopback HTTP calls. A phase is skipped only when Task #32’s persisted completion criteria prove it is complete—not from status text alone. Scheduling or execution failures must persist `failed` state and remain safely retryable. Preserve existing stale-run recovery behavior.
+>
+> Store generation status on the linked Proposal: `extracting`, `strategizing`, `drafting`, `ready` or `failed`. Before a Proposal exists, the Opportunity is implicitly `idle`. The frontend polls persisted Proposal state and reconstructs it after refresh.
+
+### 2. Replace the Proposals workspace step
+
+It still says the existing list is `/` and fetches “proposals sourced from intake,” which contradicts the eligible-Opportunity model:
+
+> **Proposals workspace** — Make `/proposals` the canonical Proposals route. Display eligible Opportunity records with their optional linked Proposal: promoted crawler Opportunities plus every intake, paste and upload Opportunity. An Opportunity must appear even when no Proposal exists yet. Do not automatically create empty Proposals during intake, paste or upload creation.
+>
+> After an internal user uploads or pastes an RFP, redirect them to the corresponding item in `/proposals`. Client intake submissions appear there automatically.
+>
+> Each item shows its title or agency, source badge, persisted status and the appropriate state-driven action.
+
+### 3. Use one progressive action instead of two permanent buttons
+
+This is cleaner than showing disabled Generate and Share controls simultaneously:
+
+| State                                | Primary action    |
+| ------------------------------------ | ----------------- |
+| No linked proposal / idle            | Generate Proposal |
+| Extracting, strategizing or drafting | Status only       |
+| Failed                               | Retry             |
+| Ready                                | Share to [folder] |
+| Google handoff complete              | Open Google Doc   |
+
+This better expresses the workflow: one obvious next action at any point.
+
+### 4. Correct two remaining route references
+
+* Change `POST /opportunities/:id/run-full-generation` to `POST /api/opportunities/:id/run-full-generation`.
+* Change “existing Proposals list (`/`)" to “canonical Proposals list (`/proposals`).”
+
+After those edits, the ticket is internally consistent and ready to build.
