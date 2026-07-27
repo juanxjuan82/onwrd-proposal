@@ -29,8 +29,10 @@ import type {
   ParseBriefBody,
   ParseBriefResponse,
   Proposal,
+  RunFullGenerationResponse,
   Tender,
   UpdateProposalBody,
+  WorkspaceItem,
 } from "./api.schemas";
 
 import { customFetch } from "../custom-fetch";
@@ -117,6 +119,166 @@ export function useHealthCheck<
 
   return { ...query, queryKey: queryOptions.queryKey };
 }
+
+/**
+ * @summary List all opportunities with linked proposal state for the Proposals workspace
+ */
+export const getListProposalsWorkspaceUrl = () => {
+  return `/api/proposals/workspace`;
+};
+
+export const listProposalsWorkspace = async (
+  options?: RequestInit,
+): Promise<WorkspaceItem[]> => {
+  return customFetch<WorkspaceItem[]>(getListProposalsWorkspaceUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getListProposalsWorkspaceQueryKey = () => {
+  return [`/api/proposals/workspace`] as const;
+};
+
+export const getListProposalsWorkspaceQueryOptions = <
+  TData = Awaited<ReturnType<typeof listProposalsWorkspace>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof listProposalsWorkspace>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getListProposalsWorkspaceQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof listProposalsWorkspace>>
+  > = ({ signal }) => listProposalsWorkspace({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof listProposalsWorkspace>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type ListProposalsWorkspaceQueryResult = NonNullable<
+  Awaited<ReturnType<typeof listProposalsWorkspace>>
+>;
+export type ListProposalsWorkspaceQueryError = ErrorType<unknown>;
+
+/**
+ * @summary List all opportunities with linked proposal state for the Proposals workspace
+ */
+
+export function useListProposalsWorkspace<
+  TData = Awaited<ReturnType<typeof listProposalsWorkspace>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof listProposalsWorkspace>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getListProposalsWorkspaceQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Start the full extract → strategy → draft pipeline for an opportunity
+ */
+export const getRunFullGenerationUrl = (id: number) => {
+  return `/api/opportunities/${id}/run-full-generation`;
+};
+
+export const runFullGeneration = async (
+  id: number,
+  options?: RequestInit,
+): Promise<RunFullGenerationResponse> => {
+  return customFetch<RunFullGenerationResponse>(getRunFullGenerationUrl(id), {
+    ...options,
+    method: "POST",
+  });
+};
+
+export const getRunFullGenerationMutationOptions = <
+  TError = ErrorType<ErrorResponse>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof runFullGeneration>>,
+    TError,
+    { id: number },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof runFullGeneration>>,
+  TError,
+  { id: number },
+  TContext
+> => {
+  const mutationKey = ["runFullGeneration"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof runFullGeneration>>,
+    { id: number }
+  > = (props) => {
+    const { id } = props ?? {};
+
+    return runFullGeneration(id, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type RunFullGenerationMutationResult = NonNullable<
+  Awaited<ReturnType<typeof runFullGeneration>>
+>;
+
+export type RunFullGenerationMutationError = ErrorType<ErrorResponse>;
+
+/**
+ * @summary Start the full extract → strategy → draft pipeline for an opportunity
+ */
+export const useRunFullGeneration = <
+  TError = ErrorType<ErrorResponse>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof runFullGeneration>>,
+    TError,
+    { id: number },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof runFullGeneration>>,
+  TError,
+  { id: number },
+  TContext
+> => {
+  return useMutation(getRunFullGenerationMutationOptions(options));
+};
 
 /**
  * @summary List all proposals
@@ -1233,7 +1395,7 @@ export const useGenerateProposalFromTender = <
  * @summary Export a proposal to Google Docs
  */
 export const getExportToGoogleDocsUrl = (id: number) => {
-  return `/api/proposals/${id}/export`;
+  return `/api/proposals/${id}/export-to-google-docs`;
 };
 
 export const exportToGoogleDocs = async (

@@ -9,28 +9,51 @@ export interface HealthStatus {
   status: string;
 }
 
-export type ProposalStatus =
-  (typeof ProposalStatus)[keyof typeof ProposalStatus];
-
-export const ProposalStatus = {
-  draft: "draft",
-  exported: "exported",
-} as const;
-
 export interface Proposal {
   id: number;
   clientName: string;
   industry: string;
   status: string;
+  generationStatus?: string | null;
   briefText: string;
   proposalContent: string;
   googleDocUrl?: string | null;
   googleFileId?: string | null;
   syncStatus?: string | null;
-  lastSyncedAt?: string | null;
   tenderId?: number | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface WorkspaceProposal {
+  id: number;
+  generationStatus?: string | null;
+  status: string;
+  syncStatus?: string | null;
+  googleDocUrl?: string | null;
+  googleFileId?: string | null;
+  updatedAt?: string | null;
+}
+
+export interface WorkspaceItem {
+  id: number;
+  title: string;
+  agency: string;
+  category: string;
+  status: string;
+  sourceType?: string | null;
+  deadline?: string | null;
+  valueAmount?: string | null;
+  sourceUrl?: string | null;
+  updatedAt: string;
+  createdAt: string;
+  proposalId?: number | null;
+  proposal?: WorkspaceProposal | null;
+}
+
+export interface RunFullGenerationResponse {
+  proposalId: number;
+  generationStatus: string;
 }
 
 export interface CreateProposalBody {

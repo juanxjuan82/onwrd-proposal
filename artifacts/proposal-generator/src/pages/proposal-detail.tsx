@@ -798,46 +798,11 @@ export default function ProposalDetail() {
             </div>
           )}
 
-          {/* Tab bar — show sections tab only when sections exist */}
-          {hasSections && (
-            <div className="flex rounded-md border overflow-hidden text-sm w-fit">
-              <button
-                type="button"
-                onClick={() => setActiveTab("preview")}
-                className={`flex items-center gap-1.5 px-4 py-2 transition-colors ${
-                  activeTab === "preview"
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-background text-muted-foreground hover:bg-accent"
-                }`}
-              >
-                <Eye className="w-3.5 h-3.5" />
-                Full Proposal Preview
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveTab("sections")}
-                className={`flex items-center gap-1.5 px-4 py-2 transition-colors ${
-                  activeTab === "sections"
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-background text-muted-foreground hover:bg-accent"
-                }`}
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                Sections
-                {sections.filter((s) => s.status === "blocked_missing_input" || s.status === "needs_review").length > 0 && (
-                  <span className="ml-1 bg-orange-500 text-white rounded-full w-4 h-4 flex items-center justify-center text-[10px] font-bold">
-                    {sections.filter((s) => s.status === "blocked_missing_input" || s.status === "needs_review").length}
-                  </span>
-                )}
-              </button>
-            </div>
-          )}
+          {/* Tab switcher removed — sections are accessible via the Edit Sections disclosure below */}
 
-          {/* Content area — preview / sections / freeform */}
-          {hasSections && activeTab === "sections" ? (
-            <SectionsPanel proposalId={id} />
-          ) : hasSections ? (
-            /* Full Proposal Preview — read-only, assembled from sections */
+          {/* Content area — preview always shown; edit sections via disclosure below */}
+          {hasSections ? (
+            /* Full Proposal Preview — always shown when sections exist */
             <div className="bg-card border rounded-lg overflow-hidden flex flex-col">
               <div className="bg-muted p-4 border-b flex items-center justify-between">
                 <Label className="font-semibold text-foreground">Full Proposal Preview</Label>
@@ -944,7 +909,27 @@ export default function ProposalDetail() {
             </div>
           )}
 
-          {activeTab === "preview" && (
+          {/* ── Edit Sections disclosure ──────────────────────────────────── */}
+          {hasSections && (
+            <div className="mt-4">
+              <button
+                type="button"
+                className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors py-2"
+                onClick={() => setActiveTab(activeTab === "sections" ? "preview" : "sections")}
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                {activeTab === "sections" ? "Hide Sections" : "Edit Sections"}
+                {sections.filter((s) => s.status === "blocked_missing_input" || s.status === "needs_review").length > 0 && (
+                  <span className="ml-1 bg-orange-500 text-white rounded-full w-4 h-4 flex items-center justify-center text-[10px] font-bold">
+                    {sections.filter((s) => s.status === "blocked_missing_input" || s.status === "needs_review").length}
+                  </span>
+                )}
+              </button>
+              {activeTab === "sections" && <SectionsPanel proposalId={id} />}
+            </div>
+          )}
+
+          {(
             <div className="pt-4 space-y-3">
               {/* ── Google Doc status panel ─────────────────────────────────── */}
               {(() => {

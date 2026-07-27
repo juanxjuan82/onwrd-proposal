@@ -6,18 +6,12 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface Proposal {
+export interface WorkspaceProposal {
   id: number;
-  clientName: string;
-  industry: string;
-  status: string;
   generationStatus?: string | null;
-  briefText: string;
-  proposalContent: string;
+  status: string;
+  syncStatus?: string | null;
   googleDocUrl?: string | null;
   googleFileId?: string | null;
-  syncStatus?: string | null;
-  tenderId?: number | null;
-  createdAt: Date;
-  updatedAt: Date;
+  updatedAt?: string | null;
 }

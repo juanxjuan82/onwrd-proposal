@@ -9,15 +9,19 @@ import {
   tenderRequirementsTable,
   bidScoresTable,
   proposalSectionsTable,
-  proposalGenerationRunsTable,
   proposalStrategiesTable,
 } from "@workspace/db";
 import { eq, desc, and, inArray, sql } from "drizzle-orm";
 import { invokeAI, type AIResult } from "../lib/ai-gateway.js";
 import { extractTenderMetadata } from "../lib/metadata-extractor.js";
 import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
-import { assembleProposalFromSections } from "@workspace/proposal-content";
 import { applyDeterministicScore } from "../lib/apply-deterministic-score.js";
+import {
+  SECTION_DEFINITIONS,
+  buildBriefText,
+  buildStrategyContext,
+  generateProposalDraftAndPersist,
+} from "../lib/proposal-draft-service.js";
 import {
   truncateToTokenBudget,
   classifyError,
@@ -43,23 +47,7 @@ interface ActiveRun {
 }
 const activeRuns = new Map<number, ActiveRun>();
 
-const SECTION_DEFINITIONS = [
-  { key: "executive_summary",   title: "Executive Summary",                         order: 0 },
-  { key: "client_context",      title: "Client Context and Problem Definition",      order: 1 },
-  { key: "goals_kpis",          title: "Goals, KPIs and Success Criteria",           order: 2 },
-  { key: "strategic_approach",  title: "Recommended Strategic Approach",             order: 3 },
-  { key: "scope_of_work",       title: "Detailed Scope of Work",                     order: 4 },
-  { key: "deliverables",        title: "Deliverables Register",                      order: 5 },
-  { key: "timeline",            title: "Timeline, Milestones and Dependencies",      order: 6 },
-  { key: "team_structure",      title: "Team Structure and Ways of Working",         order: 7 },
-  { key: "investment",          title: "Investment and Commercial Terms",            order: 8 },
-  { key: "assumptions_risks",   title: "Assumptions, Exclusions and Risks",          order: 9 },
-  { key: "governance",          title: "Governance, Approval and Change Control",    order: 10 },
-  { key: "why_onwrd",           title: "Why ONWRD",                                 order: 11 },
-  { key: "case_studies",        title: "Case Studies and Credentials",               order: 12 },
-  { key: "legal_terms",         title: "Legal and Operational Terms",                order: 13 },
-  { key: "next_steps",          title: "Next Steps and Acceptance",                  order: 14 },
-];
+// SECTION_DEFINITIONS imported from ../lib/proposal-draft-service.js
 
 // ── Helper: check whether a tender is already being analysed ─────────────────
 function isActiveStatus(status: string): status is AnalysisActiveStatus {
@@ -1386,99 +1374,13 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
 
   void (async () => {
     try {
-      const genAiResult = await invokeAI({
-        feature:        "proposal_generation",
-        messages: [
-          {
-            role: "system",
-            content: `You are a senior proposal writer at ONWRD, a full-service marketing and strategy agency in the Bahamas. Write a complete, professional proposal responding to a public tender opportunity.
-
-RULES:
-- Write in plain, direct English. No jargon, no waffle, no filler.
-- Do NOT invent ONWRD credentials, metrics, clients, or outcomes not supported by the case studies below.
-- If a section requires specific ONWRD information you don't have (specific pricing, team member names, certifications), insert [NEEDS ONWRD INPUT: brief description of what is needed].
-- Never fabricate specific numbers, dates, or facts about the tender that aren't in the brief.
-- The Case Studies section MUST cite real ONWRD work from the list below.
-- Follow the proposal strategy brief closely — use the positioning, win themes, and recommended case studies provided.
-
-${ONWRD_CASE_STUDIES}
-
-Return JSON with a "sections" array. Each element:
-- key: the section key
-- content: the section BODY ONLY — do NOT start with the section title as a heading. Internal subheadings should use ### (level 3 only). Use markdown bold with ** and bullets with -.`,
-          },
-          {
-            role: "user",
-            content: `Write all 15 sections of a proposal for this tender:
-
-${briefText}
-${strategyContext}
-
-Sections to write (return all 15):
-${SECTION_DEFINITIONS.map((s) => `- ${s.key}: ${s.title}`).join("\n")}`,
-          },
-        ],
-        maxTokens:      16000,
-        responseFormat: { type: "json_object" },
-        proposalId:     draft.id,
+      // Shared draft service: AI call outside transaction, atomic section persist inside.
+      await generateProposalDraftAndPersist({
+        tenderId:        id,
+        proposalId:      draft.id,
+        briefText,
+        strategyContext,
       });
-
-      const raw = genAiResult.content;
-      const data = JSON.parse(raw) as { sections?: { key: string; content: string }[] };
-      const sections: { key: string; content: string }[] = data.sections ?? [];
-
-      const [genRun] = await db
-        .insert(proposalGenerationRunsTable)
-        .values({
-          proposalId:            draft.id,
-          model:                 genAiResult.model,
-          promptVersion:         "2.0",
-          retrievedKnowledgeIds: "[]",
-          status:                "completed",
-        })
-        .returning();
-
-      let hasBlockedSections = false;
-      for (const sectionDef of SECTION_DEFINITIONS) {
-        const generated = sections.find((s) => s.key === sectionDef.key);
-        const content    = generated?.content ?? `[NEEDS ONWRD INPUT: ${sectionDef.title} section not generated]`;
-        const hasBlocker = content.includes("[NEEDS ONWRD INPUT");
-        if (hasBlocker) hasBlockedSections = true;
-        const status     = hasBlocker ? "blocked_missing_input" : "drafted";
-
-        await db
-          .update(proposalSectionsTable)
-          .set({ content, status, generationRunId: genRun.id, updatedAt: new Date() })
-          .where(and(
-            eq(proposalSectionsTable.proposalId, draft.id),
-            eq(proposalSectionsTable.sectionKey, sectionDef.key),
-          ));
-      }
-
-      // Rebuild proposalContent atomically from the freshly written sections.
-      // Uses the shared assembler so proposalContent always mirrors sections exactly.
-      const updatedSections = await db
-        .select()
-        .from(proposalSectionsTable)
-        .where(eq(proposalSectionsTable.proposalId, draft.id))
-        .orderBy(proposalSectionsTable.orderIndex);
-
-      await db
-        .update(proposalsTable)
-        .set({
-          proposalContent: assembleProposalFromSections(updatedSections),
-          status:          hasBlockedSections ? "needs_onwrd_input" : "ready_for_review",
-          updatedAt:       new Date(),
-        })
-        .where(eq(proposalsTable.id, draft.id));
-
-      await db
-        .update(tendersTable)
-        .set({
-          status:    hasBlockedSections ? "needs_onwrd_input" : "ready_for_review",
-          updatedAt: new Date(),
-        })
-        .where(eq(tendersTable.id, id));
     } catch (err) {
       console.error("[opportunity→proposal] generation failed:", err);
       await db
@@ -1536,7 +1438,7 @@ async function runFullGenerationBackground(
     if (!extractionComplete) {
       const inserted = await runExtractRequirements(tenderId);
       if (inserted.length === 0) {
-        console.warn(`[full-gen] tender=${tenderId}: no requirements extracted, continuing`);
+        throw new Error("NO_REQUIREMENTS_EXTRACTED");
       }
     }
 
@@ -1573,129 +1475,17 @@ async function runFullGenerationBackground(
       .orderBy(desc(proposalStrategiesTable.createdAt))
       .limit(1);
 
-    const fullBriefText = `TENDER OPPORTUNITY — ${tender.title}
-
-Issuing Agency: ${tender.agency}
-Category: ${tender.category}
-${tender.deadline ? `Submission Deadline: ${new Date(tender.deadline).toDateString()}` : ""}
-${tender.valueAmount ? `Estimated Value: ${tender.valueAmount}` : ""}
-${tender.contactInfo ? `Contact: ${tender.contactInfo}` : ""}
-${tender.sourceUrl ? `Source: ${tender.sourceUrl}` : ""}
-
-SCOPE / DESCRIPTION:
-${tender.description}
-
-${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i) => `${i + 1}. [${r.category}${r.isMandatory ? ", MANDATORY" : ""}] ${r.requirementText}`).join("\n")}` : ""}`;
-
-    const fullStrategyContext = latestStrategy
-      ? `\nPROPOSAL STRATEGY BRIEF:\nPositioning: ${latestStrategy.positioning}\nWin Themes: ${JSON.parse(latestStrategy.winThemes ?? "[]").join(", ")}\nRecommended Case Studies: ${JSON.parse(latestStrategy.recommendedCaseStudies ?? "[]").join(", ")}\nMessaging Guidance: ${latestStrategy.messagingGuidance}\nRisks to Address: ${JSON.parse(latestStrategy.risks ?? "[]").join(", ")}`
-      : "";
-
-    // Reset + seed blank section shells
-    await db.execute(sql`DELETE FROM proposal_sections WHERE proposal_id = ${proposalId}`);
-    await db
-      .insert(proposalSectionsTable)
-      .values(
-        SECTION_DEFINITIONS.map((s) => ({
-          proposalId,
-          sectionKey: s.key,
-          title:      s.title,
-          content:    "",
-          status:     "not_started",
-          orderIndex: s.order,
-        })),
-      );
-
-    // AI call — same prompt as generate-proposal
-    const genAiResult = await invokeAI({
-      feature: "proposal_generation",
-      messages: [
-        {
-          role: "system",
-          content: `You are a senior proposal writer at ONWRD, a full-service marketing and strategy agency in the Bahamas. Write a complete, professional proposal responding to a public tender opportunity.
-
-RULES:
-- Write in plain, direct English. No jargon, no waffle, no filler.
-- Do NOT invent ONWRD credentials, metrics, clients, or outcomes not supported by the case studies below.
-- If a section requires specific ONWRD information you don't have (specific pricing, team member names, certifications), insert [NEEDS ONWRD INPUT: brief description of what is needed].
-- Never fabricate specific numbers, dates, or facts about the tender that aren't in the brief.
-- The Case Studies section MUST cite real ONWRD work from the list below.
-- Follow the proposal strategy brief closely — use the positioning, win themes, and recommended case studies provided.
-
-${ONWRD_CASE_STUDIES}
-
-Return JSON with a "sections" array. Each element:
-- key: the section key
-- content: the section BODY ONLY — do NOT start with the section title as a heading. Internal subheadings should use ### (level 3 only). Use markdown bold with ** and bullets with -.`,
-        },
-        {
-          role: "user",
-          content: `Write all 15 sections of a proposal for this tender:
-
-${fullBriefText}
-${fullStrategyContext}
-
-Sections to write (return all 15):
-${SECTION_DEFINITIONS.map((s) => `- ${s.key}: ${s.title}`).join("\n")}`,
-        },
-      ],
-      maxTokens:      16000,
-      responseFormat: { type: "json_object" },
+    // Shared draft service: AI call outside transaction, atomic section + snapshot inside.
+    // Prior section content is preserved if the AI call or transaction fails.
+    await generateProposalDraftAndPersist({
+      tenderId,
       proposalId,
+      briefText:       buildBriefText(tender, requirements),
+      strategyContext: buildStrategyContext(latestStrategy),
     });
 
-    const rawContent = genAiResult.content;
-    const genData = JSON.parse(rawContent) as { sections?: { key: string; content: string }[] };
-    const genSections: { key: string; content: string }[] = genData.sections ?? [];
-
-    const [genRun] = await db
-      .insert(proposalGenerationRunsTable)
-      .values({
-        proposalId,
-        model:                 genAiResult.model,
-        promptVersion:         "2.0",
-        retrievedKnowledgeIds: "[]",
-        status:                "completed",
-      })
-      .returning();
-
-    let hasBlockedSections = false;
-    for (const sectionDef of SECTION_DEFINITIONS) {
-      const generated  = genSections.find((s) => s.key === sectionDef.key);
-      const content    = generated?.content ?? `[NEEDS ONWRD INPUT: ${sectionDef.title} section not generated]`;
-      const hasBlocker = content.includes("[NEEDS ONWRD INPUT");
-      if (hasBlocker) hasBlockedSections = true;
-      const secStatus  = hasBlocker ? "blocked_missing_input" : "drafted";
-      await db
-        .update(proposalSectionsTable)
-        .set({ content, status: secStatus, generationRunId: genRun.id, updatedAt: new Date() })
-        .where(and(
-          eq(proposalSectionsTable.proposalId, proposalId),
-          eq(proposalSectionsTable.sectionKey, sectionDef.key),
-        ));
-    }
-
-    const updatedSections = await db
-      .select()
-      .from(proposalSectionsTable)
-      .where(eq(proposalSectionsTable.proposalId, proposalId))
-      .orderBy(proposalSectionsTable.orderIndex);
-
-    const finalStatus = hasBlockedSections ? "needs_onwrd_input" : "ready_for_review";
-
-    await db.execute(sql`
-      UPDATE proposals
-      SET proposal_content = ${assembleProposalFromSections(updatedSections)},
-          generation_status = 'ready',
-          status = ${finalStatus},
-          updated_at = NOW()
-      WHERE id = ${proposalId}
-    `);
-
-    await db
-      .update(tendersTable)
-      .set({ status: finalStatus, updatedAt: new Date() })
-      .where(eq(tendersTable.id, tenderId));
+    // Mark orchestration complete
+    await setGenStatus("ready");
 
   } catch (err) {
     await fail(err);
@@ -1774,6 +1564,19 @@ ${tender.description}`;
         }
       }
 
+      // 4b. If draft is already complete with meaningful content, return without re-running
+      if (locked.generation_status === "ready") {
+        const countRes = await tx.execute(sql`
+          SELECT count(*)::int AS count FROM proposal_sections
+          WHERE proposal_id = ${locked.id} AND content <> ''
+        `);
+        const count = Number((countRes.rows[0] as { count: string } | undefined)?.count ?? 0);
+        if (count > 0) {
+          return { proposalId: locked.id, generationStatus: "ready", alreadyRunning: true };
+        }
+        // No meaningful content — fall through and re-generate
+      }
+
       // 5. Claim generation — atomically set extracting + proposal_drafting
       await tx.execute(sql`
         UPDATE proposals
@@ -1793,20 +1596,9 @@ ${tender.description}`;
         WHERE id = ${id}
       `);
 
-      // 7. Reset section shells idempotently
-      await tx.execute(sql`DELETE FROM proposal_sections WHERE proposal_id = ${locked.id}`);
-      await tx
-        .insert(proposalSectionsTable)
-        .values(
-          SECTION_DEFINITIONS.map((s) => ({
-            proposalId: locked.id,
-            sectionKey: s.key,
-            title:      s.title,
-            content:    "",
-            status:     "not_started",
-            orderIndex: s.order,
-          })),
-        );
+      // Note: section shells are NOT pre-seeded here.
+      // The draft service creates sections atomically after AI output is validated,
+      // preserving any prior content if the draft phase fails.
 
       return { proposalId: locked.id, generationStatus: "extracting", alreadyRunning: false };
     });

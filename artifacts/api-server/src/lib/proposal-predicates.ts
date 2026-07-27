@@ -1,27 +1,58 @@
 /**
- * Pure business-logic predicates for proposal lifecycle classification.
- * No framework dependencies — safe to import in Node.js tests.
+ * Shared predicates for proposal-level immutability checks.
  *
- * Source of truth: matches the predicate in proposal-generator/src/lib/proposal-predicates.ts.
- * Any contract change must be made in both files.
+ * Canonical Google Doc states (block all app-side mutations):
+ *   - syncStatus = 'handoff_complete'
+ *   - googleFileId set with any syncStatus other than pending_first_write or handoff_in_progress
+ *
+ * Allowed states (app may still mutate):
+ *   - syncStatus = null  (never exported)
+ *   - syncStatus = 'pending_first_write'  (export in-flight, not yet written)
+ *   - syncStatus = 'handoff_in_progress'  (export in-flight, being written)
  */
-
-export interface ProposalPredicateInput {
-  syncStatus?: string | null;
+export function googleDocCanonicalPayload(proposal: {
+  syncStatus: string | null;
+  googleFileId: string | null;
   googleDocUrl?: string | null;
-  googleFileId?: string | null;
+}): { error: string; code: string; googleDocUrl?: string } | null {
+  const isHandoffComplete = proposal.syncStatus === "handoff_complete";
+  const isLegacyLinked =
+    !!proposal.googleFileId &&
+    proposal.syncStatus !== "pending_first_write" &&
+    proposal.syncStatus !== "handoff_in_progress" &&
+    !isHandoffComplete;
+
+  if (!isHandoffComplete && !isLegacyLinked) return null;
+
+  const googleDocUrl =
+    proposal.googleDocUrl ??
+    (proposal.googleFileId
+      ? `https://docs.google.com/document/d/${proposal.googleFileId}/edit`
+      : undefined);
+
+  return {
+    error: "google_doc_canonical",
+    code:  "google_doc_canonical",
+    ...(googleDocUrl ? { googleDocUrl } : {}),
+  };
 }
 
 /**
- * Returns true when the proposal has reached the Team Review stage:
- *   • syncStatus === 'handoff_complete', OR
- *   • a Google Doc URL/file-ID is present AND the sync is not still in-flight.
+ * Returns true when the proposal has been handed off to Google Docs and the
+ * Google Doc is now the canonical source of truth for proposal content.
+ *
+ * Equivalent to `googleDocCanonicalPayload(proposal) !== null`.
  */
-export function isTeamReview(p: ProposalPredicateInput): boolean {
-  if (p.syncStatus === "handoff_complete") return true;
-  return !!(
-    (p.googleDocUrl || p.googleFileId) &&
-    p.syncStatus !== "pending_first_write" &&
-    p.syncStatus !== "handoff_in_progress"
-  );
+export function isTeamReview(proposal: {
+  syncStatus?: string | null;
+  googleFileId?: string | null;
+  googleDocUrl?: string | null;
+}): boolean {
+  const isHandoffComplete = proposal.syncStatus === "handoff_complete";
+  const isLegacyLinked =
+    !!(proposal.googleFileId ?? proposal.googleDocUrl) &&
+    proposal.syncStatus !== "pending_first_write" &&
+    proposal.syncStatus !== "handoff_in_progress" &&
+    !isHandoffComplete;
+  return isHandoffComplete || isLegacyLinked;
 }

@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { googleDocCanonicalPayload } from "../lib/proposal-predicates.js";
 import multer from "multer";
 import pdfParse from "pdf-parse";
 import mammoth from "mammoth";
@@ -544,6 +545,23 @@ router.put("/proposals/:id", async (req, res) => {
   }
 
   try {
+    // ── Immutability guard — fetch before mutating ─────────────────────────
+    const [existing] = await db
+      .select()
+      .from(proposalsTable)
+      .where(eq(proposalsTable.id, paramParsed.data.id));
+
+    if (!existing) {
+      res.status(404).json({ error: "Proposal not found" });
+      return;
+    }
+
+    const blocked = googleDocCanonicalPayload(existing);
+    if (blocked) {
+      res.status(409).json(blocked);
+      return;
+    }
+
     const updateData: Record<string, unknown> = {
       updatedAt: new Date(),
     };

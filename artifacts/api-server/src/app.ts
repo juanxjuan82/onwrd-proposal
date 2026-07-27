@@ -29,36 +29,29 @@ if (!sessionSecret) {
   }
 }
 
-// Add handoff_started_at column if it doesn't exist (idempotent startup migration)
-pool.query(
-  `ALTER TABLE proposals ADD COLUMN IF NOT EXISTS handoff_started_at TIMESTAMP`,
-).catch((err: unknown) => {
-  logger.error({ err }, "Failed to apply handoff_started_at migration");
-});
-
-// Add generation_status column if it doesn't exist (idempotent startup migration)
-pool.query(
-  `ALTER TABLE proposals ADD COLUMN IF NOT EXISTS generation_status TEXT`,
-).catch((err: unknown) => {
-  logger.error({ err }, "Failed to apply generation_status migration");
-});
-
-// Ensure session table exists before accepting requests — connect-pg-simple's
-// internal DDL is unreliable at startup; await this in index.ts before listen.
+// Awaited startup migrations + session DDL.  The server does not begin
+// listening until this promise resolves, so every column added here is
+// guaranteed to exist before the first request is served.
 export const dbReady: Promise<void> = pool
-  .query(
-    `CREATE TABLE IF NOT EXISTS session (
-    sid varchar NOT NULL,
-    sess json NOT NULL,
-    expire timestamp(6) NOT NULL,
-    CONSTRAINT session_pkey PRIMARY KEY (sid)
-  )`,
+  // ── Idempotent schema migrations ─────────────────────────────────────────
+  .query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS handoff_started_at TIMESTAMP`)
+  .then(() => pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS generation_status TEXT`))
+  // ── Session table ─────────────────────────────────────────────────────────
+  .then(() =>
+    pool.query(
+      `CREATE TABLE IF NOT EXISTS session (
+        sid varchar NOT NULL,
+        sess json NOT NULL,
+        expire timestamp(6) NOT NULL,
+        CONSTRAINT session_pkey PRIMARY KEY (sid)
+      )`,
+    ),
   )
   .then(() => pool.query(`CREATE INDEX IF NOT EXISTS IDX_session_expire ON session (expire)`))
   .then(() => undefined)
   .catch((err: unknown) => {
     const reason = err instanceof Error ? err.message : String(err);
-    logger.error({ reason }, "Session store initialization failed — refusing to start");
+    logger.error({ reason }, "Startup migration / session-store initialization failed — refusing to start");
     throw err;
   });
 

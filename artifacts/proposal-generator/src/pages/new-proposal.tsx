@@ -393,7 +393,7 @@ export default function NewProposal() {
         return;
       }
       toast({ title: "Opportunity created", description: "Ready to generate a proposal." });
-      setLocation("/proposals");
+      setLocation(`/proposals?opportunity=${body.id ?? ""}`);
     } finally {
       setCreatingOpportunity(false);
     }
@@ -436,7 +436,7 @@ export default function NewProposal() {
         return;
       }
       toast({ title: "Opportunity created", description: "Ready to generate a proposal." });
-      setLocation("/proposals");
+      setLocation(`/proposals?opportunity=${body.id ?? ""}`);
     } finally {
       setCreatingOpportunity(false);
     }

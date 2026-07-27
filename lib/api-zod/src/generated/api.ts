@@ -16,16 +16,59 @@ export const HealthCheckResponse = zod.object({
 });
 
 /**
+ * @summary List all opportunities with linked proposal state for the Proposals workspace
+ */
+export const ListProposalsWorkspaceResponseItem = zod.object({
+  id: zod.number(),
+  title: zod.string(),
+  agency: zod.string(),
+  category: zod.string(),
+  status: zod.string(),
+  sourceType: zod.string().nullish(),
+  deadline: zod.string().nullish(),
+  valueAmount: zod.string().nullish(),
+  sourceUrl: zod.string().nullish(),
+  updatedAt: zod.string(),
+  createdAt: zod.string(),
+  proposalId: zod.number().nullish(),
+  proposal: zod
+    .object({
+      id: zod.number(),
+      generationStatus: zod.string().nullish(),
+      status: zod.string(),
+      syncStatus: zod.string().nullish(),
+      googleDocUrl: zod.string().nullish(),
+      googleFileId: zod.string().nullish(),
+      updatedAt: zod.string().nullish(),
+    })
+    .nullish(),
+});
+export const ListProposalsWorkspaceResponse = zod.array(
+  ListProposalsWorkspaceResponseItem,
+);
+
+/**
+ * @summary Start the full extract → strategy → draft pipeline for an opportunity
+ */
+export const RunFullGenerationParams = zod.object({
+  id: zod.coerce.number(),
+});
+
+/**
  * @summary List all proposals
  */
 export const ListProposalsResponseItem = zod.object({
   id: zod.number(),
   clientName: zod.string(),
   industry: zod.string(),
-  status: zod.enum(["draft", "exported"]),
+  status: zod.string(),
+  generationStatus: zod.string().nullish(),
   briefText: zod.string(),
   proposalContent: zod.string(),
   googleDocUrl: zod.string().nullish(),
+  googleFileId: zod.string().nullish(),
+  syncStatus: zod.string().nullish(),
+  tenderId: zod.number().nullish(),
   createdAt: zod.coerce.date(),
   updatedAt: zod.coerce.date(),
 });
@@ -52,10 +95,14 @@ export const GetProposalResponse = zod.object({
   id: zod.number(),
   clientName: zod.string(),
   industry: zod.string(),
-  status: zod.enum(["draft", "exported"]),
+  status: zod.string(),
+  generationStatus: zod.string().nullish(),
   briefText: zod.string(),
   proposalContent: zod.string(),
   googleDocUrl: zod.string().nullish(),
+  googleFileId: zod.string().nullish(),
+  syncStatus: zod.string().nullish(),
+  tenderId: zod.number().nullish(),
   createdAt: zod.coerce.date(),
   updatedAt: zod.coerce.date(),
 });
@@ -78,10 +125,14 @@ export const UpdateProposalResponse = zod.object({
   id: zod.number(),
   clientName: zod.string(),
   industry: zod.string(),
-  status: zod.enum(["draft", "exported"]),
+  status: zod.string(),
+  generationStatus: zod.string().nullish(),
   briefText: zod.string(),
   proposalContent: zod.string(),
   googleDocUrl: zod.string().nullish(),
+  googleFileId: zod.string().nullish(),
+  syncStatus: zod.string().nullish(),
+  tenderId: zod.number().nullish(),
   createdAt: zod.coerce.date(),
   updatedAt: zod.coerce.date(),
 });
