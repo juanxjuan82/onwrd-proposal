@@ -1,0 +1,211 @@
+# #33 — Simplify the RFP-to-Proposal Workflow
+
+## What & Why
+
+The current workflow exposes too much of the proposal-generation plumbing to the user.
+
+Users should not need to understand or manually trigger requirement extraction, strategy generation, section generation, content synchronization or Google handoff states. Those remain necessary internally, but they should operate as one reliable workflow.
+
+Simplify the product into two user-facing stages:
+
+1. Capture and select RFPs.
+2. Generate proposals and share them to the configured Google Drive folder.
+
+Do not weaken or remove the underlying task #23 or task #32 reliability architecture.
+
+## Done looks like
+
+### Stage 1 — RFPs
+
+Present one unified RFP list containing opportunities from every supported source:
+
+* Crawler results
+* Client intake submissions
+* Pasted RFP text
+* Uploaded documents
+
+Use the existing backend source types and canonical Opportunity records. Do not create a new parallel RFP data model.
+
+The page has no more than two primary actions:
+
+1. **Run Crawl**
+2. **Add RFP ▾**
+
+The Add RFP menu contains:
+
+* Upload Document
+* Paste RFP Text
+* Copy Client Intake Link
+
+Client intake submissions appear automatically in the unified RFP list. Copying the intake link makes zero backend mutations.
+
+Every RFP displays a simple source badge, useful identifying information and a selection control.
+
+Selecting an RFP means the user has chosen to pursue it. Remove the separate user-facing **Pursue** step.
+
+For crawler results, selection must use the existing concurrency-safe promotion flow to create or return exactly one canonical Opportunity. It must not restore the old frontend PATCH-then-POST sequence.
+
+### Stage 2 — Proposals
+
+Selected RFPs appear in the Proposals workspace regardless of their original source.
+
+Each selected RFP has no more than two primary actions:
+
+1. **Generate Proposal**
+2. **Share to [configured folder name]**
+
+If several RFPs are selected, the generation action may display the count, such as:
+
+* Generate Proposal
+* Generate 3 Proposals
+
+Each RFP must still be processed and persisted independently. One failure must not corrupt or duplicate another proposal.
+
+## Generate Proposal behavior
+
+**Generate Proposal** replaces the three exposed actions:
+
+* Extract Requirements
+* Generate Strategy
+* Generate Draft
+
+Remove those three buttons from the user interface.
+
+One click must:
+
+1. Create or return the RFP’s single linked Proposal idempotently.
+2. Extract and persist structured requirements.
+3. Generate and persist the internal response strategy.
+4. Generate the client-facing proposal sections.
+5. Assemble and synchronize the complete proposal.
+6. Mark the proposal ready to share only after meaningful draft content has been persisted.
+
+These remain distinct persisted backend phases. They are combined only at the user-interface level.
+
+Display progress as status text rather than additional buttons:
+
+* Reading RFP
+* Developing strategy
+* Writing proposal
+* Proposal ready
+* Generation failed
+
+The UI may show one **Retry** action after a failure. Retry must resume safely from the failed or incomplete phase without:
+
+* Creating another linked Proposal
+* Repeating completed work unnecessarily
+* Duplicating sections
+* Corrupting persisted content
+* Sharing anything to Google Drive
+
+Refreshing the page must reconstruct the correct status from persisted backend data. HTTP acceptance alone must never be treated as pipeline completion.
+
+## Proposal preview
+
+When generation completes, show the assembled proposal preview automatically. Do not require a separate Preview or Full Document button.
+
+Before Google handoff:
+
+* `proposal_sections` remains canonical for section-based proposals.
+* The full preview is assembled from the ordered sections.
+* `proposals.proposalContent` remains a synchronized snapshot.
+* Existing app-side editing may remain available without adding more primary workflow buttons.
+
+Preserve task #32’s blank/freeform proposal behavior and loading guard.
+
+Do not expose separate Full Document and Sections workflows as competing representations of the proposal.
+
+## Share to folder behavior
+
+**Share to [configured folder name]** is disabled until a meaningful proposal draft has been persisted.
+
+The first click must use task #23’s existing Google handoff state machine:
+
+* Create the Google Doc directly in the configured folder.
+* Record the Google document ID before the first content write.
+* Write the same assembled content shown in the app preview.
+* Reuse the same document during `pending_first_write` retries.
+* Never create duplicate documents.
+
+After successful handoff:
+
+* Google Docs becomes canonical.
+* Replace the Share action with **Open Google Doc**.
+* Disable app-side section editing, AI improvement, rewriting and regeneration.
+* Preserve the backend HTTP 409 `google_doc_canonical` guards.
+* Completed and legacy-linked proposals must cause zero additional Google mutations.
+
+Do not modify OAuth, Google Picker, folder validation or task #23’s handoff state definitions.
+
+## Required task #32 plumbing
+
+The simplified interface does not remove any of these requirements:
+
+* Real shared `@workspace/proposal-content` package
+* Shared `normalizeSectionBody`
+* Shared `assembleProposalFromSections`
+* Duplicate-heading normalization
+* Deterministic section ordering
+* Transactional section and snapshot synchronization
+* Preview and first-export consistency
+* Body-only AI section output contract
+* Persisted generation states
+* Blank-proposal guard
+* Backend and frontend post-handoff immutability
+* Existing duplicated-content normalization
+* Asynchronous generation polling
+
+Do not copy assembler logic separately into the frontend and backend.
+
+## Remove or demote
+
+Remove from the primary user workflow:
+
+* Extract Requirements button
+* Generate Strategy button
+* Generate Draft button
+* Pursue button
+* Separate Import destination
+* Separate Tenders destination
+* Separate Inbox destination
+* Team Review as a sidebar destination
+* User-facing handoff-state terminology
+* Explanations requiring users to understand internal generation dependencies
+
+Legacy URLs may redirect to the appropriate simplified workspace. Do not delete backend compatibility routes merely because their buttons are removed.
+
+## Acceptance criteria
+
+1. Crawler, intake, paste and document-upload RFPs appear in one unified list.
+2. The RFP page has no more than Run Crawl and Add RFP as primary header actions.
+3. Selecting an RFP creates or returns one canonical Opportunity and one linked Proposal without a separate Pursue action.
+4. Proposal generation requires one user action.
+5. Requirements, strategy and draft remain sequential, persisted backend phases.
+6. Requirement extraction does not create proposal prose.
+7. Strategy generation does not modify proposal sections or proposal content.
+8. Draft generation creates meaningful sections and a synchronized proposal snapshot.
+9. The interface shows generation progress without exposing separate phase buttons.
+10. Refresh reconstructs the correct persisted status.
+11. Retry resumes safely without duplicate proposals, sections or AI work.
+12. Preview and first Google export contain identical assembled content.
+13. Duplicate section headings are normalized.
+14. Share is unavailable until the draft is genuinely ready.
+15. The first Share action creates exactly one Google Doc in the configured folder.
+16. After handoff, Share becomes Open Google Doc and app-side mutations are rejected.
+17. Existing task #23, #24 and task #32 behavioral regressions continue to pass.
+18. Both typechecks, the complete API test suite twice and both production builds exit successfully.
+19. The implementation is committed with a clean working tree.
+
+## Out of scope
+
+Do not change:
+
+* Scoring logic
+* Crawler relevance logic
+* Client intake transaction semantics
+* Google OAuth
+* Google Picker
+* Folder validation
+* Knowledge or Settings functionality
+* The task #23 Google handoff state machine
+* Proposal-writing prompts except where required by task #32’s body-only section contract
