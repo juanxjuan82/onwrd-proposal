@@ -1,10 +1,17 @@
 import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
 
+// NOTE: As of July 2026, iadb.org returns HTTP 403 for all server-to-server
+// requests from Replit's environment. This source is set active=false in the DB.
+// The adapter is preserved so fixture-based tests can exercise the parsing path
+// and so the source can be reactivated if a proper API becomes available.
 export class IDBAdapter implements TenderSourceAdapter {
   adapterType = "idb";
 
   async fetchOpportunities(): Promise<TenderOpportunity[]> {
     const results: TenderOpportunity[] = [];
+    const warnings: string[] = [];
+    let requestsAttempted = 0;
+    let requestsSucceeded = 0;
 
     const urls = [
       "https://www.iadb.org/en/projects/all?query=communications+marketing&country=BS,JM,TT,BB,GY,LC,VC",
@@ -12,6 +19,7 @@ export class IDBAdapter implements TenderSourceAdapter {
     ];
 
     for (const url of urls) {
+      requestsAttempted++;
       try {
         const r = await safeFetch(url, {
           headers: {
@@ -19,9 +27,19 @@ export class IDBAdapter implements TenderSourceAdapter {
             Accept: "text/html",
           },
         });
-        if (!r.ok) continue;
+        if (!r.ok) {
+          const hint = r.status === 403
+            ? "iadb.org blocks server-to-server access from this environment (403)"
+            : `HTTP ${r.status}`;
+          warnings.push(`IDB ${hint} for ${url}`);
+          continue;
+        }
         const html = await r.text();
-        if (html.length < 500) continue;
+        if (html.length < 500) {
+          warnings.push(`IDB very short response for ${url}`);
+          continue;
+        }
+        requestsSucceeded++;
 
         const articlePattern = /<article[^>]*>([\s\S]*?)<\/article>/gi;
         let match;
@@ -50,7 +68,18 @@ export class IDBAdapter implements TenderSourceAdapter {
         }
 
         if (results.length > 0) break;
-      } catch { /* try next */ }
+      } catch (err) {
+        warnings.push(`IDB fetch failed for ${url}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    // Throw so the crawler records a failed source run rather than a silent zero-result success.
+    if (requestsAttempted > 0 && requestsSucceeded === 0) {
+      throw new Error(
+        `IDB: all ${requestsAttempted} request(s) failed. ` +
+        `iadb.org is inaccessible from this environment (403/timeout). ` +
+        warnings.join("; "),
+      );
     }
 
     return results;

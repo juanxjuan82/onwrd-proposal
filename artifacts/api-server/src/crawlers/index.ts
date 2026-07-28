@@ -569,31 +569,35 @@ export async function seedDefaultSources(): Promise<void> {
   if (existing.length > 0) {
     const existingTypes = new Set(existing.map((s) => s.adapterType));
     const newSources = [
-      { name: "Caribbean Tourism Organization", sourceType: "regional", url: "https://www.caribtourism.com/", adapterType: "cto" },
-      { name: "CARICOM Secretariat", sourceType: "regional", url: "https://caricom.org/", adapterType: "caricom" },
-      { name: "EU Caribbean Development Fund", sourceType: "development_fund", url: "https://www.cariforum.org/", adapterType: "eu_caribbean" },
+      // active: false — caribtourism.com is unreachable (connection timeout) from Replit
+      { name: "Caribbean Tourism Organization", sourceType: "regional", url: "https://www.caribtourism.com/", adapterType: "cto", active: false },
+      { name: "CARICOM Secretariat", sourceType: "regional", url: "https://caricom.org/", adapterType: "caricom", active: true },
+      // active: false — cariforum.org is unreachable (connection timeout) from Replit
+      { name: "EU Caribbean Development Fund", sourceType: "development_fund", url: "https://www.cariforum.org/", adapterType: "eu_caribbean", active: false },
     ];
     for (const s of newSources) {
       if (!existingTypes.has(s.adapterType)) {
-        await db.insert(tenderSourcesTable).values({ ...s, active: true });
+        await db.insert(tenderSourcesTable).values(s);
       }
     }
     return;
   }
 
+  // active: false sources are blocked from Replit's environment as of July 2026.
+  // Adapters are preserved in code; flip active=true once API-based replacements exist.
   const defaults = [
-    { name: "World Bank Procurement", sourceType: "development_bank", url: "https://search.worldbank.org/api/v2/procnotices", adapterType: "world_bank" },
-    { name: "UNDP Procurement Notices", sourceType: "un", url: "https://procurement-notices.undp.org/", adapterType: "ungm" },
-    { name: "Inter-American Development Bank", sourceType: "development_bank", url: "https://www.iadb.org/en/projects/all", adapterType: "idb" },
-    { name: "Caribbean Development Bank", sourceType: "development_bank", url: "https://www.caribank.org/", adapterType: "cdb" },
-    { name: "Bahamas Government Procurement", sourceType: "government", url: "https://www.bahamas.gov.bs/wps/portal/public/gov/government/news", adapterType: "bahamas_gov" },
-    { name: "Caribbean Tourism Organization", sourceType: "regional", url: "https://www.caribtourism.com/", adapterType: "cto" },
-    { name: "CARICOM Secretariat", sourceType: "regional", url: "https://caricom.org/", adapterType: "caricom" },
-    { name: "EU Caribbean Development Fund", sourceType: "development_fund", url: "https://www.cariforum.org/", adapterType: "eu_caribbean" },
+    { name: "World Bank Procurement",           sourceType: "development_bank",  url: "https://search.worldbank.org/api/v2/procnotices",              adapterType: "world_bank",   active: true  },
+    { name: "UNDP Procurement Notices",         sourceType: "un",                url: "https://procurement-notices.undp.org/",                        adapterType: "ungm",         active: true  },
+    { name: "Inter-American Development Bank",  sourceType: "development_bank",  url: "https://www.iadb.org/en/projects/all",                         adapterType: "idb",          active: false },
+    { name: "Caribbean Development Bank",       sourceType: "development_bank",  url: "https://www.caribank.org/",                                    adapterType: "cdb",          active: false },
+    { name: "Bahamas Government Procurement",   sourceType: "government",        url: "https://www.bahamas.gov.bs/wps/portal/public/gov/government/news", adapterType: "bahamas_gov", active: true  },
+    { name: "Caribbean Tourism Organization",   sourceType: "regional",          url: "https://www.caribtourism.com/",                                adapterType: "cto",          active: false },
+    { name: "CARICOM Secretariat",              sourceType: "regional",          url: "https://caricom.org/",                                         adapterType: "caricom",      active: true  },
+    { name: "EU Caribbean Development Fund",    sourceType: "development_fund",  url: "https://www.cariforum.org/",                                   adapterType: "eu_caribbean", active: false },
   ];
 
   for (const s of defaults) {
-    await db.insert(tenderSourcesTable).values({ ...s, active: true });
+    await db.insert(tenderSourcesTable).values(s);
   }
 }
 

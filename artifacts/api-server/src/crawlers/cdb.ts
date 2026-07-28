@@ -1,12 +1,16 @@
 import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
 
-// caribank.org/procurement returns 404. This adapter targets CDB's news/projects
-// page for procurement-adjacent announcements, and falls back to press releases.
+// NOTE: As of July 2026, caribank.org has restructured its URLs — all known
+// paths return 404. This source is set active=false in the DB. The adapter is
+// preserved for reactivation once correct URLs are found.
 export class CDBAdapter implements TenderSourceAdapter {
   adapterType = "cdb";
 
   async fetchOpportunities(): Promise<TenderOpportunity[]> {
     const results: TenderOpportunity[] = [];
+    const warnings: string[] = [];
+    let requestsAttempted = 0;
+    let requestsSucceeded = 0;
 
     const urls = [
       "https://www.caribank.org/news-and-events",
@@ -15,6 +19,7 @@ export class CDBAdapter implements TenderSourceAdapter {
     ];
 
     for (const url of urls) {
+      requestsAttempted++;
       try {
         const r = await safeFetch(url, {
           headers: {
@@ -22,11 +27,20 @@ export class CDBAdapter implements TenderSourceAdapter {
             Accept: "text/html",
           },
         });
-        if (!r.ok) continue;
+        if (!r.ok) {
+          const hint = r.status === 404
+            ? "path unavailable — site may have restructured"
+            : `HTTP ${r.status}`;
+          warnings.push(`CDB ${hint} for ${url}`);
+          continue;
+        }
         const html = await r.text();
-        if (html.length < 500) continue;
+        if (html.length < 500) {
+          warnings.push(`CDB very short response for ${url}`);
+          continue;
+        }
+        requestsSucceeded++;
 
-        // Look for article/card links mentioning procurement, tender, consulting, RFP
         const linkPattern =
           /<a[^>]+href="([^"]*(?:procur|tender|rfp|consult|bid|contract|grant|project)[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
         let match;
@@ -55,7 +69,18 @@ export class CDBAdapter implements TenderSourceAdapter {
         }
 
         if (results.length > 0) break;
-      } catch { /* try next */ }
+      } catch (err) {
+        warnings.push(`CDB fetch failed for ${url}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    // Throw so the crawler records a failed source run rather than a silent zero-result success.
+    if (requestsAttempted > 0 && requestsSucceeded === 0) {
+      throw new Error(
+        `CDB: all ${requestsAttempted} request(s) failed. ` +
+        `caribank.org paths returned 404/error — site may have restructured. ` +
+        warnings.join("; "),
+      );
     }
 
     return results;
