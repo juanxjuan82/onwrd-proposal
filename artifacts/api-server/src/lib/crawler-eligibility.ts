@@ -164,6 +164,25 @@ const CORE_SERVICE_PHRASES: string[] = [
   "sensitisation campaign",
 ];
 
+// ── Individual-hire phrases — looking for a person, not a firm ───────────────
+// These are checked against title + first 300 chars of description and produce
+// a STRICT rejection with no deliverable-count override: even a comms brief
+// hiring one person is not firm-level procurement we can bid on.
+const INDIVIDUAL_HIRE_PHRASES: string[] = [
+  // UN/development-sector standard labels for individual contractor roles
+  "individual consultant",
+  "individual consultancy",
+  "individual contractor",
+  "individual expert",
+  "national consultant",      // UN lingo for local individual hire
+  "international consultant", // UN lingo for international individual hire
+  "short-term consultant",
+  // UN contract types for personal services
+  "personal services contract",
+  "special services agreement",  // SSA
+  "individual service contract", // ISC
+];
+
 // ── Hard negative phrases — clearly out-of-scope categories ──────────────────
 // Checked against title (with optional description fallback).
 const HARD_NEGATIVE_PHRASES: string[] = [
@@ -275,6 +294,26 @@ export function evaluateCrawlerEligibility(discovery: EligibilityInput): Eligibi
   // 2. SKIP recommendation → raw_only
   if (discovery.recommendation === "SKIP") {
     rejectionReasons.push("Recommendation is SKIP — relevance gate not met");
+  }
+
+  // 2b. Individual-hire notices → always raw_only, no deliverable-count override.
+  // A comms brief hiring one person is still not firm-level procurement.
+  // Checked against title + first 300 chars of description.
+  const individualHireCorpus = `${discovery.title} ${discovery.description.slice(0, 300)}`.toLowerCase();
+  const individualHireMatches = INDIVIDUAL_HIRE_PHRASES.filter((p) =>
+    individualHireCorpus.includes(p.toLowerCase()),
+  );
+  if (individualHireMatches.length > 0) {
+    return {
+      eligible: false,
+      destination: "raw_only",
+      contentQuality: classifyContentQuality(discovery.description, discovery.title),
+      positiveSignals: [],
+      negativeSignals: individualHireMatches,
+      rejectionReasons: [
+        `Individual hire — seeking a person, not a firm (matched: "${individualHireMatches[0]}")`,
+      ],
+    };
   }
 
   // 3. Content quality gate

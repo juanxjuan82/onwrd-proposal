@@ -192,6 +192,91 @@ describe("evaluateCrawlerEligibility — content quality", () => {
 
 // ── Hard negative categories ──────────────────────────────────────────────────
 
+describe("evaluateCrawlerEligibility — individual hire filter", () => {
+  const goodDesc =
+    "UNDP invites applications from qualified individuals to provide communications " +
+    "strategy and public awareness campaign support. The individual consultant will " +
+    "develop a communications plan and deliver outreach materials over 6 months.";
+
+  test("'Individual Consultant' in title → raw_only (strict, no override)", () => {
+    const r = evaluateCrawlerEligibility({
+      title: "Individual Consultant — Communications Strategy",
+      description: goodDesc,
+      recommendation: PURSUE,
+    });
+    assert.equal(r.eligible, false);
+    assert.equal(r.destination, "raw_only");
+    assert.ok(
+      r.rejectionReasons.some((x) => x.toLowerCase().includes("individual hire")),
+      `Expected individual-hire rejection, got: ${r.rejectionReasons.join("; ")}`,
+    );
+  });
+
+  test("'National Consultant' in title → raw_only", () => {
+    const r = evaluateCrawlerEligibility({
+      title: "National Consultant — Media and Communications",
+      description:
+        "The World Bank seeks a national consultant to support media relations, " +
+        "content creation, and social media management for the Jamaica Country Office. " +
+        "Contract type: individual consultancy, 3 months lump sum.",
+      recommendation: PURSUE,
+    });
+    assert.equal(r.eligible, false);
+    assert.ok(r.rejectionReasons.some((x) => x.toLowerCase().includes("individual hire")));
+  });
+
+  test("'International Consultant' in title → raw_only", () => {
+    const r = evaluateCrawlerEligibility({
+      title: "International Consultant for Digital Communications Campaign",
+      description:
+        "UNDP Caribbean seeks an international consultant to lead a digital marketing " +
+        "campaign across CARICOM member states. Scope includes social media strategy, " +
+        "content development, and community engagement. Lump sum contract.",
+      recommendation: PURSUE,
+    });
+    assert.equal(r.eligible, false);
+    assert.ok(r.rejectionReasons.some((x) => x.toLowerCase().includes("individual hire")));
+  });
+
+  test("Individual hire in description (not title) → raw_only", () => {
+    const r = evaluateCrawlerEligibility({
+      title: "Communications Support — Caribbean Tourism Project",
+      description:
+        "The organization is seeking an individual consultant to provide communications " +
+        "support for a 3-month assignment. The individual consultant will work on-site.",
+      recommendation: PURSUE,
+    });
+    assert.equal(r.eligible, false);
+    assert.ok(r.rejectionReasons.some((x) => x.toLowerCase().includes("individual hire")));
+  });
+
+  test("'Communications Consultant' title (firm-level) → still eligible", () => {
+    // 'communications consultant' is a CORE_SERVICE_PHRASE for firm-level services —
+    // must NOT be caught by the individual-hire filter.
+    const r = evaluateCrawlerEligibility({
+      title: "Communications Consultant Services",
+      description:
+        "The Ministry of Tourism invites proposals from qualified firms or organisations " +
+        "to provide communications consultant services for the national destination marketing " +
+        "campaign. Scope includes strategic communications, media relations, and brand strategy.",
+      recommendation: PURSUE,
+    });
+    assert.equal(r.eligible, true, `Should be eligible (firm-level comms RFP): ${r.rejectionReasons.join("; ")}`);
+  });
+
+  test("'Short-term consultant' in title → raw_only", () => {
+    const r = evaluateCrawlerEligibility({
+      title: "Short-Term Consultant for Public Awareness Campaign",
+      description:
+        "IDB seeks a short-term consultant to develop and implement a public awareness " +
+        "campaign on climate resilience in the Eastern Caribbean. Individual contract, 2 months.",
+      recommendation: PURSUE,
+    });
+    assert.equal(r.eligible, false);
+    assert.ok(r.rejectionReasons.some((x) => x.toLowerCase().includes("individual hire")));
+  });
+});
+
 describe("evaluateCrawlerEligibility — hard negative categories", () => {
   test("Title dominated by civil works → raw_only", () => {
     const r = evaluateCrawlerEligibility({
