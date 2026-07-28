@@ -153,12 +153,8 @@ router.post("/proposals/:id/run-critic", async (req, res) => {
     return;
   }
 
-  // ── Immutability guard ─────────────────────────────────────────────────
-  const blocked = googleDocCanonicalPayload(proposal);
-  if (blocked) {
-    res.status(409).json(blocked);
-    return;
-  }
+  // run-critic only writes criticFindings annotations, not proposal content,
+  // so it is intentionally NOT blocked by the Google Doc immutability guard.
 
   const sections = await db
     .select()

@@ -538,9 +538,29 @@ export default function ProposalDetail() {
         });
       },
       onError: (error) => {
+        const apiData = (error as { data?: { code?: string; googleDocUrl?: string } }).data;
+        if (apiData?.code === "google_doc_canonical") {
+          toast({
+            title: "Editing locked",
+            description: (
+              <div className="flex flex-col gap-2 mt-1">
+                <p>This proposal lives in Google Docs — edit it there.</p>
+                {apiData.googleDocUrl && (
+                  <a href={apiData.googleDocUrl} target="_blank" rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 text-xs underline underline-offset-2">
+                    <ExternalLink className="w-3 h-3" />
+                    Open Google Doc
+                  </a>
+                )}
+              </div>
+            ),
+            variant: "destructive",
+          });
+          return;
+        }
         toast({
           title: "Save failed",
-          description: (error as { error?: string }).error || "Could not save changes.",
+          description: (error as Error).message || "Could not save changes.",
           variant: "destructive"
         });
       }
