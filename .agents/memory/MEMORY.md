@@ -22,3 +22,6 @@
 - [Structural tests + refactor drift](structural-test-refactor-drift.md) — when logic moves to a shared service, structural tests that search the old file for prompt strings ("BODY ONLY"), assembly calls, etc. must be updated to point to the new file or check for the delegation call instead.
 - [git commit works in main agent](git-push.md) — git commit and git push both work from ShellExec in the main agent; the REST API workaround documented in github-push-rest-api.md is no longer needed.
 - [Frontend prod build env](frontend-build-env.md) — proposal-generator vite build requires PORT and BASE_PATH env vars; run as PORT=3000 BASE_PATH=/proposal-generator pnpm build.
+
+- [World Bank adapter deadline bug](world-bank-deadline.md) — submission_deadline_date is the bid deadline; submission_date is notice publication date. fq country filter silently ignored — use q text search for targeting.
+- [Blocked crawler sources](blocked-crawler-sources.md) — IDB/CDB/CTO/EU Caribbean (ids 3,4,6,8) deactivated; TED Europa also WAF-blocked; Caribbean gov portals all timeout from Replit.
