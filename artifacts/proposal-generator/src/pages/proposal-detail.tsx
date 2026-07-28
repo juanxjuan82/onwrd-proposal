@@ -809,7 +809,7 @@ export default function ProposalDetail() {
                 <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-7 object-contain" />
               </div>
               <div
-                className="min-h-[600px] p-8 font-sans text-base leading-relaxed prose prose-sm max-w-none
+                className="min-h-[600px] p-8 font-sans text-base leading-relaxed prose prose-sm prose-invert max-w-none
                   [&_table]:w-full [&_table]:border-collapse [&_table]:text-sm
                   [&_th]:border [&_th]:border-border [&_th]:bg-muted [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:font-semibold
                   [&_td]:border [&_td]:border-border [&_td]:px-3 [&_td]:py-2 [&_td]:align-top
@@ -876,7 +876,7 @@ export default function ProposalDetail() {
                     <FormControl>
                       {previewMode ? (
                         <div
-                          className="min-h-[600px] p-8 font-sans text-base leading-relaxed prose prose-sm max-w-none
+                          className="min-h-[600px] p-8 font-sans text-base leading-relaxed prose prose-sm prose-invert max-w-none
                             [&_table]:w-full [&_table]:border-collapse [&_table]:text-sm
                             [&_th]:border [&_th]:border-border [&_th]:bg-muted [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:font-semibold
                             [&_td]:border [&_td]:border-border [&_td]:px-3 [&_td]:py-2 [&_td]:align-top
