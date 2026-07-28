@@ -1,105 +1,140 @@
 import { TenderSourceAdapter, TenderOpportunity, safeFetch } from "./base-adapter.js";
 
-// Correct field names from World Bank procnotices API (verified Jul 2026):
-// id, notice_type, noticedate, project_id, project_name, bid_reference_no,
-// bid_description, project_ctry_name, submission_date, notice_text
+// World Bank Procurement Notices adapter.
+//
+// API: https://search.worldbank.org/api/v2/procnotices
+//
+// Key design decisions (Jul 2026):
+//  • submission_deadline_date is the ACTUAL bid deadline.
+//    submission_date is the notice PUBLICATION date — using it as the deadline
+//    caused all 184 stored items to appear expired (published = yesterday).
+//  • The fq (Solr filter) for project_ctry_name is silently ignored by the API
+//    endpoint — all fq values return the full 412k+ dataset regardless. Country
+//    targeting is done via the q (full-text search) parameter instead.
+//  • Items with a past submission_deadline_date are filtered out client-side so
+//    the eligibility gate never sees expired notices.
 interface WBNotice {
   id?: string;
   project_id?: string;
   project_name?: string;
-  bid_reference_no?: string;
   bid_description?: string;
   notice_text?: string;
   submission_date?: string;
+  submission_deadline_date?: string;
   project_ctry_name?: string;
   notice_type?: string;
-  procurement_method_name?: string;
   [key: string]: unknown;
 }
-
-// Caribbean/SIDS country names as they appear in project_ctry_name
-const CARIBBEAN_COUNTRIES = [
-  "Bahamas", "Jamaica", "Barbados", "Trinidad and Tobago", "Guyana",
-  "Saint Lucia", "Saint Vincent", "Grenada", "Antigua and Barbuda",
-  "Belize", "Haiti", "Dominican Republic", "Turks and Caicos",
-  "Cayman Islands", "Suriname", "Dominica", "St. Kitts and Nevis",
-];
 
 export class WorldBankAdapter implements TenderSourceAdapter {
   adapterType = "world_bank";
 
   async fetchOpportunities(): Promise<TenderOpportunity[]> {
-    // World Bank procnotices API: q param is not reliable for filtering.
-    // Use fq (Solr filter query) with project_ctry_name for country targeting.
-    // Fetch Bahamas-specific first, then Caribbean-wide comms work.
-    const queries: Array<{ fq: string; label: string }> = [
-      // Bahamas-specific — highest priority
-      { fq: "project_ctry_name:Bahamas", label: "Bahamas" },
-      // Broader Caribbean comms/tourism
+    // Use q (full-text search) for targeting — the fq filter is non-functional.
+    // Three passes: Caribbean comms focus, broader Caribbean, global comms-only.
+    const queries: Array<{ q: string; label: string }> = [
       {
-        fq: `project_ctry_name:(${CARIBBEAN_COUNTRIES.map((c) => `"${c}"`).join(" OR ")})`,
-        label: "Caribbean",
+        q: "communications marketing Caribbean Bahamas Jamaica Barbados",
+        label: "Caribbean comms",
       },
-      // Global comms/marketing (no country filter) — for high-value remote-eligible work
-      { fq: "", label: "Global" },
+      {
+        q: "campaign media branding outreach awareness CARICOM OECS Caribbean",
+        label: "Caribbean media",
+      },
+      {
+        q: "communications marketing digital campaign media",
+        label: "Global comms",
+      },
     ];
 
     const seen = new Set<string>();
     const results: TenderOpportunity[] = [];
+    const warnings: string[] = [];
+    let requestsAttempted = 0;
+    let requestsSucceeded = 0;
+    const now = new Date();
 
-    for (const { fq, label } of queries) {
-      // For the global pass, only take comms/tourism notices — use notice_text filter
-      const base =
+    for (const { q, label } of queries) {
+      const url =
         `https://search.worldbank.org/api/v2/procnotices` +
-        `?format=json&rows=20` +
-        `&fl=id,project_id,project_name,bid_reference_no,bid_description,project_ctry_name,submission_date,notice_text,notice_type` +
-        `&srt=submission_date&order=desc`;
+        `?format=json&rows=25` +
+        `&fl=id,project_id,project_name,bid_description,project_ctry_name,` +
+        `submission_date,submission_deadline_date,notice_text,notice_type` +
+        `&q=${encodeURIComponent(q)}` +
+        `&srt=noticedate&order=desc`;
 
-      const url = fq ? `${base}&fq=${encodeURIComponent(fq)}` : base;
+      requestsAttempted++;
 
+      let r: Response;
       try {
-        const r = await safeFetch(url, {
+        r = await safeFetch(url, {
           headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
         });
-        if (!r.ok) continue;
-
-        const data = (await r.json()) as { procnotices?: WBNotice[]; total?: number };
-        const notices = data?.procnotices ?? [];
-
-        for (const n of notices) {
-          const id = String(n.id ?? n.project_id ?? "");
-          if (!id || seen.has(id)) continue;
-          seen.add(id);
-
-          const countryName = String(n.project_ctry_name ?? label);
-          const description = String(
-            n.bid_description ?? n.notice_text ?? n.project_name ?? ""
-          ).slice(0, 600);
-          const projectId = String(n.project_id ?? "");
-          const noticeId = String(n.id ?? "");
-
-          results.push({
-            externalId: `wb-${noticeId || projectId}`,
-            title: String(n.project_name ?? n.bid_description ?? "World Bank Procurement Notice"),
-            organization: "World Bank",
-            url: noticeId
-              ? `https://projects.worldbank.org/en/projects-operations/procurement/noticedetails?id=${noticeId}`
-              : projectId
-              ? `https://projects.worldbank.org/en/projects-operations/project-detail/${projectId}`
-              : "https://projects.worldbank.org/en/projects-operations/procurement",
-            deadline: n.submission_date ? new Date(String(n.submission_date)) : undefined,
-            description: `World Bank procurement — ${description}. Country: ${countryName}`,
-            country: countryName,
-            sector: n.notice_type ?? "Procurement",
-            rawData: n as Record<string, unknown>,
-          });
-        }
-      } catch {
-        /* skip failed query */
+      } catch (err) {
+        warnings.push(`World Bank ${label}: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
       }
 
-      // Stop after Caribbean pass if we have Bahamas results — avoid diluting with global noise
-      if (label === "Caribbean" && results.some((r) => r.country === "Bahamas")) break;
+      if (!r.ok) {
+        warnings.push(`World Bank ${label} HTTP ${r.status}`);
+        continue;
+      }
+
+      let data: { procnotices?: WBNotice[] };
+      try {
+        data = (await r.json()) as typeof data;
+      } catch (err) {
+        warnings.push(`World Bank ${label} JSON parse failed: ${err instanceof Error ? err.message : String(err)}`);
+        continue;
+      }
+
+      requestsSucceeded++;
+      const notices = data?.procnotices ?? [];
+
+      for (const n of notices) {
+        const id = String(n.id ?? n.project_id ?? "");
+        if (!id || seen.has(id)) continue;
+
+        // submission_deadline_date is the actual bid deadline.
+        // Fall back to submission_date only if the deadline field is absent.
+        const deadlineStr = String(n.submission_deadline_date ?? n.submission_date ?? "").trim();
+        const deadline = deadlineStr ? new Date(deadlineStr) : undefined;
+
+        // Skip notices with an expired deadline.
+        if (deadline && deadline <= now) continue;
+
+        seen.add(id);
+
+        const countryName = String(n.project_ctry_name ?? "");
+        const rawDesc = String(n.bid_description ?? n.notice_text ?? n.project_name ?? "").slice(0, 600);
+        const projectId = String(n.project_id ?? "");
+        const noticeId = String(n.id ?? "");
+
+        results.push({
+          externalId: `wb-${noticeId || projectId}`,
+          title: String(n.project_name ?? n.bid_description ?? "World Bank Procurement Notice"),
+          organization: "World Bank",
+          url: noticeId
+            ? `https://projects.worldbank.org/en/projects-operations/procurement/noticedetails?id=${noticeId}`
+            : projectId
+            ? `https://projects.worldbank.org/en/projects-operations/project-detail/${projectId}`
+            : "https://projects.worldbank.org/en/projects-operations/procurement",
+          deadline,
+          description: rawDesc.trim(),
+          country: countryName,
+          sector: n.notice_type ?? "Procurement",
+          rawData: n as Record<string, unknown>,
+        });
+      }
+    }
+
+    if (warnings.length > 0) {
+      console.warn(`[WorldBankAdapter] ${warnings.join("; ")}`);
+    }
+
+    // Throw if every request failed — caller records a failed source run.
+    if (requestsAttempted > 0 && requestsSucceeded === 0) {
+      throw new Error(`World Bank API: all ${requestsAttempted} requests failed. ` + warnings.join("; "));
     }
 
     return results;
