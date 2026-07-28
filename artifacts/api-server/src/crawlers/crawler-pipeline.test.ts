@@ -44,7 +44,7 @@ import { scoreTender } from "../lib/discovery-scoring.js";
 import { evaluateCrawlerEligibility } from "../lib/crawler-eligibility.js";
 
 // ── Crawler lifecycle imports ─────────────────────────────────────────────────
-import { startCrawl, executeCrawlBatch, __setCrawlDbForTesting } from "../crawlers/index.js";
+import { startCrawl, executeCrawlBatch, backfillPromotions, __setCrawlDbForTesting } from "../crawlers/index.js";
 import { reconcileDiscovery } from "../lib/discovery-reconciler.js";
 import { db } from "@workspace/db";
 import {
@@ -837,6 +837,25 @@ describe("(30) End-to-end eligible fixture reaches Discover", () => {
   let e2eDiscoveryId: number | undefined;
   let e2eOpportunityId: number | undefined;
 
+  // Defined at describe-registration time so both test 30 and 30b share the
+  // identical externalId/url — guaranteeing the second call hits the same row.
+  const e2eRichOpp = {
+    title:
+      "Digital Communications Strategy and Stakeholder Engagement Programme",
+    description:
+      "Caribbean Development Bank invites proposals from qualified firms to develop and implement " +
+      "a comprehensive digital communications strategy and stakeholder engagement programme for the " +
+      "regional climate resilience initiative. The scope includes digital media management, press " +
+      "release drafting, community engagement, stakeholder outreach, brand development, and " +
+      "performance reporting for a 24-month period across Barbados, Guyana, Trinidad and Tobago, " +
+      "and Belize. Minimum three years of Caribbean communications experience required.",
+    organization: "Caribbean Development Bank",
+    country:      "Barbados",
+    sector:       "Communications",
+    url:          `https://test.invalid/fixture-e2e/rfp-${Date.now()}`,
+    externalId:   `fixture-e2e-${Date.now()}`,
+  };
+
   before(async () => {
     // Guarantee the real DB is active (lifecycle tests may leave mock set)
     __setCrawlDbForTesting(null);
@@ -883,28 +902,8 @@ describe("(30) End-to-end eligible fixture reaches Discover", () => {
     }
   });
 
-  it("(30) rich Caribbean communications RFP: eligible=true, promoted=true, opportunityId set", async () => {
-    // This opportunity matches the Caribbean-communications keyword profile that
-    // evaluateCrawlerEligibility targets: organisation context, ≥120-char
-    // description, no hard-negative signals.
-    const richOpp = {
-      title:
-        "Digital Communications Strategy and Stakeholder Engagement Programme",
-      description:
-        "Caribbean Development Bank invites proposals from qualified firms to develop and implement " +
-        "a comprehensive digital communications strategy and stakeholder engagement programme for the " +
-        "regional climate resilience initiative. The scope includes digital media management, press " +
-        "release drafting, community engagement, stakeholder outreach, brand development, and " +
-        "performance reporting for a 24-month period across Barbados, Guyana, Trinidad and Tobago, " +
-        "and Belize. Minimum three years of Caribbean communications experience required.",
-      organization: "Caribbean Development Bank",
-      country:      "Barbados",
-      sector:       "Communications",
-      url:          `https://test.invalid/fixture-e2e/rfp-${Date.now()}`,
-      externalId:   `fixture-e2e-${Date.now()}`,
-    };
-
-    const result = await reconcileDiscovery(e2eSourceId, richOpp);
+  it("(30) first reconciliation: eligible=true, promoted=true, alreadyPromoted=false", async () => {
+    const result = await reconcileDiscovery(e2eSourceId, e2eRichOpp);
     e2eDiscoveryId   = result.discoveryId;
     e2eOpportunityId = result.opportunityId;
 
@@ -917,7 +916,12 @@ describe("(30) End-to-end eligible fixture reaches Discover", () => {
     assert.strictEqual(
       result.promoted,
       true,
-      "Expected promoted:true — a new Discover opportunity must have been created",
+      "First reconciliation: promoted must be true — a new Discover opportunity was created",
+    );
+    assert.strictEqual(
+      result.alreadyPromoted,
+      false,
+      "First reconciliation: alreadyPromoted must be false",
     );
     assert.ok(
       result.opportunityId,
@@ -927,6 +931,126 @@ describe("(30) End-to-end eligible fixture reaches Discover", () => {
       result.inserted,
       true,
       "Brand-new item must have inserted:true (not updated or unchanged)",
+    );
+  });
+
+  it("(30b) second reconciliation with identical fixture: promoted=false, alreadyPromoted=true, no duplicate Opportunity", async () => {
+    // Same externalId + same content → unchanged row that is already linked.
+    // Contract: promoted=false, alreadyPromoted=true, unchanged=true, opportunityId unchanged.
+    const result2 = await reconcileDiscovery(e2eSourceId, e2eRichOpp);
+
+    assert.strictEqual(
+      result2.unchanged,
+      true,
+      "Second pass with identical content must be unchanged:true",
+    );
+    assert.strictEqual(
+      result2.promoted,
+      false,
+      "Second pass: promoted must be false — no new Opportunity was created",
+    );
+    assert.strictEqual(
+      result2.alreadyPromoted,
+      true,
+      "Second pass: alreadyPromoted must be true — link already existed before this call",
+    );
+    assert.strictEqual(
+      result2.eligible,
+      true,
+      "Second pass: item remains eligible",
+    );
+    assert.strictEqual(
+      result2.opportunityId,
+      e2eOpportunityId,
+      "Second pass must return the same opportunityId — no duplicate Opportunity created",
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 31  Behavioral: backfillPromotions never promotes SKIP/raw_only items
+//
+// Creates an ineligible discovery via reconcileDiscovery (infrastructure keyword
+// → SKIP, description too short → raw_only), then runs backfillPromotions() and
+// asserts the item remains unlinked with rejection reasons persisted.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("(31) backfillPromotions: SKIP/raw_only items stay unlinked", () => {
+  let skipSourceId = 0;
+  let skipDiscoveryId: number | undefined;
+
+  before(async () => {
+    __setCrawlDbForTesting(null); // ensure real DB is used
+    const [src] = await db
+      .insert(tenderSourcesTable)
+      .values({
+        name:        "[TEST] SKIP backfill test source",
+        sourceType:  "test",
+        url:         "https://test.invalid/skip-backfill",
+        adapterType: "caricom",
+        active:      false,
+      })
+      .returning({ id: tenderSourcesTable.id });
+    skipSourceId = src.id;
+
+    // Insert directly with recommendation="SKIP" so evaluateCrawlerEligibility
+    // unconditionally rejects it (rule: SKIP → raw_only, eligible:false).
+    // Direct insertion avoids dependency on scoreTender keyword-matching behaviour.
+    const [row] = await db
+      .insert(discoveredTendersTable)
+      .values({
+        sourceId:      skipSourceId,
+        title:         "Water Treatment Infrastructure Construction",
+        organization:  "Ministry of Public Works",
+        description:   "Construction of a water treatment plant.",
+        recommendation: "SKIP",
+        externalId:    `skip-test-${Date.now()}`,
+        url:           `https://test.invalid/skip-backfill/${Date.now()}`,
+      })
+      .returning({ id: discoveredTendersTable.id });
+    skipDiscoveryId = row.id;
+  });
+
+  after(async () => {
+    if (skipDiscoveryId !== undefined) {
+      await db
+        .delete(discoveredTendersTable)
+        .where(eq(discoveredTendersTable.id, skipDiscoveryId))
+        .catch(() => {});
+    }
+    if (skipSourceId) {
+      await db
+        .delete(tenderSourcesTable)
+        .where(eq(tenderSourcesTable.id, skipSourceId))
+        .catch(() => {});
+    }
+  });
+
+  it("(31) ineligible item: backfillPromotions leaves opportunityId null and persists rejection reasons", async () => {
+    // Use a large limit so the newly inserted row (highest ID, appended last)
+    // is always included in the backfill page.
+    const bf = await backfillPromotions(100000);
+
+    const [row] = await db
+      .select({
+        opportunityId:    discoveredTendersTable.opportunityId,
+        rejectionReasons: discoveredTendersTable.rejectionReasons,
+      })
+      .from(discoveredTendersTable)
+      .where(eq(discoveredTendersTable.id, skipDiscoveryId!));
+
+    assert.strictEqual(
+      row.opportunityId,
+      null,
+      "SKIP/raw_only item must remain unlinked (opportunityId=null) after backfillPromotions()",
+    );
+    assert.ok(
+      Array.isArray(row.rejectionReasons) && (row.rejectionReasons as string[]).length > 0,
+      "Rejection reasons must be persisted for ineligible items by backfill",
+    );
+    assert.ok(
+      typeof bf.rejected === "number" && bf.rejected >= 1,
+      `backfill.rejected must be ≥ 1 — our ineligible item must increment the count; got ${bf.rejected}`,
     );
   });
 });

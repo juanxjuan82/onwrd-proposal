@@ -35,8 +35,16 @@ export interface ReconcileResult {
   unchanged: boolean;
   /** Passed the eligibility gate (regardless of insert/update/unchanged). */
   eligible: boolean;
-  /** An Opportunity was created/linked (implies eligible === true). */
+  /**
+   * THIS invocation newly created/linked the canonical Opportunity.
+   * false when the link already existed before this call (see alreadyPromoted).
+   */
   promoted: boolean;
+  /**
+   * The discovered_tender was already linked to an Opportunity before this
+   * invocation.  eligible remains true; promoted is false.
+   */
+  alreadyPromoted: boolean;
   /** Populated when eligible === false. */
   rejectionReasons?: string[];
   score?: ScoredResult;
@@ -112,8 +120,9 @@ export async function reconcileDiscovery(
       unchanged = true;
 
       if (existing.opportunityId !== null) {
-        // Already promoted — nothing to do
-        return { discoveryId, inserted: false, updated: false, unchanged: true, eligible: true, promoted: true, opportunityId: existing.opportunityId ?? undefined, score };
+        // Linked before this invocation — report alreadyPromoted, not promoted.
+        // promoted=false because THIS call did not create the link.
+        return { discoveryId, inserted: false, updated: false, unchanged: true, eligible: true, promoted: false, alreadyPromoted: true, opportunityId: existing.opportunityId ?? undefined, score };
       }
       // Fall through to eligibility check below (rule change may make it eligible now)
     } else {
@@ -189,6 +198,7 @@ export async function reconcileDiscovery(
       unchanged,
       eligible: false,
       promoted: false,
+      alreadyPromoted: false,
       rejectionReasons: eligibility.rejectionReasons,
       score,
     };
@@ -210,6 +220,7 @@ export async function reconcileDiscovery(
       unchanged,
       eligible: false,
       promoted: false,
+      alreadyPromoted: false,
       rejectionReasons: [`Promotion failed: ${msg.slice(0, 80)}`],
       score,
     };
@@ -222,6 +233,7 @@ export async function reconcileDiscovery(
     unchanged,
     eligible: true,
     promoted: true,
+    alreadyPromoted: false,
     opportunityId,
     score,
   };
