@@ -36,7 +36,7 @@
  * Tests do NOT hit the real database or live adapter URLs.
  */
 
-import { describe, it, afterEach } from "node:test";
+import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 // ── Pure-function imports (no DB) ─────────────────────────────────────────────
@@ -45,6 +45,14 @@ import { evaluateCrawlerEligibility } from "../lib/crawler-eligibility.js";
 
 // ── Crawler lifecycle imports ─────────────────────────────────────────────────
 import { startCrawl, executeCrawlBatch, __setCrawlDbForTesting } from "../crawlers/index.js";
+import { reconcileDiscovery } from "../lib/discovery-reconciler.js";
+import { db } from "@workspace/db";
+import {
+  tenderSourcesTable,
+  discoveredTendersTable,
+  tendersTable,
+} from "@workspace/db";
+import { eq } from "drizzle-orm";
 
 // ── Adapter imports (for FetchFn fixture tests) ───────────────────────────────
 import { IDBAdapter } from "./idb.js";
@@ -812,6 +820,113 @@ describe("Adapter fixture tests", () => {
     assert.ok(
       !enriched!.description.startsWith("EU Caribbean funding notice:"),
       "Description must not be the old padded stub pattern",
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 30  End-to-end: eligible fixture reaches Discover via reconcileDiscovery
+//
+// Uses the real PostgreSQL DB (no mock).  Inserts a throwaway tender_source,
+// calls reconcileDiscovery() with a rich Caribbean communications RFP, then
+// asserts eligible=true and promoted=true.  Cleans up all created rows in after().
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("(30) End-to-end eligible fixture reaches Discover", () => {
+  let e2eSourceId = 0;
+  let e2eDiscoveryId: number | undefined;
+  let e2eOpportunityId: number | undefined;
+
+  before(async () => {
+    // Guarantee the real DB is active (lifecycle tests may leave mock set)
+    __setCrawlDbForTesting(null);
+
+    const [src] = await db
+      .insert(tenderSourcesTable)
+      .values({
+        name:        "[TEST] Fixture reconciliation source",
+        sourceType:  "test",
+        url:         "https://test.invalid/fixture-e2e",
+        adapterType: "caricom",
+        active:      false,
+      })
+      .returning({ id: tenderSourcesTable.id });
+    e2eSourceId = src.id;
+  });
+
+  after(async () => {
+    // Clear FK link before deleting opportunity so constraint is not violated
+    if (e2eDiscoveryId !== undefined) {
+      await db
+        .update(discoveredTendersTable)
+        .set({ opportunityId: null as unknown as number })
+        .where(eq(discoveredTendersTable.id, e2eDiscoveryId))
+        .catch(() => {/* ignore — row may already be gone */});
+    }
+    if (e2eOpportunityId !== undefined) {
+      await db
+        .delete(tendersTable)
+        .where(eq(tendersTable.id, e2eOpportunityId))
+        .catch(() => {});
+    }
+    if (e2eDiscoveryId !== undefined) {
+      await db
+        .delete(discoveredTendersTable)
+        .where(eq(discoveredTendersTable.id, e2eDiscoveryId))
+        .catch(() => {});
+    }
+    if (e2eSourceId) {
+      await db
+        .delete(tenderSourcesTable)
+        .where(eq(tenderSourcesTable.id, e2eSourceId))
+        .catch(() => {});
+    }
+  });
+
+  it("(30) rich Caribbean communications RFP: eligible=true, promoted=true, opportunityId set", async () => {
+    // This opportunity matches the Caribbean-communications keyword profile that
+    // evaluateCrawlerEligibility targets: organisation context, ≥120-char
+    // description, no hard-negative signals.
+    const richOpp = {
+      title:
+        "Digital Communications Strategy and Stakeholder Engagement Programme",
+      description:
+        "Caribbean Development Bank invites proposals from qualified firms to develop and implement " +
+        "a comprehensive digital communications strategy and stakeholder engagement programme for the " +
+        "regional climate resilience initiative. The scope includes digital media management, press " +
+        "release drafting, community engagement, stakeholder outreach, brand development, and " +
+        "performance reporting for a 24-month period across Barbados, Guyana, Trinidad and Tobago, " +
+        "and Belize. Minimum three years of Caribbean communications experience required.",
+      organization: "Caribbean Development Bank",
+      country:      "Barbados",
+      sector:       "Communications",
+      url:          `https://test.invalid/fixture-e2e/rfp-${Date.now()}`,
+      externalId:   `fixture-e2e-${Date.now()}`,
+    };
+
+    const result = await reconcileDiscovery(e2eSourceId, richOpp);
+    e2eDiscoveryId   = result.discoveryId;
+    e2eOpportunityId = result.opportunityId;
+
+    assert.strictEqual(
+      result.eligible,
+      true,
+      `Expected eligible:true — rejection reasons: ${JSON.stringify(result.rejectionReasons ?? [])}. ` +
+      `Score recommendation: ${result.score?.recommendation ?? "unknown"}`,
+    );
+    assert.strictEqual(
+      result.promoted,
+      true,
+      "Expected promoted:true — a new Discover opportunity must have been created",
+    );
+    assert.ok(
+      result.opportunityId,
+      "opportunityId must be set after a successful promotion",
+    );
+    assert.strictEqual(
+      result.inserted,
+      true,
+      "Brand-new item must have inserted:true (not updated or unchanged)",
     );
   });
 });

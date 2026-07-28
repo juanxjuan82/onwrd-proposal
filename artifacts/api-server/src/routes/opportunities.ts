@@ -629,9 +629,11 @@ async function runBoundedStrategy(
 // ── List opportunities (with latest bid score per tender) ───────────────────
 router.get("/opportunities", async (req, res) => {
   try {
+    const { sourceType } = req.query as { sourceType?: string };
     const tenders = await db
       .select()
       .from(tendersTable)
+      .where(sourceType ? eq(tendersTable.sourceType, sourceType) : undefined)
       .orderBy(desc(tendersTable.recommendationScore), desc(tendersTable.createdAt));
 
     const allScores = await db

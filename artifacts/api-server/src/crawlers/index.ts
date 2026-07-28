@@ -6,7 +6,7 @@ import {
   crawlerLockTable,
   crawlBatchesTable,
 } from "@workspace/db";
-import { eq, sql, and, isNull, or } from "drizzle-orm";
+import { eq, sql, and, isNull, or, asc } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { WorldBankAdapter } from "./world-bank.js";
 import { UNGMAdapter } from "./ungm.js";
@@ -48,6 +48,8 @@ function getAdapter(adapterType: string): TenderSourceAdapter | null {
 
 // ── DB-backed crawl lock ──────────────────────────────────────────────────────
 const CRAWL_LOCK_KEY = "default";
+/** Maximum number of un-promoted discoveries processed per backfill pass. */
+const BACKFILL_PAGE_SIZE = 50;
 const LOCK_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 const INSTANCE_ID = randomUUID();
 
@@ -290,6 +292,21 @@ export async function executeCrawlBatch(batchId: string, sourceId?: number): Pro
       }
     }
 
+    // Bounded post-crawl backfill: re-evaluate previously inserted but un-promoted
+    // discoveries (e.g. items whose description was too short on first ingestion but
+    // later enriched, or whose scoring rules changed). Processing BACKFILL_PAGE_SIZE
+    // items per batch prevents DB connection pool exhaustion.
+    try {
+      const bf = await backfillPromotions(BACKFILL_PAGE_SIZE);
+      if (bf.promoted > 0) {
+        batchPromoted += bf.promoted;
+        batchEligible += bf.promoted;
+        console.log(`[crawler] backfill promoted ${bf.promoted}/${bf.evaluated} additional items this run.`);
+      }
+    } catch (bfErr) {
+      console.warn("[crawler] backfill failed:", bfErr instanceof Error ? bfErr.message : String(bfErr));
+    }
+
     const batchStatus = sourcesAttempted === 0 ? "failed"
       : sourcesFailed === sourcesAttempted ? "failed"
       : sourcesFailed > 0 ? "partial"
@@ -354,7 +371,7 @@ export interface BackfillResult {
   rejectionCounts: Record<string, number>;
 }
 
-export async function backfillPromotions(): Promise<BackfillResult> {
+export async function backfillPromotions(limit = 200): Promise<BackfillResult> {
   const now = new Date();
 
   const items = await _crawlDb()
@@ -368,7 +385,9 @@ export async function backfillPromotions(): Promise<BackfillResult> {
           sql`${discoveredTendersTable.deadline} > ${now}`,
         ),
       ),
-    );
+    )
+    .orderBy(asc(discoveredTendersTable.id))   // oldest-first for stable pagination
+    .limit(limit);
 
   let rescored = 0;
   let promoted = 0;
@@ -414,6 +433,8 @@ export async function backfillPromotions(): Promise<BackfillResult> {
       deadline:       item.deadline,
     });
 
+    // SKIP recommendation and raw_only items are stored in discovered_tenders
+    // but never promoted to Discover — eligibility gate enforces this invariant.
     if (!eligibility.eligible) {
       rejected++;
       rejectionCounts = mergeRejectionCounts(rejectionCounts, eligibility.rejectionReasons);
