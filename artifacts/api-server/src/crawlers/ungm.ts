@@ -8,14 +8,17 @@ export class UNGMAdapter implements TenderSourceAdapter {
   async fetchOpportunities(): Promise<TenderOpportunity[]> {
     const results: TenderOpportunity[] = [];
 
+    const r = await safeFetch("https://procurement-notices.undp.org/", {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)",
+        Accept: "text/html",
+      },
+    });
+    if (!r.ok) {
+      throw new Error(`UNGM: HTTP ${r.status} from procurement-notices.undp.org`);
+    }
+
     try {
-      const r = await safeFetch("https://procurement-notices.undp.org/", {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)",
-          Accept: "text/html",
-        },
-      });
-      if (!r.ok) return results;
 
       const html = await r.text();
 
@@ -59,8 +62,8 @@ export class UNGMAdapter implements TenderSourceAdapter {
 
         if (results.length >= 30) break;
       }
-    } catch {
-      /* return empty on failure */
+    } catch (err) {
+      throw new Error(`UNGM: failed to parse procurement-notices.undp.org response: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     return results;

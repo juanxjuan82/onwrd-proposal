@@ -5,7 +5,7 @@ import {
   crawlerRunsTable,
   crawlerLockTable,
 } from "@workspace/db";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { WorldBankAdapter } from "./world-bank.js";
 import { UNGMAdapter } from "./ungm.js";
@@ -564,7 +564,20 @@ export async function runCrawler(sourceId?: number): Promise<{
 }
 
 // ── Seed default sources ─────────────────────────────────────────────────────
+
+// These adapters are blocked from Replit's environment (403/404/timeout).
+// We always force them inactive so existing deployments are retroactively
+// deactivated without needing a separate migration step.
+const PERMANENTLY_BLOCKED_ADAPTERS = ["idb", "cdb", "cto", "eu_caribbean"] as const;
+
 export async function seedDefaultSources(): Promise<void> {
+  // Retroactive deactivation: runs on every startup, idempotent.
+  // Handles upgrades where these sources were previously seeded as active=true.
+  await db
+    .update(tenderSourcesTable)
+    .set({ active: false })
+    .where(inArray(tenderSourcesTable.adapterType, PERMANENTLY_BLOCKED_ADAPTERS));
+
   const existing = await db.select().from(tenderSourcesTable);
   if (existing.length > 0) {
     const existingTypes = new Set(existing.map((s) => s.adapterType));

@@ -7,6 +7,9 @@ export class CARICOMAdapter implements TenderSourceAdapter {
 
   async fetchOpportunities(): Promise<TenderOpportunity[]> {
     const results: TenderOpportunity[] = [];
+    let requestsAttempted = 0;
+    let requestsSucceeded = 0;
+    const warnings: string[] = [];
 
     const urls = [
       "https://caricom.org/procurement-notices",
@@ -17,6 +20,7 @@ export class CARICOMAdapter implements TenderSourceAdapter {
     ];
 
     for (const url of urls) {
+      requestsAttempted++;
       try {
         const r = await safeFetch(url, {
           headers: {
@@ -24,9 +28,16 @@ export class CARICOMAdapter implements TenderSourceAdapter {
             Accept: "text/html",
           },
         });
-        if (!r.ok) continue;
+        if (!r.ok) {
+          warnings.push(`CARICOM HTTP ${r.status} for ${url}`);
+          continue;
+        }
         const html = await r.text();
-        if (html.length < 500) continue;
+        if (html.length < 500) {
+          warnings.push(`CARICOM very short response for ${url}`);
+          continue;
+        }
+        requestsSucceeded++;
 
         const linkPattern =
           /<a[^>]+href="([^"]*(?:procur|tender|rfp|bid|consult|communic|campaign|awareness|engagement)[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
@@ -61,7 +72,16 @@ export class CARICOMAdapter implements TenderSourceAdapter {
         }
 
         if (results.length > 0) break;
-      } catch { /* try next URL */ }
+      } catch (err) {
+        warnings.push(`CARICOM fetch failed for ${url}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    if (requestsAttempted > 0 && requestsSucceeded === 0) {
+      throw new Error(
+        `CARICOM: all ${requestsAttempted} request(s) failed. ` +
+        warnings.join("; "),
+      );
     }
 
     return results;

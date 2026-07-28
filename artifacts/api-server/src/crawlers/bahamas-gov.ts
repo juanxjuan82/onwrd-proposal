@@ -27,15 +27,26 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
   async fetchOpportunities(): Promise<TenderOpportunity[]> {
     const results: TenderOpportunity[] = [];
     const seen = new Set<string>();
+    let requestsAttempted = 0;
+    let requestsSucceeded = 0;
+    const warnings: string[] = [];
 
     for (const pageUrl of TENDER_URLS) {
+      requestsAttempted++;
       try {
         const r = await safeFetch(pageUrl, {
           headers: { "User-Agent": USER_AGENT, Accept: "text/html" },
         });
-        if (!r.ok) continue;
+        if (!r.ok) {
+          warnings.push(`Bahamas Gov HTTP ${r.status} for ${pageUrl}`);
+          continue;
+        }
         const html = await r.text();
-        if (html.length < 1000) continue;
+        if (html.length < 1000) {
+          warnings.push(`Bahamas Gov very short response for ${pageUrl}`);
+          continue;
+        }
+        requestsSucceeded++;
 
         // Pattern 1: links with title + category span (tender-notices page format)
         const pattern1 = /<a\s+href="([^"]+)"[^>]*title="([^"]+)"[^>]*>[\s\S]*?<span class="category">([^<]+)<\/span>/g;
@@ -94,7 +105,16 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
         }
 
         if (results.length >= 30) break;
-      } catch { /* try next URL */ }
+      } catch (err) {
+        warnings.push(`Bahamas Gov fetch failed for ${pageUrl}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    if (requestsAttempted > 0 && requestsSucceeded === 0) {
+      throw new Error(
+        `Bahamas Gov: all ${requestsAttempted} request(s) failed. ` +
+        warnings.join("; "),
+      );
     }
 
     return results.slice(0, 30);
