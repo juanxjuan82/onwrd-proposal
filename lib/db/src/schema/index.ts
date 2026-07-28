@@ -20,3 +20,4 @@ export * from "./ai-usage-log";
 export * from "./ai-circuit";
 export * from "./ai-daily-quota";
 export * from "./crawler-lock";
+export * from "./crawl-batches";

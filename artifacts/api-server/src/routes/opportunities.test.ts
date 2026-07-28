@@ -342,17 +342,6 @@ describe("§6 crawl pipeline — structural guarantees", () => {
     );
   });
 
-  it("SKIP/ineligible discoveries are NOT promoted", () => {
-    assert.ok(
-      crawlerIndex.includes("PURSUE") || crawlerIndex.includes("eligible"),
-      "crawler must gate promotion on PURSUE/CONSIDER recommendation",
-    );
-    assert.ok(
-      crawlerIndex.includes("SKIP") || crawlerIndex.includes("raw_only"),
-      "crawler must handle SKIP — store raw only, never promote",
-    );
-  });
-
   it("individual promotion failure is caught so the crawl loop continues", () => {
     // Find the *call* site (not the import) by looking for "promoteDiscoveredTender("
     const callIdx = crawlerIndex.indexOf("promoteDiscoveredTender(");

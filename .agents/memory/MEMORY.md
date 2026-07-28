@@ -22,3 +22,5 @@
 - [Structural tests + refactor drift](structural-test-refactor-drift.md) — when logic moves to a shared service, structural tests that search the old file for prompt strings ("BODY ONLY"), assembly calls, etc. must be updated to point to the new file or check for the delegation call instead.
 - [git commit works in main agent](git-push.md) — git commit and git push both work from ShellExec in the main agent; the REST API workaround documented in github-push-rest-api.md is no longer needed.
 - [Frontend prod build env](frontend-build-env.md) — proposal-generator vite build requires PORT and BASE_PATH env vars; run as PORT=3000 BASE_PATH=/proposal-generator pnpm build.
+- [Crawler pipeline overhaul](crawler-pipeline-task34.md) — AdapterFetchResult contract, upsert-and-reconcile, batch observability, backfill scope fix; discovery-scoring.ts extracted to break circular dep.
+- [Crawl backfill isolation](crawl-backfill-isolation.md) — backfillPromotions() must NOT run inside executeCrawlBatch(); causes lock to stay held under DB-connection pressure in multi-server test runs; keep it endpoint-only.

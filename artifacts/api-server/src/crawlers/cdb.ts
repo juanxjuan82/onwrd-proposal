@@ -1,11 +1,20 @@
-import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
+import { TenderSourceAdapter, TenderOpportunity, AdapterFetchResult, FetchFn, safeFetch, stripHtml, fetchDetailDescription } from "./base-adapter.js";
 
-// caribank.org/procurement returns 404. This adapter targets CDB's news/projects
-// page for procurement-adjacent announcements, and falls back to press releases.
+// Caribbean Development Bank adapter.
+//
+// NOTE: caribank.org/news-and-events returns HTTP 404 as of July 2026 — the
+// site appears to have restructured its URL scheme. The adapter attempts
+// several known paths; if all fail the source run is marked "failed" with a
+// diagnostic message. Do NOT report this source as fixed.
 export class CDBAdapter implements TenderSourceAdapter {
   adapterType = "cdb";
 
-  async fetchOpportunities(): Promise<TenderOpportunity[]> {
+  constructor(private fetchFn: FetchFn = safeFetch) {}
+
+  async fetchOpportunities(): Promise<AdapterFetchResult> {
+    const warnings: string[] = [];
+    let requestsAttempted = 0;
+    let requestsSucceeded = 0;
     const results: TenderOpportunity[] = [];
 
     const urls = [
@@ -15,18 +24,25 @@ export class CDBAdapter implements TenderSourceAdapter {
     ];
 
     for (const url of urls) {
+      requestsAttempted++;
       try {
-        const r = await safeFetch(url, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)",
-            Accept: "text/html",
-          },
+        const r = await this.fetchFn(url, {
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)", Accept: "text/html" },
         });
-        if (!r.ok) continue;
+        if (!r.ok) {
+          const hint = r.status === 404
+            ? "path unavailable — site may have restructured"
+            : `HTTP ${r.status}`;
+          warnings.push(`CDB ${hint} for ${url}`);
+          continue;
+        }
         const html = await r.text();
-        if (html.length < 500) continue;
+        if (html.length < 500) {
+          warnings.push(`CDB returned very short response for ${url}`);
+          continue;
+        }
+        requestsSucceeded++;
 
-        // Look for article/card links mentioning procurement, tender, consulting, RFP
         const linkPattern =
           /<a[^>]+href="([^"]*(?:procur|tender|rfp|consult|bid|contract|grant|project)[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
         let match;
@@ -41,12 +57,22 @@ export class CDBAdapter implements TenderSourceAdapter {
 
           const fullUrl = href.startsWith("http") ? href : `https://www.caribank.org${href}`;
 
+          // Fetch the detail page for real scope content
+          let description = "";
+          const detail = await fetchDetailDescription(fullUrl, this.fetchFn);
+          if (detail && detail.length >= 120) {
+            description = detail;
+          } else {
+            // Fall back to title — eligibility gate marks as title_only
+            description = rawTitle;
+          }
+
           results.push({
             externalId: `cdb-${Buffer.from(rawTitle.slice(0, 40)).toString("base64").slice(0, 16)}`,
             title: rawTitle,
             organization: "Caribbean Development Bank",
             url: fullUrl,
-            description: `Caribbean Development Bank announcement: ${rawTitle}`,
+            description,
             country: "Caribbean",
             sector: "Development Finance",
           });
@@ -55,9 +81,19 @@ export class CDBAdapter implements TenderSourceAdapter {
         }
 
         if (results.length > 0) break;
-      } catch { /* try next */ }
+      } catch (err) {
+        warnings.push(`CDB fetch failed for ${url}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
-    return results;
+    if (requestsAttempted > 0 && requestsSucceeded === 0) {
+      throw new Error(
+        `CDB: all ${requestsAttempted} request(s) failed. ` +
+        `caribank.org paths returned 404/error — site may have restructured. ` +
+        warnings.join("; "),
+      );
+    }
+
+    return { opportunities: results, requestsAttempted, requestsSucceeded, warnings };
   }
 }

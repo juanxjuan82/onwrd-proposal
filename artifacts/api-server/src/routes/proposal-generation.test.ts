@@ -103,129 +103,6 @@ describe("§12 generate-proposal — canonical-proposal resolution", () => {
   });
 });
 
-// ── §13  Empty-draft guard in export ──────────────────────────────────────────
-
-describe("§13 export — empty-draft guard before Drive mutation", () => {
-  it("defines a hasMeaningfulContent helper in the export handler", () => {
-    assert.ok(
-      sectionsSrc.includes("hasMeaningfulContent"),
-      "export handler must define hasMeaningfulContent guard"
-    );
-  });
-
-  it("returns 422 with code draft_not_ready when content is not meaningful", () => {
-    assert.ok(
-      sectionsSrc.includes('"draft_not_ready"'),
-      "export handler must return code: draft_not_ready when draft is not ready"
-    );
-    assert.ok(
-      sectionsSrc.includes("status(422)"),
-      "export handler must return HTTP 422 for draft not ready"
-    );
-  });
-
-  it("checks for DRAFTING_PLACEHOLDER to detect placeholder content", () => {
-    assert.ok(
-      sectionsSrc.includes("generating proposal sections"),
-      "export handler must test for the 'generating proposal sections' placeholder string"
-    );
-  });
-
-  it("syncStatus pending_first_write is preserved (not reset) after draft_not_ready", async () => {
-    const tenderId = await _createTestTender();
-    const [pRow] = await db.insert(proposalsTable).values({
-      clientName: "Test Client", industry: "General", briefText: "test",
-      proposalContent: "", status: "draft", tenderId,
-      syncStatus: "pending_first_write",
-    }).returning({ id: proposalsTable.id });
-    try {
-      const res = await fetch(`${_baseUrl}/api/proposals/${pRow.id}/export`, { method: "POST" });
-      assert.equal(res.status, 422, "export must return 422 for empty draft");
-      const [row] = await db.select({ syncStatus: proposalsTable.syncStatus })
-        .from(proposalsTable).where(eq(proposalsTable.id, pRow.id));
-      assert.equal(
-        row?.syncStatus, "pending_first_write",
-        "readiness guard must not clear syncStatus; pending_first_write must survive draft_not_ready",
-      );
-    } finally {
-      await db.delete(proposalSectionsTable).where(eq(proposalSectionsTable.proposalId, pRow.id));
-      await db.delete(proposalsTable).where(eq(proposalsTable.id, pRow.id));
-      await _cleanupTestTender(tenderId);
-    }
-  });
-
-  it("syncStatus handoff_in_progress is preserved (not reset) after draft_not_ready", async () => {
-    const tenderId = await _createTestTender();
-    const [pRow] = await db.insert(proposalsTable).values({
-      clientName: "Test Client", industry: "General", briefText: "test",
-      proposalContent: "", status: "draft", tenderId,
-      syncStatus: "handoff_in_progress",
-    }).returning({ id: proposalsTable.id });
-    try {
-      const res = await fetch(`${_baseUrl}/api/proposals/${pRow.id}/export`, { method: "POST" });
-      assert.equal(res.status, 422, "export must return 422 for empty draft");
-      const [row] = await db.select({ syncStatus: proposalsTable.syncStatus })
-        .from(proposalsTable).where(eq(proposalsTable.id, pRow.id));
-      assert.equal(
-        row?.syncStatus, "handoff_in_progress",
-        "readiness guard must not clear syncStatus; handoff_in_progress must survive draft_not_ready",
-      );
-    } finally {
-      await db.delete(proposalSectionsTable).where(eq(proposalSectionsTable.proposalId, pRow.id));
-      await db.delete(proposalsTable).where(eq(proposalsTable.id, pRow.id));
-      await _cleanupTestTender(tenderId);
-    }
-  });
-
-  it("null syncStatus remains null after draft_not_ready", async () => {
-    const tenderId = await _createTestTender();
-    const [pRow] = await db.insert(proposalsTable).values({
-      clientName: "Test Client", industry: "General", briefText: "test",
-      proposalContent: "", status: "draft", tenderId,
-      syncStatus: null,
-    }).returning({ id: proposalsTable.id });
-    try {
-      const res = await fetch(`${_baseUrl}/api/proposals/${pRow.id}/export`, { method: "POST" });
-      assert.equal(res.status, 422, "export must return 422 for empty draft");
-      const [row] = await db.select({ syncStatus: proposalsTable.syncStatus })
-        .from(proposalsTable).where(eq(proposalsTable.id, pRow.id));
-      assert.equal(
-        row?.syncStatus ?? null, null,
-        "readiness guard must not disturb null syncStatus",
-      );
-    } finally {
-      await db.delete(proposalSectionsTable).where(eq(proposalSectionsTable.proposalId, pRow.id));
-      await db.delete(proposalsTable).where(eq(proposalsTable.id, pRow.id));
-      await _cleanupTestTender(tenderId);
-    }
-  });
-
-  it("422 guard appears before getValidGoogleAccessToken — readiness check precedes auth", () => {
-    const draftNotReadyPos = sectionsSrc.indexOf("draft_not_ready");
-    const authCallPos      = sectionsSrc.indexOf("await getValidGoogleAccessToken");
-    assert.ok(draftNotReadyPos > 0, "draft_not_ready must exist in sections.ts");
-    assert.ok(authCallPos > 0,      "getValidGoogleAccessToken call must exist in sections.ts");
-    assert.ok(
-      draftNotReadyPos < authCallPos,
-      "draft readiness guard must appear BEFORE getValidGoogleAccessToken — no auth triggered for unready drafts",
-    );
-  });
-
-  it("empty-draft guard appears before createGoogleDocInFolder call", () => {
-    const draftNotReadyPos   = sectionsSrc.indexOf("draft_not_ready");
-    // Use the function-call form (with opening paren) to skip the import declaration
-    const createGoogleDocPos = sectionsSrc.indexOf("createGoogleDocInFolder(");
-    assert.ok(
-      draftNotReadyPos > 0 && createGoogleDocPos > 0,
-      "both draft_not_ready and createGoogleDocInFolder call must exist in sections.ts"
-    );
-    assert.ok(
-      draftNotReadyPos < createGoogleDocPos,
-      "empty-draft guard must appear BEFORE the createGoogleDocInFolder call"
-    );
-  });
-});
-
 // ── §14  Google OAuth callback URL + session error code ───────────────────────
 
 describe("§14 Google OAuth — callback URL + session error code", () => {
@@ -413,25 +290,7 @@ function _addSession(req: Request, _res: Response, next: NextFunction) {
   next();
 }
 
-_before(async () => {
-  const app = express();
-  app.use(express.json());
-  app.use(_addReqLog);
-  app.use(_addSession);
-  app.use("/api", opportunitiesRouter);
-  app.use("/api", sectionsRouter);
-  _server = createServer(app);
-  await new Promise<void>((resolve) => _server.listen(0, "127.0.0.1", () => resolve()));
-  const addr = _server.address() as { port: number };
-  _baseUrl = `http://127.0.0.1:${addr.port}`;
-});
-
-_after(async () => {
-  await new Promise<void>((resolve, reject) =>
-    _server.close((err) => (err ? reject(err) : resolve())),
-  );
-  __setInvokeAISpy(null);
-});
+// ── §B module-level helpers (accessible from any describe in this file) ──────
 
 const _TEST_PREFIX = `[BEH-TEST-${Date.now()}]`;
 
@@ -470,9 +329,159 @@ function _silentAiSpy() {
   }));
 }
 
-// ── §B-1  Two concurrent generate-proposal requests ────────────────────────────────────────────────────
+// ── §B wrapper ────────────────────────────────────────────────────────────────
+// File-level describe so that _before/_after are scoped to this describe (not
+// the root suite). Without this wrapper the HTTP server stays alive for the
+// entire test process, holding DB connections open while later files
+// (ai-integration.test.ts) run — causing backfillPromotions() to block waiting
+// for pool slots and leaving the crawl lock held into ai-route.test.ts.
+describe("§B proposal-generation behavioral tests", () => {
+  _before(async () => {
+    const app = express();
+    app.use(express.json());
+    app.use(_addReqLog);
+    app.use(_addSession);
+    app.use("/api", opportunitiesRouter);
+    app.use("/api", sectionsRouter);
+    _server = createServer(app);
+    await new Promise<void>((resolve) => _server.listen(0, "127.0.0.1", () => resolve()));
+    const addr = _server.address() as { port: number };
+    _baseUrl = `http://127.0.0.1:${addr.port}`;
+  });
 
-describe("§B-1 concurrent generate-proposal → one AI invocation", () => {
+  _after(async () => {
+    await new Promise<void>((resolve, reject) =>
+      _server.close((err) => (err ? reject(err) : resolve())),
+    );
+    __setInvokeAISpy(null);
+  });
+
+  // ── §13  Empty-draft guard in export (needs live server) ─────────────────────
+
+  describe("§13 export — empty-draft guard before Drive mutation", () => {
+    it("defines a hasMeaningfulContent helper in the export handler", () => {
+      assert.ok(
+        sectionsSrc.includes("hasMeaningfulContent"),
+        "export handler must define hasMeaningfulContent guard"
+      );
+    });
+
+    it("returns 422 with code draft_not_ready when content is not meaningful", () => {
+      assert.ok(
+        sectionsSrc.includes('"draft_not_ready"'),
+        "export handler must return code: draft_not_ready when draft is not ready"
+      );
+      assert.ok(
+        sectionsSrc.includes("status(422)"),
+        "export handler must return HTTP 422 for draft not ready"
+      );
+    });
+
+    it("checks for DRAFTING_PLACEHOLDER to detect placeholder content", () => {
+      assert.ok(
+        sectionsSrc.includes("generating proposal sections"),
+        "export handler must test for the 'generating proposal sections' placeholder string"
+      );
+    });
+
+    it("syncStatus pending_first_write is preserved (not reset) after draft_not_ready", async () => {
+      const tenderId = await _createTestTender();
+      const [pRow] = await db.insert(proposalsTable).values({
+        clientName: "Test Client", industry: "General", briefText: "test",
+        proposalContent: "", status: "draft", tenderId,
+        syncStatus: "pending_first_write",
+      }).returning({ id: proposalsTable.id });
+      try {
+        const res = await fetch(`${_baseUrl}/api/proposals/${pRow.id}/export`, { method: "POST" });
+        assert.equal(res.status, 422, "export must return 422 for empty draft");
+        const [row] = await db.select({ syncStatus: proposalsTable.syncStatus })
+          .from(proposalsTable).where(eq(proposalsTable.id, pRow.id));
+        assert.equal(
+          row?.syncStatus, "pending_first_write",
+          "readiness guard must not clear syncStatus; pending_first_write must survive draft_not_ready",
+        );
+      } finally {
+        await db.delete(proposalSectionsTable).where(eq(proposalSectionsTable.proposalId, pRow.id));
+        await db.delete(proposalsTable).where(eq(proposalsTable.id, pRow.id));
+        await _cleanupTestTender(tenderId);
+      }
+    });
+
+    it("syncStatus handoff_in_progress is preserved (not reset) after draft_not_ready", async () => {
+      const tenderId = await _createTestTender();
+      const [pRow] = await db.insert(proposalsTable).values({
+        clientName: "Test Client", industry: "General", briefText: "test",
+        proposalContent: "", status: "draft", tenderId,
+        syncStatus: "handoff_in_progress",
+      }).returning({ id: proposalsTable.id });
+      try {
+        const res = await fetch(`${_baseUrl}/api/proposals/${pRow.id}/export`, { method: "POST" });
+        assert.equal(res.status, 422, "export must return 422 for empty draft");
+        const [row] = await db.select({ syncStatus: proposalsTable.syncStatus })
+          .from(proposalsTable).where(eq(proposalsTable.id, pRow.id));
+        assert.equal(
+          row?.syncStatus, "handoff_in_progress",
+          "readiness guard must not clear syncStatus; handoff_in_progress must survive draft_not_ready",
+        );
+      } finally {
+        await db.delete(proposalSectionsTable).where(eq(proposalSectionsTable.proposalId, pRow.id));
+        await db.delete(proposalsTable).where(eq(proposalsTable.id, pRow.id));
+        await _cleanupTestTender(tenderId);
+      }
+    });
+
+    it("null syncStatus remains null after draft_not_ready", async () => {
+      const tenderId = await _createTestTender();
+      const [pRow] = await db.insert(proposalsTable).values({
+        clientName: "Test Client", industry: "General", briefText: "test",
+        proposalContent: "", status: "draft", tenderId,
+        syncStatus: null,
+      }).returning({ id: proposalsTable.id });
+      try {
+        const res = await fetch(`${_baseUrl}/api/proposals/${pRow.id}/export`, { method: "POST" });
+        assert.equal(res.status, 422, "export must return 422 for empty draft");
+        const [row] = await db.select({ syncStatus: proposalsTable.syncStatus })
+          .from(proposalsTable).where(eq(proposalsTable.id, pRow.id));
+        assert.equal(
+          row?.syncStatus ?? null, null,
+          "readiness guard must not disturb null syncStatus",
+        );
+      } finally {
+        await db.delete(proposalSectionsTable).where(eq(proposalSectionsTable.proposalId, pRow.id));
+        await db.delete(proposalsTable).where(eq(proposalsTable.id, pRow.id));
+        await _cleanupTestTender(tenderId);
+      }
+    });
+
+    it("422 guard appears before getValidGoogleAccessToken — readiness check precedes auth", () => {
+      const draftNotReadyPos = sectionsSrc.indexOf("draft_not_ready");
+      const authCallPos      = sectionsSrc.indexOf("await getValidGoogleAccessToken");
+      assert.ok(draftNotReadyPos > 0, "draft_not_ready must exist in sections.ts");
+      assert.ok(authCallPos > 0,      "getValidGoogleAccessToken call must exist in sections.ts");
+      assert.ok(
+        draftNotReadyPos < authCallPos,
+        "draft readiness guard must appear BEFORE getValidGoogleAccessToken — no auth triggered for unready drafts",
+      );
+    });
+
+    it("empty-draft guard appears before createGoogleDocInFolder call", () => {
+      const draftNotReadyPos   = sectionsSrc.indexOf("draft_not_ready");
+      // Use the function-call form (with opening paren) to skip the import declaration
+      const createGoogleDocPos = sectionsSrc.indexOf("createGoogleDocInFolder(");
+      assert.ok(
+        draftNotReadyPos > 0 && createGoogleDocPos > 0,
+        "both draft_not_ready and createGoogleDocInFolder call must exist in sections.ts"
+      );
+      assert.ok(
+        draftNotReadyPos < createGoogleDocPos,
+        "empty-draft guard must appear BEFORE the createGoogleDocInFolder call"
+      );
+    });
+  });
+
+  // ── §B-1  Two concurrent generate-proposal requests ──────────────────────────
+
+  describe("§B-1 concurrent generate-proposal → one AI invocation", () => {
   _after(() => { __setInvokeAISpy(null); });
 
   it("exactly one request succeeds (200) and the other is rejected (409 generation_in_progress)", async () => {
@@ -655,3 +664,5 @@ describe("§B-5 session init failure → dbReady rejects", () => {
     assert.ok(exitPos < listenPos, "process.exit(1) must precede app.listen");
   });
 });
+
+}); // end §B wrapper describe

@@ -1,0 +1,50 @@
+Task #34 final correctness repair — do not change unrelated workflow code.
+
+The current branch passes tests but has two correctness issues that must be fixed before the crawler PR leaves draft.
+
+1. Correct promotion accounting semantics
+
+In artifacts/api-server/src/lib/discovery-reconciler.ts, an unchanged discovered_tender that already has opportunityId currently returns promoted: true. That is not a promotion performed by this crawl; it is an already-linked record.
+
+Change the result contract so these states are unambiguous:
+
+- promoted: true only when this invocation newly creates/links the canonical Opportunity.
+- alreadyPromoted: true when the discovered_tender was linked before this invocation.
+- eligible remains true for both cases.
+- A newly inserted eligible record must be inserted=true, promoted=true, alreadyPromoted=false.
+- A second reconciliation of that same unchanged record must be inserted=false, unchanged=true, promoted=false, alreadyPromoted=true.
+
+Update all callers and batch counters:
+- crawlerRuns.itemsPromoted, crawl_batches.promoted, and CrawlBatchResult.promoted count only new links created during this batch.
+- If useful, add an `alreadyPromoted` observability count separately, but do not overload `promoted`.
+- Backfill’s promoted count must likewise mean newly linked Opportunities only.
+- Preserve idempotency and existing concurrency safety.
+
+2. Replace the comment-based SKIP/raw_only test workaround with behavior
+
+Do not rely on a source comment containing “SKIP” or “raw_only” to make a structural test pass.
+
+Add real behavioral coverage that:
+- creates an unpromoted discovery with recommendation SKIP and/or title-only content,
+- invokes backfillPromotions(),
+- asserts it remains unlinked (opportunityId is null),
+- asserts backfill result promoted is 0 for that item,
+- asserts rejection reasons are persisted.
+
+Keep the existing Test 30 happy-path fixture, but add a second-pass assertion:
+- call reconcileDiscovery() again with the identical rich fixture,
+- assert promoted=false, alreadyPromoted=true, unchanged=true,
+- assert no second Opportunity is created.
+
+3. Re-run the live verification with honest accounting
+
+Run two manual crawls and report:
+- Discover crawler count before and after each crawl,
+- newly promoted count,
+- already-promoted count if added,
+- inserted / updated / unchanged,
+- each failed source and its error.
+
+A report that says promoted > 0 while the crawler Opportunity count is unchanged is a failure unless it explicitly reports those records as alreadyPromoted, not promoted.
+
+Run the full API test suite twice, both typechecks, and both production builds. Keep the PR draft until this is complete.
