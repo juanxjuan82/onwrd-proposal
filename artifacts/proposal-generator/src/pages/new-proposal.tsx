@@ -28,6 +28,7 @@ import {
   UploadCloud,
   X,
   ClipboardList,
+  ChevronDown,
 } from "lucide-react";
 import {
   Form,
@@ -201,6 +202,7 @@ export default function NewProposal() {
   });
   const [pasteText, setPasteText] = useState("");
   const [pasteFile, setPasteFile] = useState<File | null>(null);
+  const [showRfpSources, setShowRfpSources] = useState(false);
   const [pasteFileExtracting, setPasteFileExtracting] = useState(false);
   const [pasteFileError, setPasteFileError] = useState<string | null>(null);
   const [pasteError, setPasteError] = useState<string | null>(null);
@@ -809,6 +811,74 @@ export default function NewProposal() {
                     <div className="flex-1 border-t border-border" />
                     <span className="text-xs text-muted-foreground">or paste text below</span>
                     <div className="flex-1 border-t border-border" />
+                  </div>
+
+                  {/* RFP sources helper */}
+                  <div className="rounded-md border border-border bg-muted/30">
+                    <button
+                      type="button"
+                      className="w-full flex items-center justify-between px-4 py-2.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+                      onClick={() => setShowRfpSources((v) => !v)}
+                    >
+                      <span className="font-medium">Where to find RFPs to paste</span>
+                      <ChevronDown className={`w-4 h-4 transition-transform ${showRfpSources ? "rotate-180" : ""}`} />
+                    </button>
+
+                    {showRfpSources && (
+                      <div className="px-4 pb-4 space-y-4 border-t border-border pt-3">
+                        {/* Blocked — manual only */}
+                        <div>
+                          <p className="text-xs font-semibold text-amber-400 uppercase tracking-wide mb-2">Browse manually — not auto-crawled</p>
+                          <div className="space-y-1.5">
+                            {([
+                              { name: "IDB",            label: "Inter-American Development Bank", url: "https://www.iadb.org/en/projects/all?query=communications+marketing&country=BS,JM,TT,BB,GY,LC,VC" },
+                              { name: "CDB",            label: "Caribbean Development Bank",       url: "https://www.caribank.org/news-and-events" },
+                              { name: "CTO",            label: "Caribbean Tourism Organisation",   url: "https://www.caribtourism.com/procurement" },
+                              { name: "CARIFORUM",      label: "EU–Caribbean forum",               url: "https://www.cariforum.org/tenders" },
+                              { name: "EU LAC Found.",  label: "EU–Latin America & Caribbean",     url: "https://eulacfoundation.org/en/calls" },
+                              { name: "TED Europa",     label: "EU tenders (global)",               url: "https://ted.europa.eu/en/search?scope=ACTIVE&query=caribbean+communications" },
+                            ] as const).map(({ name, label, url }) => (
+                              <a
+                                key={name}
+                                href={url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center gap-3 rounded px-2 py-1.5 hover:bg-muted transition-colors group"
+                              >
+                                <span className="text-xs font-mono font-semibold text-foreground w-24 shrink-0">{name}</span>
+                                <span className="text-xs text-muted-foreground flex-1 truncate">{label}</span>
+                                <ExternalLink className="w-3 h-3 text-muted-foreground group-hover:text-foreground shrink-0" />
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Auto-crawled — supplementary */}
+                        <div>
+                          <p className="text-xs font-semibold text-emerald-500 uppercase tracking-wide mb-2">Already auto-crawled → check Discover first</p>
+                          <div className="space-y-1.5">
+                            {([
+                              { name: "World Bank",   label: "Procurement notices",           url: "https://projects.worldbank.org/en/projects-operations/procurement" },
+                              { name: "UNDP",         label: "UN procurement notices",        url: "https://procurement-notices.undp.org/" },
+                              { name: "CARICOM",      label: "Caribbean Community notices",   url: "https://caricom.org/" },
+                              { name: "Bahamas Gov",  label: "Official tender notices",       url: "https://www.bahamas.gov.bs/tender-notices" },
+                            ] as const).map(({ name, label, url }) => (
+                              <a
+                                key={name}
+                                href={url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="flex items-center gap-3 rounded px-2 py-1.5 hover:bg-muted transition-colors group"
+                              >
+                                <span className="text-xs font-mono font-semibold text-foreground w-24 shrink-0">{name}</span>
+                                <span className="text-xs text-muted-foreground flex-1 truncate">{label}</span>
+                                <ExternalLink className="w-3 h-3 text-muted-foreground group-hover:text-foreground shrink-0" />
+                              </a>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Textarea */}
