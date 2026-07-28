@@ -141,6 +141,35 @@ describe("UNGM adapter", () => {
     const results = await withMockFetch(emptyHtmlPage, () => adapter.fetchOpportunities());
     assert.deepEqual(results, []);
   });
+
+  it("produces descriptions with enough context to pass eligibility content-quality gate", async () => {
+    // Simulate a UNDP listing page with a table row containing notice link + surrounding columns
+    const mockHtml: MockFetchFn = async () => new Response(
+      `<html><body><table>
+        <tr>
+          <td><a href="view_notice.cfm?notice_id=99001">Caribbean Communications Specialist</a></td>
+          <td>Barbados</td>
+          <td>Individual Consultant — Communications and media services for UNDP Caribbean Country Office</td>
+          <td>2026-09-30</td>
+        </tr>
+      </table></body></html>`,
+      { status: 200, headers: { "content-type": "text/html" } },
+    );
+
+    const { UNGMAdapter } = await import("./ungm.js");
+    const adapter = new UNGMAdapter();
+    const results = await withMockFetch(mockHtml, () => adapter.fetchOpportunities());
+
+    assert.equal(results.length, 1, "Should find 1 notice");
+    const desc = results[0].description;
+    // After stripping the title, remaining description must be >60 chars (eligibility gate)
+    const safeTitle = results[0].title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const withoutTitle = desc.replace(new RegExp(safeTitle, "gi"), "").trim();
+    assert.ok(
+      withoutTitle.length > 60,
+      `Description after removing title must be >60 chars to pass eligibility gate; got ${withoutTitle.length} chars: "${withoutTitle.slice(0, 100)}"`,
+    );
+  });
 });
 
 describe("Bahamas Gov adapter", () => {
@@ -176,6 +205,38 @@ describe("CARICOM adapter", () => {
     const adapter = new CARICOMAdapter();
     const results = await withMockFetch(emptyHtmlPage, () => adapter.fetchOpportunities());
     assert.deepEqual(results, []);
+  });
+
+  it("produces descriptions with enough context to pass eligibility content-quality gate", async () => {
+    // Simulate a CARICOM page with a procurement link inside a rich context block
+    const mockHtml: MockFetchFn = async () => new Response(
+      `<html><body>
+        <article>
+          <p>CARICOM Secretariat invites proposals from qualified firms to provide
+          communications and public awareness campaign services for the CARICOM
+          Single Market initiative. Ref: CS-2026-042. Deadline: 30 September 2026.
+          <a href="/procurement/communications-campaign-cs2026042">
+            Communications Campaign — CARICOM Single Market
+          </a>
+          Scope includes strategic communications, content creation, social media
+          management, and community engagement across member states.</p>
+        </article>
+      </body></html>`,
+      { status: 200, headers: { "content-type": "text/html" } },
+    );
+
+    const { CARICOMAdapter } = await import("./caricom.js");
+    const adapter = new CARICOMAdapter();
+    const results = await withMockFetch(mockHtml, () => adapter.fetchOpportunities());
+
+    assert.ok(results.length > 0, "Should find at least 1 procurement link");
+    const desc = results[0].description;
+    const safeTitle = results[0].title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const withoutTitle = desc.replace(new RegExp(safeTitle, "gi"), "").trim();
+    assert.ok(
+      withoutTitle.length > 60,
+      `Description after removing title must be >60 chars to pass eligibility gate; got ${withoutTitle.length} chars: "${withoutTitle.slice(0, 100)}"`,
+    );
   });
 });
 

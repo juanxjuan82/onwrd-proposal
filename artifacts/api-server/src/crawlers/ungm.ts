@@ -1,7 +1,9 @@
 import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
 
-// Replaces the non-functional UNGM scraper with UNDP Procurement Notices,
-// which has server-rendered HTML and notice listings accessible without JS.
+// UNDP Procurement Notices adapter.
+// Uses procurement-notices.undp.org which has server-rendered HTML listings
+// accessible without JS. Extracts surrounding table row context for each
+// notice to produce descriptions that pass the eligibility content-quality gate.
 export class UNGMAdapter implements TenderSourceAdapter {
   adapterType = "ungm";
 
@@ -19,7 +21,6 @@ export class UNGMAdapter implements TenderSourceAdapter {
     }
 
     try {
-
       const html = await r.text();
 
       // Extract notice links: href="view_notice.cfm?notice_id=XXXXX"
@@ -38,16 +39,35 @@ export class UNGMAdapter implements TenderSourceAdapter {
         if (seen.has(noticeId)) continue;
         seen.add(noticeId);
 
-        // Detect Caribbean/Bahamas mentions in the title for geographic scoring boost
-        const titleLower = rawTitle.toLowerCase();
+        // Extract surrounding row context for a real description.
+        // The UNDP listing is a table; the ~600 chars around the link include
+        // other columns: country, procurement type, closing date, agency, etc.
+        // Stripping HTML from that window produces a description that has
+        // genuine content rather than a template stub.
+        const linkPos = html.indexOf(`notice_id=${noticeId}`);
+        let description = `UNDP procurement notice: ${rawTitle}`;
+        if (linkPos > 0) {
+          const windowStart = Math.max(0, linkPos - 300);
+          const windowEnd = Math.min(html.length, linkPos + 500);
+          const contextText = stripHtml(html.slice(windowStart, windowEnd), 600)
+            .replace(/\s+/g, " ")
+            .trim();
+          // Only use the context if it adds real content beyond repeating the title
+          if (contextText.length > rawTitle.length + 80) {
+            description = contextText.slice(0, 500);
+          }
+        }
+
+        // Detect Caribbean/Bahamas mentions in title + description for geo scoring
+        const corpus = `${rawTitle} ${description}`.toLowerCase();
         const country =
-          titleLower.includes("bahamas")   ? "Bahamas" :
-          titleLower.includes("caribbean") ? "Caribbean" :
-          titleLower.includes("jamaica")   ? "Jamaica" :
-          titleLower.includes("barbados")  ? "Barbados" :
-          titleLower.includes("trinidad")  ? "Trinidad and Tobago" :
-          titleLower.includes("guyana")    ? "Guyana" :
-          titleLower.includes("belize")    ? "Belize" :
+          corpus.includes("bahamas")   ? "Bahamas" :
+          corpus.includes("caribbean") ? "Caribbean" :
+          corpus.includes("jamaica")   ? "Jamaica" :
+          corpus.includes("barbados")  ? "Barbados" :
+          corpus.includes("trinidad")  ? "Trinidad and Tobago" :
+          corpus.includes("guyana")    ? "Guyana" :
+          corpus.includes("belize")    ? "Belize" :
           "International";
 
         results.push({
@@ -55,7 +75,7 @@ export class UNGMAdapter implements TenderSourceAdapter {
           title: rawTitle,
           organization: "UNDP",
           url: `https://procurement-notices.undp.org/${path}`,
-          description: `UNDP procurement notice: ${rawTitle}`,
+          description,
           country,
           sector: "United Nations",
         });

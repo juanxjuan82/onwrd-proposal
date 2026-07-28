@@ -53,19 +53,32 @@ export class CARICOMAdapter implements TenderSourceAdapter {
 
           const fullUrl = href.startsWith("http") ? href : `https://caricom.org${href}`;
 
+          // Extract surrounding page context around this link for a real description.
+          // The ~600 chars around the href in the HTML typically includes the
+          // containing paragraph or article block — deadline, scope summary, reference
+          // number, organization unit, etc. Stripping HTML gives genuine content that
+          // passes the eligibility content-quality gate without template padding.
+          let description = `CARICOM Secretariat procurement notice: ${rawTitle}`;
+          const hrefPos = html.indexOf(href, Math.max(0, (match.index ?? 0) - 20));
+          if (hrefPos > 0) {
+            const windowStart = Math.max(0, hrefPos - 300);
+            const windowEnd = Math.min(html.length, hrefPos + 500);
+            const contextText = stripHtml(html.slice(windowStart, windowEnd), 600)
+              .replace(/\s+/g, " ")
+              .trim();
+            if (contextText.length > rawTitle.length + 80) {
+              description = contextText.slice(0, 500);
+            }
+          }
+
           results.push({
             externalId: `caricom-${Buffer.from(rawTitle.slice(0, 40)).toString("base64").slice(0, 16)}`,
             title: rawTitle,
             organization: "CARICOM Secretariat",
             url: fullUrl,
-            // Real scope from page fetch only — no synthetic marketing assumption
-            description: `CARICOM Secretariat procurement notice: ${rawTitle}`,
+            description,
             country: "Caribbean",
             sector: "Government & Public Communications",
-            rawData: {
-              adapterContext:
-                "CARICOM procurement: regional Caribbean Community communications and public awareness work.",
-            },
           });
 
           if (results.length >= 15) break;
