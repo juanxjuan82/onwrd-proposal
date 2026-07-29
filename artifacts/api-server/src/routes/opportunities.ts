@@ -805,29 +805,160 @@ router.post("/opportunities/:id/convert", (_req, res) => {
 // concurrent callers attempt an insert, exactly one wins, and both then
 // read the same canonical row.  No SELECT FOR UPDATE needed — the unique
 // constraint on proposals.tender_id is the concurrency guard.
+// ── Proposal creation email ───────────────────────────────────────────────────
+async function sendProposalCreatedEmail(opts: {
+  proposalId: number;
+  title: string;
+  agency: string;
+  category: string;
+  description: string;
+  deadline: string | null;
+  valueAmount: string | null;
+  recommendationScore: number;
+  sourceUrl: string | null;
+}) {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (!apiKey) return;
+  try {
+    const { Resend } = await import("resend");
+    const resend = new Resend(apiKey);
+    const fromAddress = process.env.RESEND_FROM ?? "ONWRD Tender Desk <onboarding@resend.dev>";
+    const toAddress = process.env.PROPOSAL_NOTIFY_EMAIL ?? "j.aymes@onwrdadvisors.com";
+    const appUrl = process.env.APP_URL
+      ? `${process.env.APP_URL}/proposals/${opts.proposalId}`
+      : `https://${process.env.REPLIT_DEV_DOMAIN ?? "localhost"}/proposal-generator/proposals/${opts.proposalId}`;
+
+    const deadlineDisplay = opts.deadline
+      ? new Date(opts.deadline).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" })
+      : "Not specified";
+
+    const scoreColor = opts.recommendationScore >= 70 ? "#16a34a"
+      : opts.recommendationScore >= 40 ? "#d97706"
+      : "#dc2626";
+
+    const descriptionExcerpt = opts.description.length > 400
+      ? opts.description.slice(0, 400).trimEnd() + "…"
+      : opts.description;
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:32px 0;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;">
+
+        <!-- Header -->
+        <tr><td style="background:#0f172a;border-radius:12px 12px 0 0;padding:28px 32px;">
+          <p style="margin:0;color:#94a3b8;font-size:12px;letter-spacing:0.08em;text-transform:uppercase;font-weight:600;">ONWRD Advisors</p>
+          <h1 style="margin:8px 0 0;color:#f8fafc;font-size:20px;font-weight:700;">New Proposal Started</h1>
+        </td></tr>
+
+        <!-- Body -->
+        <tr><td style="background:#ffffff;padding:32px;">
+
+          <!-- Title -->
+          <h2 style="margin:0 0 4px;color:#0f172a;font-size:18px;font-weight:700;line-height:1.3;">${opts.title}</h2>
+          <p style="margin:0 0 24px;color:#64748b;font-size:14px;">${opts.agency}</p>
+
+          <!-- Key stats -->
+          <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+            <tr>
+              <td width="33%" style="padding-right:8px;">
+                <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;text-align:center;">
+                  <p style="margin:0 0 4px;color:#64748b;font-size:11px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;">Fit Score</p>
+                  <p style="margin:0;font-size:26px;font-weight:800;color:${scoreColor};">${opts.recommendationScore}<span style="font-size:14px;font-weight:500;color:#94a3b8;">/100</span></p>
+                </div>
+              </td>
+              <td width="34%" style="padding:0 4px;">
+                <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;text-align:center;">
+                  <p style="margin:0 0 4px;color:#64748b;font-size:11px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;">Due Date</p>
+                  <p style="margin:0;font-size:13px;font-weight:700;color:#0f172a;">${deadlineDisplay}</p>
+                </div>
+              </td>
+              <td width="33%" style="padding-left:8px;">
+                <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px;text-align:center;">
+                  <p style="margin:0 0 4px;color:#64748b;font-size:11px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;">Value</p>
+                  <p style="margin:0;font-size:13px;font-weight:700;color:#0f172a;">${opts.valueAmount ?? "Not listed"}</p>
+                </div>
+              </td>
+            </tr>
+          </table>
+
+          <!-- Meta row -->
+          <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
+            <tr>
+              <td style="padding-right:16px;">
+                <p style="margin:0 0 2px;color:#94a3b8;font-size:11px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;">Sector</p>
+                <p style="margin:0;color:#0f172a;font-size:14px;font-weight:500;">${opts.category}</p>
+              </td>
+              ${opts.sourceUrl ? `<td>
+                <p style="margin:0 0 2px;color:#94a3b8;font-size:11px;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;">Source</p>
+                <p style="margin:0;font-size:14px;"><a href="${opts.sourceUrl}" style="color:#6366f1;text-decoration:none;font-weight:500;">View original RFP →</a></p>
+              </td>` : ""}
+            </tr>
+          </table>
+
+          <!-- Description -->
+          <div style="background:#f8fafc;border-left:3px solid #6366f1;border-radius:0 6px 6px 0;padding:14px 16px;margin-bottom:28px;">
+            <p style="margin:0;color:#475569;font-size:13px;line-height:1.6;">${descriptionExcerpt}</p>
+          </div>
+
+          <!-- CTA -->
+          <a href="${appUrl}" style="display:inline-block;background:#6366f1;color:#ffffff;font-size:14px;font-weight:600;text-decoration:none;padding:12px 24px;border-radius:8px;">Open Proposal →</a>
+
+        </td></tr>
+
+        <!-- Footer -->
+        <tr><td style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:0 0 12px 12px;padding:16px 32px;">
+          <p style="margin:0;color:#94a3b8;font-size:12px;">You're receiving this because a new proposal was started in ONWRD Advisors. <a href="${appUrl}" style="color:#6366f1;">View in app</a></p>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
+    await resend.emails.send({
+      from: fromAddress,
+      to: [toAddress],
+      subject: `New Proposal: ${opts.title}`,
+      html,
+    });
+  } catch {
+    // Email failure must never surface to the caller
+  }
+}
+
 router.post("/opportunities/:id/pursue", async (req, res) => {
   const id = Number(req.params.id);
   if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
 
   try {
     type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+    type TenderSnap = {
+      id: number; title: string; agency: string; category: string;
+      description: string; deadline: string | null;
+      value_amount: string | null; raw_text: string | null;
+      recommendation_score: number; source_url: string | null;
+    };
+    let tenderSnap: TenderSnap | undefined;
+
     const proposalId = await db.transaction(async (tx: DbTx) => {
       // 1. Verify the opportunity exists (plain SELECT — no lock needed)
       const tenderResult = await tx.execute(
         sql`SELECT id, title, agency, category, description, deadline,
-                   value_amount, raw_text
+                   value_amount, raw_text, recommendation_score, source_url
             FROM tenders WHERE id = ${id}`,
       );
-      const tender = tenderResult.rows[0] as {
-        id: number; title: string; agency: string; category: string;
-        description: string; deadline: string | null;
-        value_amount: string | null; raw_text: string | null;
-      } | undefined;
+      const tender = tenderResult.rows[0] as TenderSnap | undefined;
       if (!tender) {
         const e = new Error("NOT_FOUND");
         (e as NodeJS.ErrnoException).code = "NOT_FOUND";
         throw e;
       }
+      tenderSnap = tender;
 
       // 2. Build brief text
       const briefParts: string[] = [tender.title, `Agency: ${tender.agency}`];
@@ -862,6 +993,21 @@ router.post("/opportunities/:id/pursue", async (req, res) => {
     });
 
     res.json({ proposalId });
+
+    // Fire-and-forget email — never blocks the response
+    if (tenderSnap) {
+      void sendProposalCreatedEmail({
+        proposalId,
+        title: tenderSnap.title,
+        agency: tenderSnap.agency,
+        category: tenderSnap.category,
+        description: tenderSnap.description,
+        deadline: tenderSnap.deadline,
+        valueAmount: tenderSnap.value_amount,
+        recommendationScore: tenderSnap.recommendation_score,
+        sourceUrl: tenderSnap.source_url,
+      });
+    }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "NOT_FOUND") {
       res.status(404).json({ error: "Opportunity not found" });
