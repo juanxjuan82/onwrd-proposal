@@ -346,8 +346,11 @@ export function evaluateCrawlerEligibility(discovery: EligibilityInput): Eligibi
     }
   }
 
-  // 8. Require at least one positive signal — generic terms alone cannot qualify
-  if (positiveSignals.length === 0) {
+  // 8. Require at least one positive signal only for SKIP-recommended items.
+  //    CONSIDER items (score 40–59) already cleared a keyword relevance test —
+  //    they flow to the "reviewing" bucket without needing an exact phrase match.
+  //    PURSUE items (score 60+) trivially pass this gate too.
+  if (positiveSignals.length === 0 && discovery.recommendation === "SKIP") {
     rejectionReasons.push(
       "No explicit ONWRD core service phrases found — generic terms alone do not qualify",
     );
