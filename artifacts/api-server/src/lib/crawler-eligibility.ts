@@ -181,6 +181,45 @@ const INDIVIDUAL_HIRE_PHRASES: string[] = [
   "personal services contract",
   "special services agreement",  // SSA
   "individual service contract", // ISC
+  // Single-person job titles — coordinator / officer / manager as role suffix
+  // These appear in the title of individual-hire postings, not firm-level RFPs.
+  "organizational development consultant",
+  "organisation development consultant",
+  "organisational development consultant",
+  "organization development consultant",
+  "gender specialist",
+  "gender and social inclusion specialist",
+  "social inclusion specialist",
+  "communications coordinator",
+  "communications officer",
+  "communications manager",
+  "communications director",
+  "outreach coordinator",
+  "outreach officer",
+  "project coordinator",
+  "programme coordinator",
+  "program coordinator",
+  "information officer",
+  "knowledge management officer",
+  "social media officer",
+  "social media manager",
+  "digital communications officer",
+  "digital communications manager",
+  "marketing coordinator",
+  "marketing officer",
+  "marketing manager",
+  "public relations officer",
+  "pr officer",
+  "media officer",
+  "media coordinator",
+  "brand manager",
+  "content manager",
+  "content officer",
+  // Generic individual-hire signals in title
+  "gender and social inclusion specialist",
+  "we are looking for a",
+  "seeking a qualified individual",
+  "hire a",
 ];
 
 // ── Hard negative phrases — clearly out-of-scope categories ──────────────────
@@ -214,6 +253,9 @@ const HARD_NEGATIVE_PHRASES: string[] = [
   "job advertisement", "vacancy notice", "employment opportunity",
   "job posting", "we are hiring", "position available",
   "submit your cv", "submit your resume",
+  // Asset disposal / sales
+  "sale of motor vehicles", "sale of vehicles", "sale of equipment",
+  "disposal of assets", "disposal of vehicles",
   // Procurement formalities (not services)
   "contract award notice", "award notice",
   "vendor registration", "supplier registration",
@@ -224,6 +266,9 @@ const BOILERPLATE_PATTERNS: RegExp[] = [
   /^(procurement notice|consulting services?|individual consultant|expression of interest|request for (proposals?|quotations?)|rfp|notice of (procurement|intent))\s*[:.]?\s*$/i,
   /^\[?(no description available|n\/a|tbd|to be determined|see attached|see document)\]?\.?$/i,
   /^(opportunity|tender|contract)\s+(ref(erence)?|no\.?|number|id)[:\s]\s*[\w-]+\s*$/i,
+  // CARICOM / portal navigation pages scraped as fake tenders
+  /^(past notices?|shortlist notices?|procurement notices?|current notices?|open notices?|closed notices?)\s*$/i,
+  /^(\w+\s+)?secretariat['']?s?\s+procurement plan(\s+\(updated\))?\s*$/i,
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -253,8 +298,10 @@ function matchAll(text: string, phrases: string[]): string[] {
 function classifyContentQuality(description: string, title: string): ContentQuality {
   const t = description.trim();
 
-  // Known boilerplate stubs
-  if (BOILERPLATE_PATTERNS.some((p) => p.test(t))) return "boilerplate";
+  // Known boilerplate stubs — check title AND description
+  // (scraped nav pages have long HTML-garbage descriptions that look like full_scope)
+  if (BOILERPLATE_PATTERNS.some((p) => p.test(t)) ||
+      BOILERPLATE_PATTERNS.some((p) => p.test(title.trim()))) return "boilerplate";
 
   // Very short — not enough real content
   if (t.length < 120) return "title_only";
