@@ -462,7 +462,7 @@ router.get("/proposals/workspace", async (req, res) => {
         p.updated_at               AS p_updated_at
       FROM tenders t
       LEFT JOIN proposals p ON p.tender_id = t.id
-      WHERE t.source_type != 'crawler' OR t.proposal_id IS NOT NULL
+      WHERE t.source_type != 'crawler' OR p.id IS NOT NULL
       ORDER BY t.updated_at DESC
     `);
 
