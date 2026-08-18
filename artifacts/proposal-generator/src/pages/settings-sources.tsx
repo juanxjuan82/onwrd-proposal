@@ -502,7 +502,7 @@ export default function SettingsSources() {
               <div>
                 <h3 className="font-medium text-white text-sm">Daily Digest Email</h3>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  Sent each morning after the 6am crawl with new Pursue and Consider opportunities.
+                  Sent each weekday morning after the 8am crawl with new Pursue and Consider opportunities.
                 </p>
               </div>
               <div className="flex items-center gap-3">
@@ -525,7 +525,15 @@ export default function SettingsSources() {
             <div className="space-y-2">
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Recipients</p>
               {(digest?.emails ?? []).length === 0 && (
-                <p className="text-xs text-muted-foreground italic">No recipients added yet.</p>
+                digest?.enabled
+                  ? (
+                    <div className="flex items-center gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-400">
+                      <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                      No recipients — add an email address or the digest won't send.
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground italic">No recipients added yet.</p>
+                  )
               )}
               {(digest?.emails ?? []).map((email) => (
                 <div key={email} className="flex items-center justify-between gap-3 py-1.5 px-3 rounded bg-muted/20 border border-border">
