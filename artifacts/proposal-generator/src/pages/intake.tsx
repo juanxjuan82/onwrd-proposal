@@ -129,7 +129,7 @@ function Field({ label, req, opt, children }: { label: string; req?: boolean; op
 function Section({ num, title, children }: { num: number; title: string; children: React.ReactNode }) {
   return (
     <Card className="bg-[#0a0a0a] border-[#1e1e1e]">
-      <CardHeader className="pb-4 pt-5 px-6">
+      <CardHeader className="pb-3 pt-4 px-6">
         <CardTitle className="flex items-center gap-3 text-sm font-semibold text-white">
           <span className="flex items-center justify-center w-6 h-6 rounded-full border border-[#0000FF] text-[#0000FF] text-[11px] font-bold shrink-0">
             {num}
@@ -159,14 +159,8 @@ export default function Intake() {
   const [submissionKey] = useState(() => crypto.randomUUID());
   const [draftId, setDraftId] = useState<number | null>(null);
   const [autosaved, setAutosaved] = useState(false);
-  const [activeSection, setActiveSection] = useState(1);
+  const [step, setStep] = useState(1);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const sectionRefs = [
-    useRef<HTMLDivElement>(null),
-    useRef<HTMLDivElement>(null),
-    useRef<HTMLDivElement>(null),
-    useRef<HTMLDivElement>(null),
-  ];
 
   const form = useForm<V>({
     resolver: zodResolver(intakeSchema),
@@ -186,24 +180,45 @@ export default function Intake() {
   const problems = form.watch("problems");
   const support = form.watch("support");
 
-  // ─── Track active section for progress indicator ────────────────────────
-  useEffect(() => {
-    const refs = sectionRefs.map(r => r.current).filter(Boolean) as HTMLDivElement[];
-    if (refs.length === 0) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting) {
-            const idx = sectionRefs.findIndex(r => r.current === entry.target);
-            if (idx >= 0) setActiveSection(idx + 1);
-          }
-        });
-      },
-      { rootMargin: "-10% 0px -80% 0px", threshold: 0 }
-    );
-    refs.forEach(el => observer.observe(el));
-    return () => observer.disconnect();
-  }, []);
+  // ─── Step navigation ─────────────────────────────────────────────────────
+  const STEP_FIELDS: (keyof V)[][] = [
+    ["firstName", "lastName", "jobTitle", "email", "phone", "preferredContact"],
+    ["orgName", "website", "hearAbout", "hearAboutOther", "industry", "industryOther", "market", "marketOther"],
+    ["problems", "problemsOther", "agencyBefore", "support", "supportOther"],
+    ["projectType", "projectBrief", "investment", "decisionStage"],
+  ];
+
+  const navLock = useRef(false);
+  const goNext = async () => {
+    if (navLock.current) return;
+    navLock.current = true;
+    try {
+      const valid = await form.trigger(STEP_FIELDS[step - 1]);
+      if (valid) {
+        setStep(s => Math.min(s + 1, 4));
+        window.scrollTo({ top: 0 });
+      }
+    } finally {
+      navLock.current = false;
+    }
+  };
+
+  // If final submit finds errors on an earlier (hidden) step, jump there
+  const onInvalid = (errors: Record<string, unknown>) => {
+    const errored = Object.keys(errors);
+    for (let i = 0; i < STEP_FIELDS.length; i++) {
+      if (STEP_FIELDS[i].some(f => errored.includes(f as string))) {
+        setStep(i + 1);
+        window.scrollTo({ top: 0 });
+        return;
+      }
+    }
+  };
+
+  const goBack = () => {
+    setStep(s => Math.max(s - 1, 1));
+    window.scrollTo({ top: 0 });
+  };
 
   // ─── Autosave: fire when Section 1 is filled ────────────────────────────
   const firstName = form.watch("firstName");
@@ -296,18 +311,18 @@ export default function Intake() {
           <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-[22px] object-contain object-left" />
           <div className="flex items-center gap-3 min-w-[180px]">
             <span className="text-[11px] text-[#aaa] whitespace-nowrap">
-              {SECTION_TITLES[activeSection - 1]}
+              {SECTION_TITLES[step - 1]}
             </span>
             <div className="flex gap-1">
               {SECTION_TITLES.map((_, i) => (
                 <div
                   key={i}
                   className="h-1 w-6 rounded-full transition-colors duration-300"
-                  style={{ background: i < activeSection ? "#0000FF" : "#333" }}
+                  style={{ background: i < step ? "#0000FF" : "#333" }}
                 />
               ))}
             </div>
-            <span className="text-[11px] text-[#aaa] whitespace-nowrap">{activeSection}/4</span>
+            <span className="text-[11px] text-[#aaa] whitespace-nowrap">{step}/4</span>
           </div>
         </div>
       </header>
@@ -315,7 +330,7 @@ export default function Intake() {
       {/* Body */}
       <main className="max-w-4xl mx-auto w-full px-4 sm:px-6 pb-8 pt-[57px]">
         {/* Credibility strip */}
-        <div className="flex items-center gap-3 mb-8 flex-wrap">
+        <div className="flex items-center gap-3 mb-5 flex-wrap">
           <span className="text-[11px] text-[#777] uppercase tracking-widest shrink-0">Trusted by</span>
           <div className="h-px flex-1 bg-[#333]" />
           {CLIENTS.map(name => (
@@ -323,15 +338,15 @@ export default function Intake() {
           ))}
         </div>
 
-        <div className="mb-8">
+        <div className="mb-5">
           <h1 className="text-xl font-semibold text-white mb-1">Tell us about your project</h1>
           <p className="text-sm text-[#aaa]">Fill in the sections below and we'll prepare a tailored proposal.</p>
         </div>
 
-        <form onSubmit={form.handleSubmit(submit)} noValidate className="space-y-5">
+        <form onSubmit={form.handleSubmit(submit, onInvalid)} noValidate className="space-y-5">
 
-          {/* ── Section 1: Contact Details ── */}
-          <div ref={sectionRefs[0]}><Section num={1} title="Contact Details">
+          {/* ── Step 1: Contact Details ── */}
+          {step === 1 && <div key="step1" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section num={1} title="Contact Details">
 
             <div className="space-y-3">
               <div className="grid grid-cols-2 gap-3 items-start">
@@ -389,10 +404,10 @@ export default function Intake() {
                 </p>
               )}
             </div>
-          </Section></div>
+          </Section></div>}
 
-          {/* ── Section 2: Company & Market ── */}
-          <div ref={sectionRefs[1]}><Section num={2} title="Company & Market">
+          {/* ── Step 2: Company & Market ── */}
+          {step === 2 && <div key="step2" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section num={2} title="Company & Market">
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-3 items-start">
                 <Field label="Organisation name" req>
@@ -443,10 +458,10 @@ export default function Intake() {
                 </div>
               </Field>
             </div>
-          </Section></div>
+          </Section></div>}
 
-          {/* ── Section 3: The Challenge ── */}
-          <div ref={sectionRefs[2]}><Section num={3} title="The Challenge">
+          {/* ── Step 3: The Challenge ── */}
+          {step === 3 && <div key="step3" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section num={3} title="The Challenge">
             <div className="space-y-4">
               <Field label="What's the challenge?" req>
                 <div className="mt-1 space-y-1.5">
@@ -484,10 +499,10 @@ export default function Intake() {
                 </div>
               </Field>
             </div>
-          </Section></div>
+          </Section></div>}
 
-          {/* ── Section 4: Project & Investment ── */}
-          <div ref={sectionRefs[3]}><Section num={4} title="Project & Investment">
+          {/* ── Step 4: Project & Investment ── */}
+          {step === 4 && <div key="step4" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section num={4} title="Project & Investment">
             <div className="space-y-4">
               <Field label="Project type" req>
                 <div className="mt-1">
@@ -574,14 +589,27 @@ export default function Intake() {
                 </div>
               </Field>
             </div>
-          </Section></div>
+          </Section></div>}
 
-          {/* Submit */}
-          <div className="flex flex-col items-end gap-2 pt-1 pb-8">
-            {submitErr && <p className="text-xs text-destructive self-start">{submitErr}</p>}
-            <Button type="submit" size="sm" className="h-9 px-8 text-[13px]" disabled={busy || isSubmitting}>
-              {busy ? "Submitting…" : "Submit"}
-            </Button>
+          {/* Step navigation */}
+          <div className="flex flex-col gap-2 pt-1 pb-8">
+            {submitErr && <p className="text-xs text-destructive">{submitErr}</p>}
+            <div className="flex items-center justify-between">
+              {step > 1 ? (
+                <Button type="button" variant="outline" size="sm" className="h-9 px-6 text-[13px]" onClick={goBack}>
+                  Back
+                </Button>
+              ) : <span />}
+              {step < 4 ? (
+                <Button type="button" size="sm" className="h-9 px-8 text-[13px]" onClick={goNext}>
+                  Next
+                </Button>
+              ) : (
+                <Button type="submit" size="sm" className="h-9 px-8 text-[13px]" disabled={busy || isSubmitting}>
+                  {busy ? "Submitting…" : "Submit"}
+                </Button>
+              )}
+            </div>
           </div>
         </form>
       </main>
