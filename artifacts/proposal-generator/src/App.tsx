@@ -57,6 +57,7 @@ function Router() {
             <Route path="/tenders/:id" component={TenderDetailRedirect} />
             <Route path="/tenders" component={() => <Redirect to="/opportunities" />} />
             <Route path="/inbox" component={() => <Redirect to="/opportunities" />} />
+            <Route path="/discover" component={() => <Redirect to="/opportunities" />} />
             <Route path="/settings/import" component={() => <Redirect to="/new?mode=import" />} />
             <Route path="/opportunities" component={Opportunities} />
             <Route path="/opportunities/:id" component={OpportunityDetail} />
