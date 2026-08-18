@@ -291,7 +291,7 @@ export default function Intake() {
   return (
     <div className="min-h-screen bg-black text-white">
       {/* Header */}
-      <header className="border-b border-[#1a1a1a] px-6 sticky top-0 bg-black z-10">
+      <header className="border-b border-[#1a1a1a] px-6 fixed inset-x-0 top-0 bg-black z-10">
         <div className="max-w-4xl mx-auto flex items-center justify-between py-3">
           <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-[22px] object-contain object-left" />
           <div className="flex items-center gap-3 min-w-[180px]">
@@ -313,7 +313,7 @@ export default function Intake() {
       </header>
 
       {/* Body */}
-      <main className="max-w-4xl mx-auto w-full px-4 sm:px-6 py-8">
+      <main className="max-w-4xl mx-auto w-full px-4 sm:px-6 pb-8 pt-[57px]">
         {/* Credibility strip */}
         <div className="flex items-center gap-3 mb-8 flex-wrap">
           <span className="text-[11px] text-[#3a3a3a] uppercase tracking-widest shrink-0">Trusted by</span>
