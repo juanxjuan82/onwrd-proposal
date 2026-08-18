@@ -1,0 +1,60 @@
+ONWRD Proposal Generator — Prioritized Fix List
+Reviewed: proposals.onwrdadvisors.com (client intake + internal dashboard) Date: August 14, 2026
+
+
+
+P0 — Breaks the core workflow
+1. "Discover" page 404s
+Where: Main nav, Workflow section — proposals.onwrdadvisors.com/discover
+Problem: Second item in the primary nav leads to a hard 404 ("Did you forget to add the page to the router?").
+Why it matters: This is where the scraped tender feed is supposed to surface — 368 World Bank opportunities, 34 UNDP, 22 CARICOM, 12 Bahamas Government Procurement are sitting in the Sources data with nowhere to be triaged. The scoring engine (Stage 1 disqualifiers + Stage 2 formula, both fully built under Settings → Scoring) has nothing to render into. Right now the only way to act on a scraped opportunity is to manually re-paste its RFP text into "New Proposal" — the automated half of the product is disconnected from the UI.
+Fix: Build/reconnect the Discover route to show scored opportunities (Pursue / Consider / Skip tiers implied by the scoring config) with a one-click "Draft Proposal" action per card.
+
+
+
+P1 — Working, but misleading or silently failing
+2. Google Account status contradicts actual behavior
+Where: Settings → Google Docs
+Problem: "Google Account: Not connected" is displayed, but the Drive Destination Folder ("AI Proposals") is fully configured with a valid folder ID, and all 3 existing proposals have working "Open Google Doc" links.
+Why it matters: Anyone glancing at Settings will assume exports are broken when they're not — or won't trust a status page that's visibly wrong. Suggests either a stale UI state, or the folder write is happening on a service account that isn't the same thing "Google Account" is checking.
+Fix: Audit what Google Account: connected actually checks vs. what authorizes the Drive write. Reconcile so the indicator reflects reality, or split into two clearly-labeled states (e.g., "Personal account" vs. "Drive export service").
+3. Daily Digest is enabled with zero recipients
+Where: Settings → Search Profiles (Daily Digest Email panel)
+Problem: Toggle is ON, scheduled for 6am after the daily crawl, but "No recipients added yet."
+Why it matters: It will run indefinitely and deliver to no one — a silent no-op. No warning state in the UI to catch this.
+Fix: Either add a recipient (quick win) or have the toggle warn/disable itself when recipient list is empty.
+4. Run History doesn't match Source activity
+Where: Settings → Run History vs. Settings → Sources
+Problem: Run History reads "Last 0 crawl runs / No crawl runs yet." Sources simultaneously shows active feeds "last checked about 7 hours ago" with real found-counts (368, 34, 22, 12).
+Why it matters: If a scraper silently breaks, there's no audit trail to diagnose it from — the two panels tell different stories about whether the system is running.
+Fix: Make Run History log every crawl (source, timestamp, result count, pass/fail) so it's the actual source of truth, and have the Sources "last checked" timestamp pull from the same log.
+
+
+
+P2 — Cleanup and trust-building
+5. Four of eight tender sources are stale or disabled
+Where: Settings → Sources
+Problem: Caribbean Development Bank, Caribbean Tourism Organization, EU Caribbean Development Fund, and Inter-American Development Bank are toggled off, last checked 17 days ago, mostly returning 0 results.
+Why it matters: A "Tender Intelligence" feature with half its sources visibly dormant undercuts confidence in the other half. Either these were never fully wired (0 found, even before being turned off) or they've been abandoned.
+Fix: Decide per source — fix the scraper, or remove it from the list. A shorter, fully-live list beats a longer, half-dead one.
+6. Client intake form has no credibility signal
+Where: /intake (public-facing)
+Problem: Clean and functional, but visually anonymous — nothing above the fold signals ONWRD's actual client tier (Heineken, FIFA, Rosewood, IDB, etc.).
+Why it matters: A cold prospect filling this out has no reinforcement they're in the right hands before committing time to an 18-field form.
+Fix: One credibility line or logo strip near the top — doesn't need more than that.
+7. No progress indicator on the intake form
+Where: /intake
+Problem: Four sections, no sticky step-count or progress bar — a scrolling prospect doesn't know how much form remains.
+Why it matters: Time-poor decision-makers (your actual target respondent) are the most likely to abandon a form of unknown length.
+Fix: Sticky progress indicator (e.g. "Section 2 of 4") pinned to the top as they scroll.
+
+
+
+Suggested sequencing
+Fix Discover (P0) — unlocks the whole scraped-opportunity → proposal loop.
+Reconcile Google Account status + Run History logging (P1) — both are trust/diagnostic issues that will compound the longer they're wrong.
+Add a digest recipient (P1) — five-minute fix, immediate value.
+Triage the four dormant sources (P2).
+Intake page polish — credibility strip + progress indicator (P2) — lowest effort, direct conversion impact.
+
+
