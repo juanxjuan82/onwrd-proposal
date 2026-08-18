@@ -83,7 +83,7 @@ function Tile({ label, checked, onToggle, type = "radio" }: {
 }) {
   return (
     <label className={`flex items-center gap-2 rounded border px-3 py-1.5 text-[13px] leading-snug cursor-pointer transition-colors select-none
-      ${checked ? "border-[#0000FF] bg-[#0000FF]/10 text-white font-medium" : "border-[#262626] bg-[#0d0d0d] text-[#777] hover:border-[#0000FF]/50 hover:text-[#ccc]"}`}>
+      ${checked ? "border-[#0000FF] bg-[#0000FF]/10 text-white font-medium" : "border-[#333] bg-[#0d0d0d] text-[#aaa] hover:border-[#0000FF]/50 hover:text-white"}`}>
       <input type={type} className="accent-primary shrink-0 w-3 h-3" checked={checked} onChange={onToggle} />
       <span>{label}</span>
     </label>
@@ -109,16 +109,16 @@ function Checks({ opts, val, set }: { opts: string[]; val: string[]; set: (v: st
 
 function Err({ msg }: { msg?: string }) {
   if (!msg) return null;
-  return <p className="text-[11px] text-destructive mt-1">{msg}</p>;
+  return <p className="text-xs text-destructive mt-1">{msg}</p>;
 }
 
 function Field({ label, req, opt, children }: { label: string; req?: boolean; opt?: boolean; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-1">
-      <span className="text-[11px] font-medium text-[#999] flex items-center gap-1">
+      <span className="text-xs font-medium text-[#bbb] flex items-center gap-1">
         {label}
         {req && <span className="text-destructive">*</span>}
-        {opt && <span className="text-[#555] font-normal">(optional)</span>}
+        {opt && <span className="text-[#888] font-normal">(optional)</span>}
       </span>
       {children}
     </div>
@@ -279,7 +279,7 @@ export default function Intake() {
             <CheckCircle className="w-6 h-6" style={{ color: "#00FFD5" }} />
           </div>
           <h2 className="text-xl font-semibold">Thank you.</h2>
-          <p className="text-[#666] text-sm leading-relaxed">
+          <p className="text-[#aaa] text-sm leading-relaxed">
             We'll be in touch within two business days.{" "}
             <a href="https://onwrdadvisors.com" target="_blank" rel="noopener noreferrer" className="text-white underline underline-offset-2">onwrdadvisors.com</a>
           </p>
@@ -295,7 +295,7 @@ export default function Intake() {
         <div className="max-w-4xl mx-auto flex items-center justify-between py-3">
           <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-[22px] object-contain object-left" />
           <div className="flex items-center gap-3 min-w-[180px]">
-            <span className="text-[11px] text-[#444] whitespace-nowrap">
+            <span className="text-[11px] text-[#aaa] whitespace-nowrap">
               {SECTION_TITLES[activeSection - 1]}
             </span>
             <div className="flex gap-1">
@@ -303,11 +303,11 @@ export default function Intake() {
                 <div
                   key={i}
                   className="h-1 w-6 rounded-full transition-colors duration-300"
-                  style={{ background: i < activeSection ? "#0000FF" : "#1e1e1e" }}
+                  style={{ background: i < activeSection ? "#0000FF" : "#333" }}
                 />
               ))}
             </div>
-            <span className="text-[11px] text-[#444] whitespace-nowrap">{activeSection}/4</span>
+            <span className="text-[11px] text-[#aaa] whitespace-nowrap">{activeSection}/4</span>
           </div>
         </div>
       </header>
@@ -316,16 +316,16 @@ export default function Intake() {
       <main className="max-w-4xl mx-auto w-full px-4 sm:px-6 pb-8 pt-[57px]">
         {/* Credibility strip */}
         <div className="flex items-center gap-3 mb-8 flex-wrap">
-          <span className="text-[11px] text-[#3a3a3a] uppercase tracking-widest shrink-0">Trusted by</span>
-          <div className="h-px flex-1 bg-[#1a1a1a]" />
+          <span className="text-[11px] text-[#777] uppercase tracking-widest shrink-0">Trusted by</span>
+          <div className="h-px flex-1 bg-[#333]" />
           {CLIENTS.map(name => (
-            <span key={name} className="text-[11px] font-semibold tracking-wider text-[#444] uppercase">{name}</span>
+            <span key={name} className="text-[11px] font-semibold tracking-wider text-[#999] uppercase">{name}</span>
           ))}
         </div>
 
         <div className="mb-8">
           <h1 className="text-xl font-semibold text-white mb-1">Tell us about your project</h1>
-          <p className="text-[13px] text-[#555]">Fill in the sections below and we'll prepare a tailored proposal.</p>
+          <p className="text-sm text-[#aaa]">Fill in the sections below and we'll prepare a tailored proposal.</p>
         </div>
 
         <form onSubmit={form.handleSubmit(submit)} noValidate className="space-y-5">
@@ -372,7 +372,7 @@ export default function Intake() {
                           className={`flex items-center gap-2 rounded border px-3 py-2 text-[13px] transition-colors flex-1 justify-center min-w-0
                             ${field.value === val
                               ? "border-[#0000FF] bg-[#0000FF]/10 text-white font-medium"
-                              : "border-[#262626] bg-[#0d0d0d] text-[#777] hover:border-[#0000FF]/50 hover:text-[#ccc]"}`}
+                              : "border-[#333] bg-[#0d0d0d] text-[#aaa] hover:border-[#0000FF]/50 hover:text-white"}`}
                         >
                           {icon}
                           <span className="truncate">{label}</span>
@@ -383,7 +383,7 @@ export default function Intake() {
                 </Field>
               </div>
               {autosaved && (
-                <p className="text-[11px] text-[#555] flex items-center gap-1">
+                <p className="text-xs text-[#999] flex items-center gap-1">
                   <CheckCircle className="w-3 h-3 text-[#00FFD5]" />
                   Contact details saved
                 </p>
@@ -450,7 +450,7 @@ export default function Intake() {
             <div className="space-y-4">
               <Field label="What's the challenge?" req>
                 <div className="mt-1 space-y-1.5">
-                  <p className="text-[11px] text-[#555]">Select all that apply</p>
+                  <p className="text-xs text-[#999]">Select all that apply</p>
                   <Controller control={form.control} name="problems" render={({ field }) => (
                     <Checks opts={PROBLEMS} val={field.value} set={field.onChange} />
                   )} />
@@ -472,7 +472,7 @@ export default function Intake() {
 
               <Field label="Where do you need help?" req>
                 <div className="mt-1 space-y-1.5">
-                  <p className="text-[11px] text-[#555]">Select all that apply</p>
+                  <p className="text-xs text-[#999]">Select all that apply</p>
                   <Controller control={form.control} name="support" render={({ field }) => (
                     <Checks opts={SUPPORT} val={field.value} set={field.onChange} />
                   )} />
@@ -508,12 +508,12 @@ export default function Intake() {
                   />
                   <div className="flex justify-between items-start">
                     <Err msg={errors.projectBrief?.message} />
-                    <span className="text-[11px] text-[#444] ml-auto">{form.watch("projectBrief").length} chars</span>
+                    <span className="text-xs text-[#777] ml-auto">{form.watch("projectBrief").length} chars</span>
                   </div>
 
                   {/* File upload area */}
-                  <div className="border border-dashed border-[#2a2a2a] rounded-lg p-4">
-                    <p className="text-[11px] text-[#555] mb-2">
+                  <div className="border border-dashed border-[#333] rounded-lg p-4">
+                    <p className="text-xs text-[#999] mb-2">
                       Have an existing brief? Upload your RFP or project document instead of (or alongside) typing.
                     </p>
                     {briefFile ? (
@@ -521,12 +521,12 @@ export default function Intake() {
                         <FileText className="w-4 h-4 text-[#0000FF] shrink-0" />
                         <div className="min-w-0 flex-1">
                           <p className="text-[13px] text-white truncate">{briefFile.name}</p>
-                          <p className="text-[11px] text-[#555]">{formatBytes(briefFile.size)}</p>
+                          <p className="text-xs text-[#888]">{formatBytes(briefFile.size)}</p>
                         </div>
                         <button
                           type="button"
                           onClick={() => { setBriefFile(null); if (fileInputRef.current) fileInputRef.current.value = ""; }}
-                          className="text-[#555] hover:text-white transition-colors shrink-0"
+                          className="text-[#888] hover:text-white transition-colors shrink-0"
                         >
                           <X className="w-4 h-4" />
                         </button>
@@ -535,11 +535,11 @@ export default function Intake() {
                       <button
                         type="button"
                         onClick={() => fileInputRef.current?.click()}
-                        className="flex items-center gap-2 text-[13px] text-[#666] hover:text-white transition-colors"
+                        className="flex items-center gap-2 text-[13px] text-[#aaa] hover:text-white transition-colors"
                       >
                         <UploadCloud className="w-4 h-4 shrink-0" />
                         <span>Choose file</span>
-                        <span className="text-[#444]">· PDF, DOCX, TXT · Max 20 MB</span>
+                        <span className="text-[#777]">· PDF, DOCX, TXT · Max 20 MB</span>
                       </button>
                     )}
                     <input
@@ -558,7 +558,7 @@ export default function Intake() {
 
               <Field label="How are you thinking about investment?" opt>
                 <div className="mt-1">
-                  <p className="text-[11px] text-[#555] mb-1.5">Optional — helps us tailor our thinking</p>
+                  <p className="text-xs text-[#999] mb-1.5">Optional — helps us tailor our thinking</p>
                   <Controller control={form.control} name="investment" render={({ field }) => (
                     <Radio opts={INVESTMENT} val={field.value ?? ""} set={field.onChange} cols={1} />
                   )} />
@@ -578,7 +578,7 @@ export default function Intake() {
 
           {/* Submit */}
           <div className="flex flex-col items-end gap-2 pt-1 pb-8">
-            {submitErr && <p className="text-[11px] text-destructive self-start">{submitErr}</p>}
+            {submitErr && <p className="text-xs text-destructive self-start">{submitErr}</p>}
             <Button type="submit" size="sm" className="h-9 px-8 text-[13px]" disabled={busy || isSubmitting}>
               {busy ? "Submitting…" : "Submit"}
             </Button>
