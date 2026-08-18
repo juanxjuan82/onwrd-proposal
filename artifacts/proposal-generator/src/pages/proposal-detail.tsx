@@ -690,12 +690,22 @@ export default function ProposalDetail() {
           className="mb-6 rounded-lg border border-red-900 bg-red-900/15 px-4 py-3 text-sm text-red-300"
           data-testid="banner-review-required"
         >
-          <p className="font-medium mb-1">Review required — flagged language detected</p>
-          <p className="text-red-400/90">
-            The generated content contains phrases ONWRD does not commit to (
-            {((proposal as { flaggedPhrases?: string[] }).flaggedPhrases ?? []).join(", ")}
-            ). Nothing was removed automatically — review and edit before approving or exporting.
-          </p>
+          <p className="font-medium mb-1">Review required</p>
+          {((proposal as { flaggedPhrases?: string[] }).flaggedPhrases ?? []).length > 0 && (
+            <p className="text-red-400/90">
+              The generated content contains phrases ONWRD does not commit to (
+              {((proposal as { flaggedPhrases?: string[] }).flaggedPhrases ?? []).join(", ")}
+              ). Nothing was removed automatically — review and edit before approving or exporting.
+            </p>
+          )}
+          {((proposal as { unverifiedCredentials?: string[] }).unverifiedCredentials ?? []).length > 0 && (
+            <p className="text-red-400/90" data-testid="text-unverified-credentials">
+              The Case Studies section cites organisations that are not in the approved Knowledge
+              Library ({((proposal as { unverifiedCredentials?: string[] }).unverifiedCredentials ?? []).join(", ")}
+              ). Sharing and export are blocked until these are removed or replaced with approved
+              case studies.
+            </p>
+          )}
         </div>
       )}
 

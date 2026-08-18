@@ -8,7 +8,12 @@ import { proposalsTable, intakeDraftsTable, tendersTable } from "@workspace/db";
 import { eq, and, lt, sql } from "drizzle-orm";
 import { invokeAI } from "../lib/ai-gateway.js";
 import { applyDeterministicScore } from "../lib/apply-deterministic-score.js";
-import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
+import {
+  getApprovedKnowledge,
+  buildKnowledgeBlock,
+  getCaseStudyTitles,
+  scanDocumentCredentials,
+} from "../lib/approved-knowledge.js";
 import {
   wrapUntrusted,
   UNTRUSTED_CONTENT_POLICY,
@@ -422,6 +427,15 @@ router.post("/proposals", async (req, res) => {
   }
 
   try {
+    // Layer 2: banned-phrase scan on stored content (no stripping)
+    const flaggedPhrases = scanBannedPhrases(parsed.data.proposalContent);
+    // Credential gate: scan the Case Studies portion against the live
+    // approved case-study allowlist (task #64)
+    const unverifiedCredentials = scanDocumentCredentials(
+      parsed.data.proposalContent,
+      await getCaseStudyTitles(),
+      [parsed.data.clientName],
+    );
     const [proposal] = await db
       .insert(proposalsTable)
       .values({
@@ -429,9 +443,9 @@ router.post("/proposals", async (req, res) => {
         industry: parsed.data.industry,
         briefText: parsed.data.briefText,
         proposalContent: parsed.data.proposalContent,
-        // Layer 2: banned-phrase scan on stored content (no stripping)
-        flaggedPhrases: scanBannedPhrases(parsed.data.proposalContent),
-        reviewRequired: scanBannedPhrases(parsed.data.proposalContent).length > 0,
+        flaggedPhrases,
+        unverifiedCredentials,
+        reviewRequired: flaggedPhrases.length > 0 || unverifiedCredentials.length > 0,
         status: "draft",
       })
       .returning();
@@ -588,8 +602,16 @@ router.put("/proposals/:id", async (req, res) => {
       updateData.dirtySince = new Date();
       // Layer 2: re-scan on every content mutation so flags never go stale
       const flaggedPhrases = scanBannedPhrases(bodyParsed.data.proposalContent);
+      // Credential gate: re-scan cited case studies on whole-document edits
+      const clientName = bodyParsed.data.clientName ?? existing.clientName;
+      const unverifiedCredentials = scanDocumentCredentials(
+        bodyParsed.data.proposalContent,
+        await getCaseStudyTitles(),
+        clientName ? [clientName] : [],
+      );
       updateData.flaggedPhrases = flaggedPhrases;
-      updateData.reviewRequired = flaggedPhrases.length > 0;
+      updateData.unverifiedCredentials = unverifiedCredentials;
+      updateData.reviewRequired = flaggedPhrases.length > 0 || unverifiedCredentials.length > 0;
     }
     if (bodyParsed.data.status !== undefined)
       updateData.status = bodyParsed.data.status;
@@ -726,6 +748,8 @@ router.post("/proposals/parse-brief", async (req, res) => {
   const now = new Date();
 
   try {
+    const approvedDocs = await getApprovedKnowledge();
+    const knowledgeBlock = buildKnowledgeBlock(approvedDocs);
     const { content } = await invokeAI({
       feature: "proposal_generation",
       messages: [
@@ -743,13 +767,13 @@ RULES:
 - The Deliverables Register (section 6) must list at least 6 deliverables with purpose, owner, format, and review notes.
 - The Investment Table must include estimated hour ranges and realistic USD figures scaled to the scope.
 - Risks and Mitigation must include at least 4 risks.
-- Case Studies section MUST draw from the real ONWRD past work supplied below — do NOT invent client names, projects, or outcomes.
+- Case Studies section may cite ONLY the approved case studies on the allowlist below, by their exact titles — do NOT invent client names, projects, or outcomes. If none is relevant, write [NEEDS ONWRD INPUT: relevant case study].
 - Dates to use: Today = ${formatDate(now)} | Proposal due = ${formatDate(addDays(now, 10))} | Info due from client = ${formatDate(addDays(now, 7))} | Kickoff = infer from brief or use ${formatDate(addDays(now, 21))} | Midpoint = infer | Launch = infer.
 - Never promise guarantees, refunds, free work, unlimited revisions, or specific success rates.
 
 ${UNTRUSTED_CONTENT_POLICY}
 
-${ONWRD_CASE_STUDIES}
+${knowledgeBlock}
 
 TEMPLATE TO POPULATE:
 

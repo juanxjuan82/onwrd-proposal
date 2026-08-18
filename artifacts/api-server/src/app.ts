@@ -79,7 +79,8 @@ export const dbReady: Promise<void> = pool
     pool.query(
       `ALTER TABLE proposals
          ADD COLUMN IF NOT EXISTS review_required boolean NOT NULL DEFAULT false,
-         ADD COLUMN IF NOT EXISTS flagged_phrases text[] NOT NULL DEFAULT '{}'`,
+         ADD COLUMN IF NOT EXISTS flagged_phrases text[] NOT NULL DEFAULT '{}',
+         ADD COLUMN IF NOT EXISTS unverified_credentials text[] NOT NULL DEFAULT '{}'`,
     ),
   )
   .then(() =>

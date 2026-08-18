@@ -27,3 +27,4 @@
 - [Replit Auth + deny-by-default guard](replit-auth-setup.md) — app auth wiring, allowlist, test opt-in flags, partial-unique-index and api-zod barrel pitfalls
 - [World Bank adapter deadline bug](world-bank-deadline.md) — submission_deadline_date is the bid deadline; submission_date is notice publication date. fq country filter silently ignored — use q text search for targeting.
 - [Blocked crawler sources](blocked-crawler-sources.md) — IDB/CDB/CTO/EU Caribbean (ids 3,4,6,8) deactivated; TED Europa also WAF-blocked; Caribbean gov portals all timeout from Replit.
+- [Credential scanner heuristics](credential-scanner.md) — invented-client gate: punctuation-aware extraction, service-phrase filter, case_study-only allowlist, one-directional matching

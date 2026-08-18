@@ -10,6 +10,82 @@ import {
 import { eq, and, sql } from "drizzle-orm";
 import { invokeAI } from "../lib/ai-gateway.js";
 import { wrapUntrusted, UNTRUSTED_CONTENT_POLICY, scanBannedPhrases } from "../lib/prompt-safety.js";
+import { getApprovedKnowledge, scanUnverifiedCredentials, scanDocumentCredentials } from "../lib/approved-knowledge.js";
+import { tendersTable } from "@workspace/db";
+
+/**
+ * Recompute the unverified-credentials list for a proposal from its
+ * case_studies section content against the live approved-title allowlist.
+ */
+async function computeUnverifiedForProposal(
+  sections: Array<{ sectionKey: string; content: string | null }>,
+  proposal: { clientName: string | null; tenderId: number | null },
+): Promise<string[]> {
+  const caseStudies = sections.find((s) => s.sectionKey === "case_studies");
+  if (!caseStudies?.content) return [];
+  // Only case-study documents count as citable client credentials.
+  const approvedTitles = (await getApprovedKnowledge())
+    .filter((d) => d.docType === "case_study")
+    .map((d) => d.title);
+  const extraAllowed: string[] = [];
+  if (proposal.clientName) extraAllowed.push(proposal.clientName);
+  if (proposal.tenderId) {
+    const [t] = await db
+      .select({ title: tendersTable.title, agency: tendersTable.agency })
+      .from(tendersTable)
+      .where(eq(tendersTable.id, proposal.tenderId));
+    if (t) extraAllowed.push(t.title, t.agency);
+  }
+  return scanUnverifiedCredentials(caseStudies.content, approvedTitles, extraAllowed);
+}
+
+/**
+ * Live credential rescan at approval/export time: re-derive the cited
+ * credentials from the CURRENT content against the CURRENT approved
+ * allowlist and persist the result. The stored flag alone is not trusted —
+ * a knowledge document may have been unapproved after generation.
+ */
+async function rescanAndPersistCredentials(proposal: {
+  id: number;
+  clientName: string | null;
+  tenderId: number | null;
+  proposalContent: string | null;
+}): Promise<string[]> {
+  const sections = await db
+    .select({ sectionKey: proposalSectionsTable.sectionKey, content: proposalSectionsTable.content })
+    .from(proposalSectionsTable)
+    .where(eq(proposalSectionsTable.proposalId, proposal.id));
+
+  let unverified: string[];
+  if (sections.some((s) => s.sectionKey === "case_studies")) {
+    unverified = await computeUnverifiedForProposal(sections, proposal);
+  } else {
+    // Whole-document proposal (brief-intake path): scan the extracted
+    // Case Studies portion of the stored content.
+    const titles = (await getApprovedKnowledge())
+      .filter((d) => d.docType === "case_study")
+      .map((d) => d.title);
+    const extraAllowed: string[] = proposal.clientName ? [proposal.clientName] : [];
+    if (proposal.tenderId) {
+      const [t] = await db
+        .select({ title: tendersTable.title, agency: tendersTable.agency })
+        .from(tendersTable)
+        .where(eq(tendersTable.id, proposal.tenderId));
+      if (t) extraAllowed.push(t.title, t.agency);
+    }
+    unverified = scanDocumentCredentials(proposal.proposalContent ?? "", titles, extraAllowed);
+  }
+
+  await db
+    .update(proposalsTable)
+    .set({
+      unverifiedCredentials: unverified,
+      reviewRequired: sql`(cardinality(flagged_phrases) > 0 OR ${unverified.length > 0})`,
+      updatedAt: new Date(),
+    })
+    .where(eq(proposalsTable.id, proposal.id));
+  return unverified;
+}
 import { appendContentWithLogo, createGoogleDocInFolder, resetIncompleteDoc } from "../lib/google-docs.js";
 import { getValidGoogleAccessToken, GoogleAuthError } from "../lib/google-auth.js";
 import { googleDriveConfigTable } from "@workspace/db";
@@ -62,6 +138,8 @@ router.put("/proposals/:id/sections/:sectionId", async (req, res) => {
       syncStatus:   proposalsTable.syncStatus,
       googleFileId: proposalsTable.googleFileId,
       googleDocUrl: proposalsTable.googleDocUrl,
+      clientName:   proposalsTable.clientName,
+      tenderId:     proposalsTable.tenderId,
     })
     .from(proposalsTable)
     .where(eq(proposalsTable.id, proposalId));
@@ -116,12 +194,14 @@ router.put("/proposals/:id/sections/:sectionId", async (req, res) => {
 
         const assembled = assembleProposalFromSections(allSections);
         const flaggedPhrases = scanBannedPhrases(assembled);
+        const unverifiedCredentials = await computeUnverifiedForProposal(allSections, proposal);
         await tx
           .update(proposalsTable)
           .set({
             proposalContent: assembled,
             flaggedPhrases,
-            reviewRequired: flaggedPhrases.length > 0,
+            unverifiedCredentials,
+            reviewRequired: flaggedPhrases.length > 0 || unverifiedCredentials.length > 0,
             dirtySince: new Date(),
             updatedAt: new Date(),
           })
@@ -267,6 +347,21 @@ router.post("/proposals/:id/approve-for-export", async (req, res) => {
     return;
   }
 
+  // Hard block (no override, before any other guard): fabricated credentials
+  // must be fixed, not waived. Live rescan against the CURRENT approved
+  // allowlist — the persisted flag alone is stale if a knowledge document
+  // was unapproved after generation.
+  const unverified = await rescanAndPersistCredentials(proposal);
+  if (unverified.length > 0) {
+    res.status(422).json({
+      error: "Export blocked: the Case Studies section cites organisations that are not in the approved Knowledge Library.",
+      code: "unverified_credentials",
+      unverifiedCredentials: unverified,
+      hint: "Edit the Case Studies and Credentials section to cite only approved case studies (or remove the unverified names).",
+    });
+    return;
+  }
+
   // ── Immutability guard ─────────────────────────────────────────────────
   const blocked = googleDocCanonicalPayload(proposal);
   if (blocked) {
@@ -364,6 +459,22 @@ router.post("/proposals/:id/export", async (req, res) => {
     proposal.syncStatus !== "pending_first_write" &&
     proposal.syncStatus !== "handoff_in_progress" &&
     !isHandoffComplete;
+
+  // ── Credential gate: block share/export while unverified credentials exist ─
+  // Evaluated BEFORE the completed/legacy early returns: a flagged proposal
+  // must get the 422 hard block in every state, never a doc link. Rescans
+  // live against the CURRENT approved allowlist so later unapprovals of a
+  // knowledge document still block.
+  const unverifiedCreds = await rescanAndPersistCredentials(proposal);
+  if (unverifiedCreds.length > 0) {
+    res.status(422).json({
+      error: "Sharing blocked: the Case Studies section cites organisations that are not in the approved Knowledge Library.",
+      code: "unverified_credentials",
+      unverifiedCredentials: unverifiedCreds,
+      hint: "Edit the Case Studies and Credentials section to cite only approved case studies before sharing.",
+    });
+    return;
+  }
 
   if (isHandoffComplete || isLegacyLinked) {
     const docUrl =
@@ -697,12 +808,14 @@ ${UNTRUSTED_CONTENT_POLICY}`,
 
         const assembled = assembleProposalFromSections(allSections);
         const flaggedPhrases = scanBannedPhrases(assembled);
+        const unverifiedCredentials = await computeUnverifiedForProposal(allSections, proposal);
         await tx
           .update(proposalsTable)
           .set({
             proposalContent: assembled,
             flaggedPhrases,
-            reviewRequired: flaggedPhrases.length > 0,
+            unverifiedCredentials,
+            reviewRequired: flaggedPhrases.length > 0 || unverifiedCredentials.length > 0,
             dirtySince: new Date(),
             updatedAt: new Date(),
           })

@@ -11,6 +11,7 @@ export const proposalsTable = pgTable("proposals", {
   proposalContent: text("proposal_content").notNull(),
   reviewRequired: boolean("review_required").notNull().default(false),
   flaggedPhrases: text("flagged_phrases").array().notNull().default([]),
+  unverifiedCredentials: text("unverified_credentials").array().notNull().default([]),
   googleDocUrl: text("google_doc_url"),
   googleFileId: text("google_file_id"),
   driveFolderId: text("drive_folder_id"),

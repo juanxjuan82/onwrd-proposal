@@ -21,7 +21,7 @@ import {
   computeInjectionWarning,
   scanBannedPhrases,
 } from "../lib/prompt-safety.js";
-import { ONWRD_CASE_STUDIES } from "../lib/onwrd-case-studies.js";
+import { getApprovedKnowledge, buildKnowledgeBlock } from "../lib/approved-knowledge.js";
 import { applyDeterministicScore } from "../lib/apply-deterministic-score.js";
 import {
   SECTION_DEFINITIONS,
@@ -228,6 +228,7 @@ async function runGenerateStrategy(tenderId: number, cancelSignal?: AbortSignal)
 
   let raw: string;
   try {
+    const knowledgeBlock = buildKnowledgeBlock(await getApprovedKnowledge());
     const stratResult = await invokeAI({
       feature: "strategy_generation",
       messages: [
@@ -238,13 +239,13 @@ async function runGenerateStrategy(tenderId: number, cancelSignal?: AbortSignal)
 Return JSON with:
 - positioning: string (1-2 sentences: how ONWRD should position itself for this specific opportunity — what unique angle to take)
 - winThemes: string[] (exactly 3-4 specific themes that should run throughout the proposal, e.g. "Local Caribbean expertise", "Measurable community impact")
-- recommendedCaseStudies: string[] (2-3 specific ONWRD case study names from the portfolio below that are most relevant to cite)
+- recommendedCaseStudies: string[] (2-3 approved case-study titles from the allowlist below that are most relevant to cite — exact titles only; return [] if none is relevant)
 - risks: string[] (2-4 specific risks the proposal must proactively address)
 - messagingGuidance: string (1-2 sentences on tone, emphasis, and what the evaluators likely care about most)
 
 ${UNTRUSTED_CONTENT_POLICY}
 
-${ONWRD_CASE_STUDIES}`,
+${knowledgeBlock}`,
         },
         {
           role: "user",
@@ -1495,9 +1496,10 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
           industry:        tender.category,
           briefText,
           proposalContent: "Generating proposal sections — please refresh in ~30 seconds.",
-          // Layer 2: clear stale flags — the placeholder is clean content;
-          // the post-generation scan re-establishes flags for the new draft.
+          // Layer 2 + credential gate: clear stale flags — the placeholder is
+          // clean content; the post-generation scan re-establishes flags.
           flaggedPhrases:  [],
+          unverifiedCredentials: [],
           reviewRequired:  false,
           status:          "proposal_drafting",
           updatedAt:       now,
@@ -1582,6 +1584,9 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
         .set({
           proposalContent: failureContent,
           flaggedPhrases:  failureFlags,
+          // Failure message replaces the content — recompute the credential
+          // scan on what is actually stored (brief text may name orgs).
+          unverifiedCredentials: [],
           reviewRequired:  failureFlags.length > 0,
           status:          "draft",
           updatedAt:       new Date(),

@@ -200,7 +200,15 @@ describe("prompt safety (task #63)", () => {
             captured = params;
             return {
               content: JSON.stringify({
-                sections: SECTION_DEFINITIONS.map((s) => ({ key: s.key, content: `Clean ${s.title} content.` })),
+                // case_studies uses the sanctioned placeholder so the task-#64
+                // credential scanner (which flags org names not on the approved
+                // allowlist) does not flag this synthetic fixture text.
+                sections: SECTION_DEFINITIONS.map((s) => ({
+                  key: s.key,
+                  content: s.key === "case_studies"
+                    ? "[NEEDS ONWRD INPUT: relevant case study]"
+                    : `Clean ${s.title} content.`,
+                })),
               }),
               model: "test-model",
               usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 },
@@ -436,16 +444,17 @@ describe("prompt safety (task #63)", () => {
         briefText: "brief",
         proposalContent: "Old content with a guarantee of a refund.",
         flaggedPhrases: ["guarantee", "refund"],
+        unverifiedCredentials: ["Globex Corporation"],
         reviewRequired: true,
         status: "draft",
         tenderId: t.id,
       }).returning({ id: pTable.id });
       try {
-        let sampled: { reviewRequired: boolean; flaggedPhrases: string[] | null } | null = null;
+        let sampled: { reviewRequired: boolean; flaggedPhrases: string[] | null; unverifiedCredentials: string[] | null } | null = null;
         __setInvokeAISpy(async () => {
           // Mid-generation: the claim transaction has committed the placeholder.
           const [row] = await db
-            .select({ reviewRequired: pTable.reviewRequired, flaggedPhrases: pTable.flaggedPhrases })
+            .select({ reviewRequired: pTable.reviewRequired, flaggedPhrases: pTable.flaggedPhrases, unverifiedCredentials: pTable.unverifiedCredentials })
             .from(pTable).where(eq(pTable.id, p.id));
           sampled = row;
           return {
@@ -462,8 +471,9 @@ describe("prompt safety (task #63)", () => {
         assert.equal(res.status, 200, `generate-proposal failed: ${res.status}`);
         // Wait for the background pipeline to invoke the spy
         for (let i = 0; i < 50 && !sampled; i++) await new Promise((r) => setTimeout(r, 100));
-        const observed = sampled as { reviewRequired: boolean; flaggedPhrases: string[] | null } | null;
+        const observed = sampled as { reviewRequired: boolean; flaggedPhrases: string[] | null; unverifiedCredentials: string[] | null } | null;
         assert.ok(observed, "AI spy was never invoked");
+        assert.deepEqual(observed!.unverifiedCredentials, [], "claim-time placeholder must clear stale unverifiedCredentials");
         assert.equal(observed.reviewRequired, false, "claim-time placeholder must clear reviewRequired");
         assert.deepEqual(observed.flaggedPhrases ?? [], [], "claim-time placeholder must clear flaggedPhrases");
       } finally {
