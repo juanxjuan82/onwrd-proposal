@@ -1,6 +1,9 @@
 import { useEffect } from "react";
 import { Switch, Route, Router as WouterRouter, useParams, useLocation } from "wouter";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, QueryCache, MutationCache } from "@tanstack/react-query";
+import { AuthGate, notifySessionExpired, installUnauthorizedInterceptor } from "@/components/auth-gate";
+
+installUnauthorizedInterceptor();
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
@@ -20,7 +23,27 @@ import OpportunityInbox from "./pages/opportunity-inbox";
 import SettingsSources from "./pages/settings-sources";
 import SettingsImport from "./pages/settings-import";
 
-const queryClient = new QueryClient();
+function isUnauthorized(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    (error as { status?: unknown }).status === 401
+  );
+}
+
+const queryClient = new QueryClient({
+  queryCache: new QueryCache({
+    onError: (error) => {
+      if (isUnauthorized(error)) notifySessionExpired();
+    },
+  }),
+  mutationCache: new MutationCache({
+    onError: (error) => {
+      if (isUnauthorized(error)) notifySessionExpired();
+    },
+  }),
+});
 
 // Generic redirect for legacy URL paths
 function Redirect({ to }: { to: string }) {
@@ -45,8 +68,9 @@ function Router() {
       {/* Public client-facing route — no admin sidebar */}
       <Route path="/intake" component={Intake} />
 
-      {/* Admin routes — wrapped in MainLayout with sidebar */}
+      {/* Admin routes — auth required, wrapped in MainLayout with sidebar */}
       <Route>
+        <AuthGate>
         <MainLayout>
           <Switch>
             <Route path="/" component={() => <Redirect to="/proposals" />} />
@@ -67,6 +91,7 @@ function Router() {
             <Route component={NotFound} />
           </Switch>
         </MainLayout>
+        </AuthGate>
       </Route>
     </Switch>
   );

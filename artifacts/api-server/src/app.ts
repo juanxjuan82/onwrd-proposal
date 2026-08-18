@@ -1,7 +1,9 @@
 import express, { type Express } from "express";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import pinoHttp from "pino-http";
 import session from "express-session";
+import { authMiddleware } from "./middlewares/authMiddleware";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "@workspace/db";
 import router from "./routes";
@@ -48,6 +50,43 @@ export const dbReady: Promise<void> = pool
     ),
   )
   .then(() => pool.query(`CREATE INDEX IF NOT EXISTS IDX_session_expire ON session (expire)`))
+  // ── Replit Auth tables (app authentication) ──────────────────────────────
+  .then(() =>
+    pool.query(
+      `CREATE TABLE IF NOT EXISTS sessions (
+        sid varchar PRIMARY KEY,
+        sess jsonb NOT NULL,
+        expire timestamp NOT NULL
+      )`,
+    ),
+  )
+  .then(() => pool.query(`CREATE INDEX IF NOT EXISTS "IDX_sessions_expire" ON sessions (expire)`))
+  .then(() =>
+    pool.query(
+      `CREATE TABLE IF NOT EXISTS users (
+        id varchar PRIMARY KEY DEFAULT gen_random_uuid(),
+        email varchar UNIQUE,
+        first_name varchar,
+        last_name varchar,
+        profile_image_url varchar,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      )`,
+    ),
+  )
+  // intake_drafts upsert relies on ON CONFLICT (submission_key), which needs a
+  // full (non-partial) unique constraint.
+  .then(() =>
+    pool.query(
+      `DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint WHERE conname = 'intake_drafts_submission_key_unique'
+        ) THEN
+          ALTER TABLE intake_drafts ADD CONSTRAINT intake_drafts_submission_key_unique UNIQUE (submission_key);
+        END IF;
+      END $$`,
+    ),
+  )
   .then(() => undefined)
   .catch((err: unknown) => {
     const reason = err instanceof Error ? err.message : String(err);
@@ -80,7 +119,42 @@ app.use(
     },
   }),
 );
-app.use(cors({ origin: true, credentials: true }));
+/**
+ * Credentialed CORS must never reflect arbitrary origins. Only the app's own
+ * configured public origins are allowed; requests without an Origin header
+ * (same-origin, curl, server-to-server) pass through untouched.
+ */
+export function getAllowedOrigins(): Set<string> {
+  const origins = new Set<string>();
+  for (const d of (process.env.REPLIT_DOMAINS ?? "").split(",")) {
+    const t = d.trim();
+    if (t) origins.add(`https://${t}`);
+  }
+  if (process.env.REPLIT_DEV_DOMAIN) {
+    origins.add(`https://${process.env.REPLIT_DEV_DOMAIN}`);
+  }
+  if (process.env.APP_ORIGIN) origins.add(process.env.APP_ORIGIN);
+  if (!isProd) {
+    origins.add("http://localhost:80");
+    origins.add("http://127.0.0.1:80");
+    origins.add("http://localhost:3000");
+  }
+  return origins;
+}
+
+app.use(
+  cors({
+    credentials: true,
+    origin: (origin, callback) => {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+      callback(null, getAllowedOrigins().has(origin));
+    },
+  }),
+);
+app.use(cookieParser());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
@@ -101,6 +175,8 @@ app.use(
     },
   }),
 );
+
+app.use(authMiddleware);
 
 app.use("/api", router);
 

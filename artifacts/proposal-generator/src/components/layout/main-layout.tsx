@@ -5,6 +5,7 @@ import {
   Upload, FileText, Link2, ChevronDown, X, HelpCircle,
 } from "lucide-react";
 import { WalkthroughWizard, useWalkthrough } from "@/components/walkthrough-wizard";
+import { useAuth } from "@workspace/replit-auth-web";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
@@ -14,6 +15,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
   const [showIntakeModal, setShowIntakeModal] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const tour = useWalkthrough();
+  const { user, logout } = useAuth();
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -177,6 +179,27 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
               How it works
             </button>
           </div>
+
+          {/* Signed-in user */}
+          {user && (
+            <div className="pt-3 mt-2 border-t border-[#1a1a1a] -mx-1 flex items-center justify-between gap-2 px-3">
+              <div className="min-w-0" data-testid="text-user-indicator">
+                <p className="text-xs text-[#ccc] truncate">
+                  {user.firstName || user.email || "Signed in"}
+                </p>
+                {user.firstName && user.email && (
+                  <p className="text-[10px] text-[#555] truncate">{user.email}</p>
+                )}
+              </div>
+              <button
+                onClick={logout}
+                className="text-[10px] text-[#555] hover:text-white transition-colors font-medium shrink-0"
+                data-testid="button-logout"
+              >
+                Log out
+              </button>
+            </div>
+          )}
 
         </div>
       </aside>
