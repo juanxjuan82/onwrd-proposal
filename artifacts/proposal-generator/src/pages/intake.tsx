@@ -77,32 +77,59 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-// ─── Tile components ──────────────────────────────────────────────────────
-function Tile({ label, checked, onToggle, type = "radio" }: {
-  label: string; checked: boolean; onToggle: () => void; type?: "radio"|"checkbox";
+// ─── Selection controls ───────────────────────────────────────────────────
+function SelectBox({ opts, val, set, label, placeholder = "Select…" }: {
+  opts: string[]; val: string; set: (v: string) => void; label: string; placeholder?: string;
 }) {
   return (
-    <label className={`flex items-center gap-2 rounded border px-3 py-1.5 text-[13px] leading-snug cursor-pointer transition-colors select-none
-      ${checked ? "border-[#0000FF] bg-[#0000FF]/10 text-white font-medium" : "border-[#333] bg-[#0d0d0d] text-[#aaa] hover:border-[#0000FF]/50 hover:text-white"}`}>
-      <input type={type} className="accent-primary shrink-0 w-3 h-3" checked={checked} onChange={onToggle} />
-      <span>{label}</span>
-    </label>
-  );
-}
-
-function Radio({ opts, val, set, cols = 2 }: { opts: string[]; val: string; set: (v: string) => void; cols?: 1|2 }) {
-  return (
-    <div className={`grid gap-1.5 ${cols === 1 ? "grid-cols-1" : "grid-cols-1 sm:grid-cols-2"}`}>
-      {opts.map(o => <Tile key={o} label={o} type="radio" checked={val === o} onToggle={() => set(o)} />)}
+    <div className="relative">
+      <select
+        value={val}
+        onChange={(e) => set(e.target.value)}
+        aria-label={label}
+        className={`w-full h-10 appearance-none rounded-md bg-[#0a0a0a] border border-[#2a2a2a] px-3 pr-9 text-sm
+          focus:outline-none focus:border-[#0000FF] transition-colors cursor-pointer
+          ${val ? "text-white" : "text-[#777]"}`}
+      >
+        <option value="" disabled>{placeholder}</option>
+        {opts.map(o => <option key={o} value={o} className="bg-[#111] text-white">{o}</option>)}
+      </select>
+      <svg className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#777]" viewBox="0 0 16 16" fill="none">
+        <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
     </div>
   );
 }
 
-function Checks({ opts, val, set }: { opts: string[]; val: string[]; set: (v: string[]) => void }) {
+function Pill({ label, checked, onToggle }: { label: string; checked: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={checked}
+      onClick={onToggle}
+      className={`rounded-full border px-4 py-2 text-[13px] leading-snug transition-colors select-none text-left
+        ${checked
+          ? "border-[#0000FF] bg-[#0000FF] text-white font-medium"
+          : "border-[#333] bg-transparent text-[#aaa] hover:border-[#0000FF]/60 hover:text-white"}`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function Pills({ opts, val, set }: { opts: string[]; val: string; set: (v: string) => void }) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {opts.map(o => <Pill key={o} label={o} checked={val === o} onToggle={() => set(o === val ? "" : o)} />)}
+    </div>
+  );
+}
+
+function Chips({ opts, val, set }: { opts: string[]; val: string[]; set: (v: string[]) => void }) {
   const toggle = (o: string) => set(val.includes(o) ? val.filter(x => x !== o) : [...val, o]);
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-      {opts.map(o => <Tile key={o} label={o} type="checkbox" checked={val.includes(o)} onToggle={() => toggle(o)} />)}
+    <div className="flex flex-wrap gap-2">
+      {opts.map(o => <Pill key={o} label={o} checked={val.includes(o)} onToggle={() => toggle(o)} />)}
     </div>
   );
 }
@@ -114,11 +141,11 @@ function Err({ msg }: { msg?: string }) {
 
 function Field({ label, req, opt, children }: { label: string; req?: boolean; opt?: boolean; children: React.ReactNode }) {
   return (
-    <div className="flex flex-col gap-1">
-      <span className="text-xs font-medium text-[#bbb] flex items-center gap-1">
+    <div className="flex flex-col gap-2">
+      <span className="text-sm font-medium text-[#ccc] flex items-center gap-1.5">
         {label}
         {req && <span className="text-destructive">*</span>}
-        {opt && <span className="text-[#888] font-normal">(optional)</span>}
+        {opt && <span className="text-[#888] font-normal text-xs">(optional)</span>}
       </span>
       {children}
     </div>
@@ -126,18 +153,15 @@ function Field({ label, req, opt, children }: { label: string; req?: boolean; op
 }
 
 // ─── Section card ─────────────────────────────────────────────────────────
-function Section({ num, title, children }: { num: number; title: string; children: React.ReactNode }) {
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <Card className="bg-[#0a0a0a] border-[#1e1e1e]">
-      <CardHeader className="pb-3 pt-4 px-6">
-        <CardTitle className="flex items-center gap-3 text-sm font-semibold text-white">
-          <span className="flex items-center justify-center w-6 h-6 rounded-full border border-[#0000FF] text-[#0000FF] text-[11px] font-bold shrink-0">
-            {num}
-          </span>
+    <Card className="bg-[#111] border-transparent shadow-none">
+      <CardHeader className="pb-5 pt-6 px-8">
+        <CardTitle className="text-lg font-semibold text-white tracking-tight">
           {title}
         </CardTitle>
       </CardHeader>
-      <CardContent className="px-6 pb-6">
+      <CardContent className="px-8 pb-8">
         {children}
       </CardContent>
     </Card>
@@ -346,10 +370,10 @@ export default function Intake() {
         <form onSubmit={form.handleSubmit(submit, onInvalid)} noValidate className="space-y-5">
 
           {/* ── Step 1: Contact Details ── */}
-          {step === 1 && <div key="step1" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section num={1} title="Contact Details">
+          {step === 1 && <div key="step1" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section title="Contact Details">
 
-            <div className="space-y-3">
-              <div className="grid grid-cols-2 gap-3 items-start">
+            <div className="space-y-6">
+              <div className="grid grid-cols-2 gap-5 items-start">
                 <Field label="First name" req>
                   <Input className="h-9 text-[13px]" {...form.register("firstName")} />
                   <Err msg={errors.firstName?.message} />
@@ -359,7 +383,7 @@ export default function Intake() {
                   <Err msg={errors.lastName?.message} />
                 </Field>
               </div>
-              <div className="grid grid-cols-2 gap-3 items-start">
+              <div className="grid grid-cols-2 gap-5 items-start">
                 <Field label="Job title" req>
                   <Input className="h-9 text-[13px]" {...form.register("jobTitle")} />
                   <Err msg={errors.jobTitle?.message} />
@@ -369,7 +393,7 @@ export default function Intake() {
                   <Err msg={errors.email?.message} />
                 </Field>
               </div>
-              <div className="grid grid-cols-2 gap-3 items-start">
+              <div className="grid grid-cols-2 gap-5 items-start">
                 <Field label="Phone" opt>
                   <Input className="h-9 text-[13px]" {...form.register("phone")} />
                 </Field>
@@ -407,9 +431,9 @@ export default function Intake() {
           </Section></div>}
 
           {/* ── Step 2: Company & Market ── */}
-          {step === 2 && <div key="step2" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section num={2} title="Company & Market">
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3 items-start">
+          {step === 2 && <div key="step2" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section title="Company & Market">
+            <div className="space-y-6">
+              <div className="grid grid-cols-2 gap-5 items-start">
                 <Field label="Organisation name" req>
                   <Input className="h-9 text-[13px]" {...form.register("orgName")} />
                   <Err msg={errors.orgName?.message} />
@@ -419,55 +443,51 @@ export default function Intake() {
                 </Field>
               </div>
 
-              <Field label="How did you find us?" req>
-                <div className="mt-1 space-y-1.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 items-start">
+                <Field label="How did you find us?" req>
                   <Controller control={form.control} name="hearAbout" render={({ field }) => (
-                    <Radio opts={HEAR} val={field.value} set={field.onChange} />
+                    <SelectBox opts={HEAR} val={field.value} set={field.onChange} label="How did you find us?" />
                   )} />
                   <Err msg={errors.hearAbout?.message} />
                   {hearAbout === "Other" && (
-                    <Input className="h-9 text-[13px] mt-1" placeholder="Please specify…" {...form.register("hearAboutOther")} />
+                    <Input className="h-9 text-[13px]" placeholder="Please specify…" {...form.register("hearAboutOther")} />
                   )}
                   <Err msg={errors.hearAboutOther?.message} />
-                </div>
-              </Field>
+                </Field>
 
-              <Field label="Industry" req>
-                <div className="mt-1 space-y-1.5">
+                <Field label="Industry" req>
                   <Controller control={form.control} name="industry" render={({ field }) => (
-                    <Radio opts={INDUSTRY} val={field.value} set={field.onChange} />
+                    <SelectBox opts={INDUSTRY} val={field.value} set={field.onChange} label="Industry" />
                   )} />
                   <Err msg={errors.industry?.message} />
                   {industry === "Other" && (
-                    <Input className="h-9 text-[13px] mt-1" placeholder="Please specify…" {...form.register("industryOther")} />
+                    <Input className="h-9 text-[13px]" placeholder="Please specify…" {...form.register("industryOther")} />
                   )}
                   <Err msg={errors.industryOther?.message} />
-                </div>
-              </Field>
+                </Field>
+              </div>
 
               <Field label="Geography — where do you operate?" req>
-                <div className="mt-1 space-y-1.5">
-                  <Controller control={form.control} name="market" render={({ field }) => (
-                    <Radio opts={MARKET} val={field.value} set={field.onChange} />
-                  )} />
-                  <Err msg={errors.market?.message} />
-                  {market === "Other" && (
-                    <Input className="h-9 text-[13px] mt-1" placeholder="Please specify…" {...form.register("marketOther")} />
-                  )}
-                  <Err msg={errors.marketOther?.message} />
-                </div>
+                <Controller control={form.control} name="market" render={({ field }) => (
+                  <SelectBox opts={MARKET} val={field.value} set={field.onChange} label="Geography — where do you operate?" />
+                )} />
+                <Err msg={errors.market?.message} />
+                {market === "Other" && (
+                  <Input className="h-9 text-[13px]" placeholder="Please specify…" {...form.register("marketOther")} />
+                )}
+                <Err msg={errors.marketOther?.message} />
               </Field>
             </div>
           </Section></div>}
 
           {/* ── Step 3: The Challenge ── */}
-          {step === 3 && <div key="step3" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section num={3} title="The Challenge">
-            <div className="space-y-4">
+          {step === 3 && <div key="step3" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section title="The Challenge">
+            <div className="space-y-6">
               <Field label="What's the challenge?" req>
-                <div className="mt-1 space-y-1.5">
+                <div className="space-y-2">
                   <p className="text-xs text-[#999]">Select all that apply</p>
                   <Controller control={form.control} name="problems" render={({ field }) => (
-                    <Checks opts={PROBLEMS} val={field.value} set={field.onChange} />
+                    <Chips opts={PROBLEMS} val={field.value} set={field.onChange} />
                   )} />
                   <Err msg={errors.problems?.message} />
                   {problems.includes("Other") && (
@@ -478,18 +498,16 @@ export default function Intake() {
               </Field>
 
               <Field label="Have you worked with a marketing agency before?" opt>
-                <div className="mt-1">
-                  <Controller control={form.control} name="agencyBefore" render={({ field }) => (
-                    <Radio opts={AGENCY} val={field.value ?? ""} set={field.onChange} />
-                  )} />
-                </div>
+                <Controller control={form.control} name="agencyBefore" render={({ field }) => (
+                  <SelectBox opts={AGENCY} val={field.value ?? ""} set={field.onChange} label="Have you worked with a marketing agency before?" />
+                )} />
               </Field>
 
               <Field label="Where do you need help?" req>
-                <div className="mt-1 space-y-1.5">
+                <div className="space-y-2">
                   <p className="text-xs text-[#999]">Select all that apply</p>
                   <Controller control={form.control} name="support" render={({ field }) => (
-                    <Checks opts={SUPPORT} val={field.value} set={field.onChange} />
+                    <Chips opts={SUPPORT} val={field.value} set={field.onChange} />
                   )} />
                   <Err msg={errors.support?.message} />
                   {support.includes("Other") && (
@@ -502,19 +520,19 @@ export default function Intake() {
           </Section></div>}
 
           {/* ── Step 4: Project & Investment ── */}
-          {step === 4 && <div key="step4" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section num={4} title="Project & Investment">
-            <div className="space-y-4">
+          {step === 4 && <div key="step4" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section title="Project & Investment">
+            <div className="space-y-6">
               <Field label="Project type" req>
-                <div className="mt-1">
+                <div className="space-y-2">
                   <Controller control={form.control} name="projectType" render={({ field }) => (
-                    <Radio opts={PROJECT_TYPE} val={field.value} set={field.onChange} />
+                    <Pills opts={PROJECT_TYPE} val={field.value} set={field.onChange} />
                   )} />
                   <Err msg={errors.projectType?.message} />
                 </div>
               </Field>
 
               <Field label="Project brief" req>
-                <div className="mt-1 space-y-2">
+                <div className="space-y-2">
                   <Textarea
                     className="text-[13px] resize-none"
                     rows={5}
@@ -572,21 +590,19 @@ export default function Intake() {
               </Field>
 
               <Field label="How are you thinking about investment?" opt>
-                <div className="mt-1">
-                  <p className="text-xs text-[#999] mb-1.5">Optional — helps us tailor our thinking</p>
+                <div className="space-y-2">
+                  <p className="text-xs text-[#999]">Optional — helps us tailor our thinking</p>
                   <Controller control={form.control} name="investment" render={({ field }) => (
-                    <Radio opts={INVESTMENT} val={field.value ?? ""} set={field.onChange} cols={1} />
+                    <SelectBox opts={INVESTMENT} val={field.value ?? ""} set={field.onChange} label="How are you thinking about investment?" />
                   )} />
                 </div>
               </Field>
 
               <Field label="Where are you in your decision-making?" req>
-                <div className="mt-1 space-y-1.5">
-                  <Controller control={form.control} name="decisionStage" render={({ field }) => (
-                    <Radio opts={DECISION} val={field.value} set={field.onChange} cols={1} />
-                  )} />
-                  <Err msg={errors.decisionStage?.message} />
-                </div>
+                <Controller control={form.control} name="decisionStage" render={({ field }) => (
+                  <SelectBox opts={DECISION} val={field.value} set={field.onChange} label="Where are you in your decision-making?" />
+                )} />
+                <Err msg={errors.decisionStage?.message} />
               </Field>
             </div>
           </Section></div>}
