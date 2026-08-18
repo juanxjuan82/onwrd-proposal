@@ -144,6 +144,12 @@ function Section({ num, title, children }: { num: number; title: string; childre
   );
 }
 
+// ─── Credibility clients ──────────────────────────────────────────────────
+const CLIENTS = ["Heineken", "FIFA", "Rosewood", "IDB", "Sandals"];
+
+// ─── Section titles for progress bar ─────────────────────────────────────
+const SECTION_TITLES = ["Contact Details", "Company & Market", "The Challenge", "Project & Investment"];
+
 // ─── Main ─────────────────────────────────────────────────────────────────
 export default function Intake() {
   const [done, setDone] = useState(false);
@@ -153,7 +159,14 @@ export default function Intake() {
   const [submissionKey] = useState(() => crypto.randomUUID());
   const [draftId, setDraftId] = useState<number | null>(null);
   const [autosaved, setAutosaved] = useState(false);
+  const [activeSection, setActiveSection] = useState(1);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sectionRefs = [
+    useRef<HTMLDivElement>(null),
+    useRef<HTMLDivElement>(null),
+    useRef<HTMLDivElement>(null),
+    useRef<HTMLDivElement>(null),
+  ];
 
   const form = useForm<V>({
     resolver: zodResolver(intakeSchema),
@@ -172,6 +185,25 @@ export default function Intake() {
   const market = form.watch("market");
   const problems = form.watch("problems");
   const support = form.watch("support");
+
+  // ─── Track active section for progress indicator ────────────────────────
+  useEffect(() => {
+    const refs = sectionRefs.map(r => r.current).filter(Boolean) as HTMLDivElement[];
+    if (refs.length === 0) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            const idx = sectionRefs.findIndex(r => r.current === entry.target);
+            if (idx >= 0) setActiveSection(idx + 1);
+          }
+        });
+      },
+      { rootMargin: "-10% 0px -80% 0px", threshold: 0 }
+    );
+    refs.forEach(el => observer.observe(el));
+    return () => observer.disconnect();
+  }, []);
 
   // ─── Autosave: fire when Section 1 is filled ────────────────────────────
   const firstName = form.watch("firstName");
@@ -259,14 +291,38 @@ export default function Intake() {
   return (
     <div className="min-h-screen bg-black text-white">
       {/* Header */}
-      <header className="border-b border-[#1a1a1a] px-6 py-3 sticky top-0 bg-black z-10">
-        <div className="max-w-4xl mx-auto">
+      <header className="border-b border-[#1a1a1a] px-6 sticky top-0 bg-black z-10">
+        <div className="max-w-4xl mx-auto flex items-center justify-between py-3">
           <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-[22px] object-contain object-left" />
+          <div className="flex items-center gap-3 min-w-[180px]">
+            <span className="text-[11px] text-[#444] whitespace-nowrap">
+              {SECTION_TITLES[activeSection - 1]}
+            </span>
+            <div className="flex gap-1">
+              {SECTION_TITLES.map((_, i) => (
+                <div
+                  key={i}
+                  className="h-1 w-6 rounded-full transition-colors duration-300"
+                  style={{ background: i < activeSection ? "#0000FF" : "#1e1e1e" }}
+                />
+              ))}
+            </div>
+            <span className="text-[11px] text-[#444] whitespace-nowrap">{activeSection}/4</span>
+          </div>
         </div>
       </header>
 
       {/* Body */}
       <main className="max-w-4xl mx-auto w-full px-4 sm:px-6 py-8">
+        {/* Credibility strip */}
+        <div className="flex items-center gap-3 mb-8 flex-wrap">
+          <span className="text-[11px] text-[#3a3a3a] uppercase tracking-widest shrink-0">Trusted by</span>
+          <div className="h-px flex-1 bg-[#1a1a1a]" />
+          {CLIENTS.map(name => (
+            <span key={name} className="text-[11px] font-semibold tracking-wider text-[#444] uppercase">{name}</span>
+          ))}
+        </div>
+
         <div className="mb-8">
           <h1 className="text-xl font-semibold text-white mb-1">Tell us about your project</h1>
           <p className="text-[13px] text-[#555]">Fill in the sections below and we'll prepare a tailored proposal.</p>
@@ -275,7 +331,8 @@ export default function Intake() {
         <form onSubmit={form.handleSubmit(submit)} noValidate className="space-y-5">
 
           {/* ── Section 1: Contact Details ── */}
-          <Section num={1} title="Contact Details">
+          <div ref={sectionRefs[0]}><Section num={1} title="Contact Details">
+
             <div className="space-y-3">
               <div className="grid grid-cols-2 gap-3 items-start">
                 <Field label="First name" req>
@@ -332,10 +389,10 @@ export default function Intake() {
                 </p>
               )}
             </div>
-          </Section>
+          </Section></div>
 
           {/* ── Section 2: Company & Market ── */}
-          <Section num={2} title="Company & Market">
+          <div ref={sectionRefs[1]}><Section num={2} title="Company & Market">
             <div className="space-y-4">
               <div className="grid grid-cols-2 gap-3 items-start">
                 <Field label="Organisation name" req>
@@ -386,10 +443,10 @@ export default function Intake() {
                 </div>
               </Field>
             </div>
-          </Section>
+          </Section></div>
 
           {/* ── Section 3: The Challenge ── */}
-          <Section num={3} title="The Challenge">
+          <div ref={sectionRefs[2]}><Section num={3} title="The Challenge">
             <div className="space-y-4">
               <Field label="What's the challenge?" req>
                 <div className="mt-1 space-y-1.5">
@@ -427,10 +484,10 @@ export default function Intake() {
                 </div>
               </Field>
             </div>
-          </Section>
+          </Section></div>
 
           {/* ── Section 4: Project & Investment ── */}
-          <Section num={4} title="Project & Investment">
+          <div ref={sectionRefs[3]}><Section num={4} title="Project & Investment">
             <div className="space-y-4">
               <Field label="Project type" req>
                 <div className="mt-1">
@@ -517,7 +574,7 @@ export default function Intake() {
                 </div>
               </Field>
             </div>
-          </Section>
+          </Section></div>
 
           {/* Submit */}
           <div className="flex flex-col items-end gap-2 pt-1 pb-8">
