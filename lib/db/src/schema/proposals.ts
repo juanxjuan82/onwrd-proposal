@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, integer, unique } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, integer, unique, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -9,6 +9,8 @@ export const proposalsTable = pgTable("proposals", {
   status: text("status").notNull().default("draft"),
   briefText: text("brief_text").notNull(),
   proposalContent: text("proposal_content").notNull(),
+  reviewRequired: boolean("review_required").notNull().default(false),
+  flaggedPhrases: text("flagged_phrases").array().notNull().default([]),
   googleDocUrl: text("google_doc_url"),
   googleFileId: text("google_file_id"),
   driveFolderId: text("drive_folder_id"),

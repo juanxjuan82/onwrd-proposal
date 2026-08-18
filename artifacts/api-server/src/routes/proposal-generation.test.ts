@@ -483,6 +483,10 @@ describe("§B-1 concurrent generate-proposal → one AI invocation", () => {
     __setInvokeAISpy(async () => {
       aiCallCount++;
       resolveAi();
+      // Hold the first generation open long enough that the second request's
+      // in-progress guard is guaranteed to observe it, even under suite load
+      // where the two fetches would otherwise fully serialize.
+      await new Promise((r) => setTimeout(r, 400));
       return { content: JSON.stringify({ sections: [] }), model: "test", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
     });
     const send = () => fetch(`${_baseUrl}/api/opportunities/${tenderId}/generate-proposal`, {

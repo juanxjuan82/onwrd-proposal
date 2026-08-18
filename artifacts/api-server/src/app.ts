@@ -74,6 +74,20 @@ export const dbReady: Promise<void> = pool
       )`,
     ),
   )
+  // ── Prompt-injection defence columns (Layer 2/3 flags) ────────────────────
+  .then(() =>
+    pool.query(
+      `ALTER TABLE proposals
+         ADD COLUMN IF NOT EXISTS review_required boolean NOT NULL DEFAULT false,
+         ADD COLUMN IF NOT EXISTS flagged_phrases text[] NOT NULL DEFAULT '{}'`,
+    ),
+  )
+  .then(() =>
+    pool.query(
+      `ALTER TABLE tenders
+         ADD COLUMN IF NOT EXISTS injection_warning boolean NOT NULL DEFAULT false`,
+    ),
+  )
   // intake_drafts upsert relies on ON CONFLICT (submission_key), which needs a
   // full (non-partial) unique constraint.
   .then(() =>

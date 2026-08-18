@@ -3,6 +3,7 @@ import { db } from "@workspace/db";
 import { tendersTable } from "@workspace/db";
 import { eq, desc } from "drizzle-orm";
 import { extractTenderMetadata } from "../lib/metadata-extractor.js";
+import { computeInjectionWarning } from "../lib/prompt-safety.js";
 import {
   CreateTenderBody,
   GetTenderParams,
@@ -122,6 +123,10 @@ router.post("/tenders", async (req, res) => {
       valueAmount: data.valueAmount ?? null,
       sourceUrl: data.sourceUrl ?? null,
       contactInfo: data.contactInfo ?? null,
+      injectionWarning: computeInjectionWarning(
+        data.title, data.agency, data.category, data.description,
+        data.sourceUrl, data.contactInfo,
+      ),
       recommendationScore: score,
     })
     .returning();
@@ -197,6 +202,9 @@ router.post("/tenders/import-csv", async (req, res) => {
       valueAmount,
       sourceUrl,
       contactInfo,
+      injectionWarning: computeInjectionWarning(
+        title, agency, category, description, sourceUrl, contactInfo,
+      ),
       recommendationScore: score,
     });
     imported++;
@@ -237,6 +245,9 @@ router.post("/tenders/extract-from-text", async (req, res) => {
         valueAmount: meta.valueAmount ?? null,
         sourceUrl:   sourceUrl ?? null,
         contactInfo: meta.contactInfo ?? null,
+        injectionWarning: computeInjectionWarning(
+          title, agency, meta.contactInfo, sourceUrl, text,
+        ),
         recommendationScore: score,
       })
       .returning();

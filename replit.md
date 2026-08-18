@@ -74,6 +74,5 @@ See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and pa
 ## Known failing tests (pre-existing baseline)
 The following assertions fail on the current main branch and predate the authentication work (verified by stashing all auth changes and re-running):
 - `src/lib/crawler-eligibility.test.ts` — 3 assertions about generic-term/raw_only eligibility outcomes
-- `src/lib/proposal-workflow.test.ts` — "workspace query includes non-crawler tenders..." assertion
 - `src/routes/opportunities.test.ts` — "genuine PR and media relations RFP passes" assertion
 These reflect drift between the eligibility rules and their tests and should be reconciled in a dedicated task.

@@ -20,6 +20,8 @@ interface WorkspaceProposal {
   syncStatus: string | null;
   googleDocUrl: string | null;
   googleFileId: string | null;
+  reviewRequired?: boolean;
+  flaggedPhrases?: string[];
   updatedAt: string | null;
 }
 
@@ -271,6 +273,15 @@ function WorkspaceCard({
             {item.proposal?.status === "needs_onwrd_input" && (
               <span className="inline-flex items-center gap-1 text-[10px] text-amber-400">
                 <AlertCircle className="w-2.5 h-2.5" /> Needs Input
+              </span>
+            )}
+            {item.proposal?.reviewRequired && (
+              <span
+                className="inline-flex items-center gap-1 text-[10px] text-red-400"
+                title={`Flagged phrases: ${(item.proposal.flaggedPhrases ?? []).join(", ")}`}
+                data-testid={`badge-review-required-${item.id}`}
+              >
+                <AlertCircle className="w-2.5 h-2.5" /> Review Required
               </span>
             )}
           </div>

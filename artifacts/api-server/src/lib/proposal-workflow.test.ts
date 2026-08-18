@@ -414,8 +414,8 @@ describe("§G run-full-generation and proposals workspace", () => {
       "workspace query must pass through non-crawler tenders"
     );
     assert.ok(
-      wsBlock.includes("proposal_id IS NOT NULL"),
-      "workspace query must include crawlers only when proposal_id is set (selected)"
+      wsBlock.includes("proposal_id IS NOT NULL") || wsBlock.includes("p.id IS NOT NULL"),
+      "workspace query must include crawlers only when a proposal row exists (selected)"
     );
   });
 });

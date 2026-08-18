@@ -316,6 +316,18 @@ export default function OpportunityDetail() {
         </div>
         <h1 className="text-3xl font-bold text-white mb-2 tracking-tight">{tender.title}</h1>
         <p className="text-lg text-foreground">{tender.agency}</p>
+        {(tender as { injectionWarning?: boolean }).injectionWarning && (
+          <div
+            className="mt-4 rounded-lg border border-amber-800 bg-amber-900/15 px-4 py-3 text-sm text-amber-300"
+            data-testid="banner-injection-warning"
+          >
+            <p className="font-medium mb-1">Suspicious text detected</p>
+            <p className="text-amber-400/90">
+              This document contains text that looks like it's addressed to the AI — review
+              the source material before generating a proposal.
+            </p>
+          </div>
+        )}
       </div>
 
       {/* ── Analysis in-progress banner ──────────────────────────────────── */}

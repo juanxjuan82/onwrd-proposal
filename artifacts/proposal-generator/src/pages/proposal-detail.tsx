@@ -685,6 +685,20 @@ export default function ProposalDetail() {
         )}
       </div>
 
+      {(proposal as { reviewRequired?: boolean }).reviewRequired && (
+        <div
+          className="mb-6 rounded-lg border border-red-900 bg-red-900/15 px-4 py-3 text-sm text-red-300"
+          data-testid="banner-review-required"
+        >
+          <p className="font-medium mb-1">Review required — flagged language detected</p>
+          <p className="text-red-400/90">
+            The generated content contains phrases ONWRD does not commit to (
+            {((proposal as { flaggedPhrases?: string[] }).flaggedPhrases ?? []).join(", ")}
+            ). Nothing was removed automatically — review and edit before approving or exporting.
+          </p>
+        </div>
+      )}
+
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
         <h1 className="text-4xl font-bold text-white tracking-tight">
           {hasSections ? "Proposal Desk" : "Edit Proposal"}
