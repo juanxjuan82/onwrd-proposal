@@ -574,7 +574,14 @@ export default function SettingsSources() {
             </button>
           </div>
           {runs.length === 0 ? (
-            <p className="text-muted-foreground text-sm py-8 text-center">No crawl runs yet. Trigger one from the Opportunities page or a source below.</p>
+            <div className="py-8 text-center space-y-2">
+              <p className="text-muted-foreground text-sm">No crawl runs recorded. Trigger one from the Opportunities page or a source below.</p>
+              {sources.some((s) => s.lastCheckedAt) && (
+                <p className="text-xs text-amber-400/80">
+                  Sources show recent activity — the run log may have been reset.
+                </p>
+              )}
+            </div>
           ) : (
             runs.map((run) => {
               const src = sources.find((s) => s.id === run.sourceId);
