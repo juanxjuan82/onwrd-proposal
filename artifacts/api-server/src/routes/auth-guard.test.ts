@@ -27,7 +27,9 @@ import crypto from "node:crypto";
 import app, { dbReady } from "../app.js";
 import router from "./index.js";
 import { isPublicRoute, isAiRoute } from "../middlewares/apiGuard.js";
-import { getSafeReturnTo, getOrigin } from "./replit-auth.js";
+import { getSafeReturnTo } from "./google-workspace-auth.js";
+import { createSession, deleteSession } from "../lib/auth.js";
+import { getGoogleCallbackUrl } from "../lib/google-oauth.js";
 import { pool } from "@workspace/db";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -176,9 +178,46 @@ describe("auth guard (task #62)", () => {
       assert.equal(body.user, null);
     });
 
-    it("GET /login redirects to the OIDC provider", async () => {
+    it("GET /login redirects to Google Workspace with the company-domain hint", async () => {
       const res = await req("GET", "/login");
       assert.equal(res.status, 302);
+      const location = new URL(res.headers.get("location") ?? "");
+      assert.equal(location.origin, "https://accounts.google.com");
+      assert.equal(location.pathname, "/o/oauth2/v2/auth");
+      assert.equal(location.searchParams.get("hd"), "onwrdadvisors.com");
+      assert.equal(location.searchParams.get("response_type"), "code");
+      assert.ok(location.searchParams.get("state"));
+      assert.match(
+        location.searchParams.get("redirect_uri") ?? "",
+        /\/api\/auth\/google\/callback$/,
+      );
+      assert.deepEqual(
+        location.searchParams.get("scope")?.split(" ").sort(),
+        ["email", "openid", "profile"],
+      );
+    });
+
+    it("rejects a session created before the Google Workspace migration", async () => {
+      const sid = await createSession({
+        user: {
+          id: "legacy-replit-user",
+          email: "person@onwrdadvisors.com",
+          firstName: "Legacy",
+          lastName: "User",
+          profileImageUrl: null,
+        },
+        access_token: "legacy-token",
+      });
+
+      try {
+        const res = await fetch(`${baseUrl}/api/auth/user`, {
+          headers: { Cookie: `sid=${sid}` },
+        });
+        assert.equal(res.status, 200);
+        assert.deepEqual(await res.json(), { user: null });
+      } finally {
+        await deleteSession(sid);
+      }
     });
   });
 
@@ -251,8 +290,8 @@ describe("auth guard (task #62)", () => {
     });
   });
 
-  // §4d OIDC redirect origin is pinned — forged Host headers must not leak in
-  describe("§4d forwarded-host cannot hijack OIDC redirects", () => {
+  // §4d Google callback origin is pinned — forged Host headers must not leak in
+  describe("§4d forwarded-host cannot hijack Google callback redirects", () => {
     it("GET /login with forged X-Forwarded-Host does not use it in redirect_uri", async () => {
       const res = await fetch(`${baseUrl}/api/login`, {
         redirect: "manual",
@@ -268,13 +307,12 @@ describe("auth guard (task #62)", () => {
     });
   });
 
-  // §4e origin resolution is fail-closed when nothing is configured
-  describe("§4e getOrigin never trusts request headers", () => {
+  // §4e callback URLs come only from fixed environment configuration
+  describe("§4e Google callback URL is configuration-derived", () => {
     const saved = {
-      APP_ORIGIN: process.env.APP_ORIGIN,
+      GOOGLE_OAUTH_CALLBACK_URL: process.env.GOOGLE_OAUTH_CALLBACK_URL,
       REPLIT_DOMAINS: process.env.REPLIT_DOMAINS,
       REPLIT_DEV_DOMAIN: process.env.REPLIT_DEV_DOMAIN,
-      NODE_ENV: process.env.NODE_ENV,
     };
     function restore() {
       for (const [k, v] of Object.entries(saved)) {
@@ -282,43 +320,29 @@ describe("auth guard (task #62)", () => {
         else process.env[k] = v;
       }
     }
-    const forgedReq = {
-      headers: { "x-forwarded-host": "evil.example", host: "evil.example" },
-    } as unknown as Parameters<typeof getOrigin>[0];
-
-    it("with all origin config unset, forged hosts are never incorporated (dev)", () => {
+    it("uses the explicit callback URL when configured", () => {
       try {
-        delete process.env.APP_ORIGIN;
-        delete process.env.REPLIT_DOMAINS;
-        delete process.env.REPLIT_DEV_DOMAIN;
-        process.env.NODE_ENV = "development";
-        const origin = getOrigin(forgedReq);
-        assert.ok(!origin.includes("evil.example"), `forged host leaked: ${origin}`);
-        assert.equal(origin, "http://localhost");
+        process.env.GOOGLE_OAUTH_CALLBACK_URL =
+          "https://workspace.example/api/auth/google/callback";
+        assert.equal(
+          getGoogleCallbackUrl(),
+          "https://workspace.example/api/auth/google/callback",
+        );
       } finally {
         restore();
       }
     });
 
-    it("with all origin config unset, production refuses to build redirect URLs", () => {
+    it("uses a configured public domain without consulting request headers", () => {
       try {
-        delete process.env.APP_ORIGIN;
+        delete process.env.GOOGLE_OAUTH_CALLBACK_URL;
+        process.env.REPLIT_DOMAINS = "workspace.replit.app";
         delete process.env.REPLIT_DOMAINS;
-        delete process.env.REPLIT_DEV_DOMAIN;
-        process.env.NODE_ENV = "production";
-        assert.throws(() => getOrigin(forgedReq), /No public origin configured/);
-      } finally {
-        restore();
-      }
-    });
-
-    it("unconfigured forged host falls back to the first configured domain", () => {
-      try {
-        delete process.env.APP_ORIGIN;
-        process.env.REPLIT_DOMAINS = "myapp.replit.app";
-        delete process.env.REPLIT_DEV_DOMAIN;
-        const origin = getOrigin(forgedReq);
-        assert.equal(origin, "https://myapp.replit.app");
+        process.env.REPLIT_DOMAINS = "workspace.replit.app";
+        assert.equal(
+          getGoogleCallbackUrl(),
+          "https://workspace.replit.app/api/auth/google/callback",
+        );
       } finally {
         restore();
       }

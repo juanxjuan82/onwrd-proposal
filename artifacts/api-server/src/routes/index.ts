@@ -4,7 +4,7 @@ import proposalsRouter from "./proposals";
 import tendersRouter from "./tenders";
 import extractTextRouter from "./extract-text";
 import authRouter from "./auth";
-import replitAuthRouter from "./replit-auth";
+import googleWorkspaceAuthRouter from "./google-workspace-auth";
 import opportunitiesRouter from "./opportunities";
 import sectionsRouter from "./sections";
 import knowledgeRouter from "./knowledge";
@@ -33,7 +33,7 @@ router.use(requireAuth);
 router.use(aiRouteLimiter);
 
 router.use(healthRouter);
-router.use(replitAuthRouter);
+router.use(googleWorkspaceAuthRouter);
 router.use(proposalsRouter);
 router.use(tendersRouter);
 router.use(extractTextRouter);

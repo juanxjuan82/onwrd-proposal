@@ -15,7 +15,7 @@ type PublicRule = { method: string; pattern: RegExp };
 const PUBLIC_ROUTES: PublicRule[] = [
   // Health check (uptime probes)
   { method: "GET", pattern: /^\/healthz\/?$/ },
-  // App auth (Replit OIDC) — must be reachable to log in at all
+  // App auth (Google Workspace OAuth) — must be reachable to log in at all
   { method: "GET", pattern: /^\/auth\/user\/?$/ },
   { method: "GET", pattern: /^\/login\/?$/ },
   { method: "GET", pattern: /^\/callback\/?$/ },

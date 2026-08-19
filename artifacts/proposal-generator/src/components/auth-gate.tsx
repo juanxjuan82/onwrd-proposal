@@ -59,6 +59,7 @@ function SessionExpiredBanner({ onLogin }: { onLogin: () => void }) {
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const { isLoading, isAuthenticated, login } = useAuth();
   const [expired, setExpired] = useState(false);
+  const googleError = new URLSearchParams(window.location.search).get("google_error");
 
   useEffect(() => {
     const handler = () => setExpired(true);
@@ -83,15 +84,22 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
           className="h-12 object-contain mb-8"
         />
         <p className="text-[#999999] text-sm mb-6 text-center max-w-sm">
-          This workspace is private. Log in to access proposals, opportunities,
-          and settings.
+          This workspace is private. Sign in with your ONWRD Google Workspace
+          account to access proposals, opportunities, and settings.
         </p>
+        {googleError && (
+          <p className="text-sm text-red-300 mb-5 text-center max-w-sm">
+            {googleError === "domain_not_allowed"
+              ? "Use a verified @onwrdadvisors.com Google account."
+              : "Google sign-in could not be completed. Please try again."}
+          </p>
+        )}
         <button
           onClick={login}
           className="bg-[#0000FF] hover:bg-[#2222FF] text-white text-sm font-semibold px-8 py-3 transition-colors"
           data-testid="button-login"
         >
-          Log in
+          Continue with Google
         </button>
       </div>
     );

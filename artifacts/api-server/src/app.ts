@@ -17,6 +17,8 @@ declare module "express-session" {
     googleUserEmail?: string;
     googleOAuthState?: string;
     googleOAuthReturnTo?: string;
+    googleLoginState?: string;
+    googleLoginReturnTo?: string;
   }
 }
 
@@ -52,7 +54,7 @@ export const dbReady: Promise<void> = pool
     ),
   )
   .then(() => pool.query(`CREATE INDEX IF NOT EXISTS IDX_session_expire ON session (expire)`))
-  // ── Replit Auth tables (app authentication) ──────────────────────────────
+  // ── App authentication tables ───────────────────────────────────────────
   .then(() =>
     pool.query(
       `CREATE TABLE IF NOT EXISTS sessions (

@@ -1,14 +1,12 @@
 import type { AuthUser } from '@workspace/api-zod';
 import { type NextFunction, type Request, type Response } from 'express';
-import * as oidc from 'openid-client';
 
 import {
   clearSession,
-  getOidcConfig,
   getSession,
   getSessionId,
   isAllowedEmail,
-  updateSession,
+  refreshGoogleSession,
   type SessionData,
 } from '../lib/auth';
 
@@ -25,30 +23,6 @@ declare global {
     export interface AuthedRequest {
       user: User;
     }
-  }
-}
-
-async function refreshIfExpired(
-  sid: string,
-  session: SessionData,
-): Promise<SessionData | null> {
-  const now = Math.floor(Date.now() / 1000);
-  if (!session.expires_at || now <= session.expires_at) return session;
-
-  if (!session.refresh_token) return null;
-
-  try {
-    const config = await getOidcConfig();
-    const tokens = await oidc.refreshTokenGrant(config, session.refresh_token);
-    session.access_token = tokens.access_token;
-    session.refresh_token = tokens.refresh_token ?? session.refresh_token;
-    session.expires_at = tokens.expiresIn()
-      ? now + tokens.expiresIn()!
-      : session.expires_at;
-    await updateSession(sid, session);
-    return session;
-  } catch {
-    return null;
   }
 }
 
@@ -74,17 +48,16 @@ export async function authMiddleware(
     return;
   }
 
-  const refreshed = await refreshIfExpired(sid, session);
-  if (!refreshed) {
+  // Replit sessions created before the Google Workspace migration must not
+  // remain valid after the provider switch.
+  if (session.provider !== 'google' || !isAllowedEmail(session.user.email)) {
     await clearSession(res, sid);
     next();
     return;
   }
 
-  // Enforce the workspace email policy for existing sessions too. This
-  // prevents a previously-created non-ONWRD session from bypassing the
-  // domain check that runs during the OIDC callback.
-  if (!isAllowedEmail(refreshed.user.email)) {
+  const refreshed = await refreshGoogleSession(sid, session);
+  if (!refreshed) {
     await clearSession(res, sid);
     next();
     return;
