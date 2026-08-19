@@ -38,6 +38,8 @@ export const dbReady: Promise<void> = pool
   // ── Idempotent schema migrations ─────────────────────────────────────────
   .query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS handoff_started_at TIMESTAMP`)
   .then(() => pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS generation_status TEXT`))
+  .then(() => pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS generation_error TEXT`))
+  .then(() => pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS generation_attempt_id TEXT`))
   // ── Session table ─────────────────────────────────────────────────────────
   .then(() =>
     pool.query(

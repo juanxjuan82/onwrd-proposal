@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { randomUUID } from "node:crypto";
 import multer from "multer";
 import mammoth from "mammoth";
 import pdfParse from "pdf-parse/lib/pdf-parse.js";
@@ -29,6 +30,7 @@ import {
   buildStrategyContext,
   generateProposalDraftAndPersist,
 } from "../lib/proposal-draft-service.js";
+import { failOwnedProposalGeneration } from "../lib/proposal-generation-ownership.js";
 import {
   truncateToTokenBudget,
   classifyError,
@@ -41,8 +43,48 @@ import {
   type AnalysisActiveStatus,
   type AnalysisStep,
 } from "../lib/analysis-utils.js";
+import { logger } from "../lib/logger.js";
 
 const router = Router();
+type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+const GENERATION_HEARTBEAT_MS = 30_000;
+
+function startGenerationHeartbeat(proposalId: number, attemptId: string): () => void {
+  const interval = setInterval(() => {
+    void db.execute(sql`
+      UPDATE proposals
+      SET updated_at = NOW()
+      WHERE id = ${proposalId}
+        AND generation_attempt_id = ${attemptId}
+        AND generation_status IN ('extracting', 'strategizing', 'drafting')
+    `).catch((err: unknown) => {
+      logger.warn({ err, proposalId }, "Proposal generation heartbeat failed");
+    });
+  }, GENERATION_HEARTBEAT_MS);
+  interval.unref();
+  return () => clearInterval(interval);
+}
+
+async function assertGenerationOwnership(
+  tx: DbTx,
+  tenderId: number,
+  generationAttemptId?: string,
+): Promise<void> {
+  if (!generationAttemptId) return;
+  const ownerResult = await tx.execute(sql`
+    SELECT id
+    FROM proposals
+    WHERE tender_id = ${tenderId}
+      AND generation_attempt_id = ${generationAttemptId}
+    FOR UPDATE
+  `);
+  if (ownerResult.rows.length === 0) {
+    const err = new Error("GENERATION_SUPERSEDED") as NodeJS.ErrnoException;
+    err.code = "GENERATION_SUPERSEDED";
+    throw err;
+  }
+}
 
 // ── Active-run registry ───────────────────────────────────────────────────────
 // One entry per tender that is currently being analysed.
@@ -63,7 +105,11 @@ function isActiveStatus(status: string): status is AnalysisActiveStatus {
 
 
 // ── Step 1: Extract requirements ─────────────────────────────────────────────
-async function runExtractRequirements(tenderId: number, cancelSignal?: AbortSignal) {
+async function runExtractRequirements(
+  tenderId: number,
+  cancelSignal?: AbortSignal,
+  generationAttemptId?: string,
+) {
   const [tender] = await db
     .select()
     .from(tendersTable)
@@ -128,17 +174,6 @@ async function runExtractRequirements(tenderId: number, cancelSignal?: AbortSign
     throw err;
   }
 
-  // Record token usage (accumulate across steps within one analysis)
-  await db
-    .update(tendersTable)
-    .set({
-      aiModelUsed:    aiResult.model,
-      aiInputTokens:  (tender.aiInputTokens  ?? 0) + (aiResult.usage?.promptTokens     ?? 0),
-      aiOutputTokens: (tender.aiOutputTokens ?? 0) + (aiResult.usage?.completionTokens ?? 0),
-      updatedAt:      new Date(),
-    })
-    .where(eq(tendersTable.id, tenderId));
-
   // Parse and validate response
   const raw = aiResult.content;
   type RawReq = { requirementText?: unknown; category?: unknown; isMandatory?: unknown };
@@ -164,29 +199,46 @@ async function runExtractRequirements(tenderId: number, cancelSignal?: AbortSign
     return existing;
   }
 
-  // Replace requirements atomically
-  await db.delete(tenderRequirementsTable).where(eq(tenderRequirementsTable.tenderId, tenderId));
+  // Replace requirements atomically, after confirming this generation attempt
+  // still owns the canonical proposal.
+  return db.transaction(async (tx: DbTx) => {
+    await assertGenerationOwnership(tx, tenderId, generationAttemptId);
 
-  const inserted = await db
-    .insert(tenderRequirementsTable)
-    .values(
-      reqs.map((r, i) => ({
-        tenderId,
-        requirementText: r.requirementText,
-        category:        r.category,
-        isMandatory:     r.isMandatory,
-        isAnswered:      false,
-        orderIndex:      i,
-      })),
-    )
-    .returning();
+    await tx
+      .update(tendersTable)
+      .set({
+        aiModelUsed:    aiResult.model,
+        aiInputTokens:  (tender.aiInputTokens  ?? 0) + (aiResult.usage?.promptTokens     ?? 0),
+        aiOutputTokens: (tender.aiOutputTokens ?? 0) + (aiResult.usage?.completionTokens ?? 0),
+        updatedAt:      new Date(),
+      })
+      .where(eq(tendersTable.id, tenderId));
 
-  await db
-    .update(tendersTable)
-    .set({ requirementsExtractedAt: new Date(), updatedAt: new Date() })
-    .where(eq(tendersTable.id, tenderId));
+    await tx
+      .delete(tenderRequirementsTable)
+      .where(eq(tenderRequirementsTable.tenderId, tenderId));
 
-  return inserted;
+    const inserted = await tx
+      .insert(tenderRequirementsTable)
+      .values(
+        reqs.map((r, i) => ({
+          tenderId,
+          requirementText: r.requirementText,
+          category:        r.category,
+          isMandatory:     r.isMandatory,
+          isAnswered:      false,
+          orderIndex:      i,
+        })),
+      )
+      .returning();
+
+    await tx
+      .update(tendersTable)
+      .set({ requirementsExtractedAt: new Date(), updatedAt: new Date() })
+      .where(eq(tendersTable.id, tenderId));
+
+    return inserted;
+  });
 }
 
 // ── Step 2: Bid scoring (deterministic — no AI call) ─────────────────────────
@@ -197,7 +249,11 @@ async function runBidScoring(tenderId: number, _cancelSignal?: AbortSignal) {
 }
 
 // ── Step 3: Generate strategy brief ─────────────────────────────────────────
-async function runGenerateStrategy(tenderId: number, cancelSignal?: AbortSignal) {
+async function runGenerateStrategy(
+  tenderId: number,
+  cancelSignal?: AbortSignal,
+  generationAttemptId?: string,
+) {
   const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, tenderId));
   if (!tender) throw new Error("Tender not found");
 
@@ -290,21 +346,27 @@ ${bidScore ? `Bid Score: ${bidScore.fitScore}/100 (${bidScore.fitLevel})\nScorin
     messagingGuidance?: string;
   };
 
-  await db.delete(proposalStrategiesTable).where(eq(proposalStrategiesTable.tenderId, tenderId));
+  return db.transaction(async (tx: DbTx) => {
+    await assertGenerationOwnership(tx, tenderId, generationAttemptId);
 
-  const [strategy] = await db
-    .insert(proposalStrategiesTable)
-    .values({
-      tenderId,
-      positioning:            data.positioning            ?? "",
-      winThemes:              JSON.stringify(data.winThemes              ?? []),
-      recommendedCaseStudies: JSON.stringify(data.recommendedCaseStudies ?? []),
-      risks:                  JSON.stringify(data.risks                  ?? []),
-      messagingGuidance:      data.messagingGuidance      ?? "",
-    })
-    .returning();
+    await tx
+      .delete(proposalStrategiesTable)
+      .where(eq(proposalStrategiesTable.tenderId, tenderId));
 
-  return strategy;
+    const [strategy] = await tx
+      .insert(proposalStrategiesTable)
+      .values({
+        tenderId,
+        positioning:            data.positioning            ?? "",
+        winThemes:              JSON.stringify(data.winThemes              ?? []),
+        recommendedCaseStudies: JSON.stringify(data.recommendedCaseStudies ?? []),
+        risks:                  JSON.stringify(data.risks                  ?? []),
+        messagingGuidance:      data.messagingGuidance      ?? "",
+      })
+      .returning();
+
+    return strategy;
+  });
 }
 
 // ── Full analysis pipeline ───────────────────────────────────────────────────
@@ -1406,6 +1468,7 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
   // step 4 and returns 409. Zero AI calls are launched by the second request.
 
   const STALE_GENERATION_MS = 5 * 60 * 1000; // 5 minutes
+  const generationAttemptId = randomUUID();
 
   type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -1502,6 +1565,9 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
           unverifiedCredentials: [],
           reviewRequired:  false,
           status:          "proposal_drafting",
+          generationStatus: "drafting",
+          generationError:  null,
+          generationAttemptId,
           updatedAt:       now,
         })
         .where(eq(proposalsTable.id, locked.id))
@@ -1567,6 +1633,7 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
   res.status(200).json({ proposalId: draft.id, proposal: draft, sections: sectionRows });
 
   void (async () => {
+    const stopHeartbeat = startGenerationHeartbeat(draft.id, generationAttemptId);
     try {
       // Shared draft service: AI call outside transaction, atomic section persist inside.
       await generateProposalDraftAndPersist({
@@ -1574,24 +1641,44 @@ ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i
         proposalId:      draft.id,
         briefText,
         strategyContext,
+        generationAttemptId,
       });
-    } catch (err) {
-      console.error("[opportunity→proposal] generation failed:", err);
-      const failureContent = `Generation failed. Please regenerate.\n\nOriginal brief:\n${briefText}`;
-      const failureFlags = scanBannedPhrases(failureContent);
       await db
         .update(proposalsTable)
         .set({
-          proposalContent: failureContent,
-          flaggedPhrases:  failureFlags,
-          // Failure message replaces the content — recompute the credential
-          // scan on what is actually stored (brief text may name orgs).
-          unverifiedCredentials: [],
-          reviewRequired:  failureFlags.length > 0,
-          status:          "draft",
-          updatedAt:       new Date(),
+          generationStatus: "ready",
+          generationError: null,
+          generationAttemptId: null,
+          updatedAt: new Date(),
         })
-        .where(eq(proposalsTable.id, draft.id));
+        .where(
+          and(
+            eq(proposalsTable.id, draft.id),
+            eq(proposalsTable.generationAttemptId, generationAttemptId),
+          ),
+        );
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "GENERATION_SUPERSEDED") {
+        req.log.info({ proposalId: draft.id }, "Discarded superseded proposal generation result");
+        return;
+      }
+      req.log.error({ err, proposalId: draft.id }, "Proposal generation failed");
+      const failureContent = `Generation failed. Please regenerate.\n\nOriginal brief:\n${briefText}`;
+      const failureFlags = scanBannedPhrases(failureContent);
+      await failOwnedProposalGeneration({
+        proposalId: draft.id,
+        tenderId: id,
+        generationAttemptId,
+        generationError: "Generation failed while writing the draft. Retry to start again.",
+        proposalContent: failureContent,
+        flaggedPhrases: failureFlags,
+        reviewRequired: failureFlags.length > 0,
+        // Failure message replaces the content, so stale credential findings
+        // from the previous generated body must not remain attached.
+        unverifiedCredentials: [],
+      });
+    } finally {
+      stopHeartbeat();
     }
   })();
 });
@@ -1605,22 +1692,47 @@ const FULL_GEN_STALE_MS = 5 * 60 * 1000; // 5 minutes
 async function runFullGenerationBackground(
   tenderId: number,
   proposalId: number,
+  generationAttemptId: string,
 ): Promise<void> {
+  let activePhase = "extracting";
+  const stopHeartbeat = startGenerationHeartbeat(proposalId, generationAttemptId);
+
   const setGenStatus = async (status: string) => {
-    await db.execute(
-      sql`UPDATE proposals SET generation_status = ${status}, updated_at = NOW() WHERE id = ${proposalId}`,
+    activePhase = status;
+    const result = await db.execute(
+      sql`UPDATE proposals
+          SET generation_status = ${status},
+              generation_error = NULL,
+              generation_attempt_id = ${status === "ready" ? null : generationAttemptId},
+              updated_at = NOW()
+          WHERE id = ${proposalId}
+            AND generation_attempt_id = ${generationAttemptId}
+          RETURNING id`,
     );
+    if (result.rows.length === 0) {
+      const err = new Error("GENERATION_SUPERSEDED") as NodeJS.ErrnoException;
+      err.code = "GENERATION_SUPERSEDED";
+      throw err;
+    }
   };
 
   const fail = async (err: unknown) => {
+    if ((err as NodeJS.ErrnoException).code === "GENERATION_SUPERSEDED") {
+      logger.info({ proposalId }, "Discarded superseded full-generation result");
+      return;
+    }
     const { code } = classifyError(err);
-    console.error(
-      `[full-gen] proposal=${proposalId} code=${code}:`,
-      (err instanceof Error ? err.message : String(err)).slice(0, 200),
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error(
+      { proposalId, code, phase: activePhase, reason: message.slice(0, 200) },
+      "Full proposal generation failed",
     );
-    await db.execute(
-      sql`UPDATE proposals SET generation_status = 'failed', status = 'draft', updated_at = NOW() WHERE id = ${proposalId}`,
-    );
+    await failOwnedProposalGeneration({
+      proposalId,
+      tenderId,
+      generationAttemptId,
+      generationError: `Generation failed during ${activePhase} (${code}). Retry to start again.`,
+    });
   };
 
   try {
@@ -1637,7 +1749,7 @@ async function runFullGenerationBackground(
       (reqCount?.count ?? 0) > 0 && !!tenderMeta?.requirementsExtractedAt;
 
     if (!extractionComplete) {
-      const inserted = await runExtractRequirements(tenderId);
+      const inserted = await runExtractRequirements(tenderId, undefined, generationAttemptId);
       if (inserted.length === 0) {
         throw new Error("NO_REQUIREMENTS_EXTRACTED");
       }
@@ -1654,7 +1766,7 @@ async function runFullGenerationBackground(
       .limit(1);
 
     if (!existingStrategy) {
-      await runGenerateStrategy(tenderId);
+      await runGenerateStrategy(tenderId, undefined, generationAttemptId);
     }
 
     // Phase 3: Proposal draft — reload everything freshly after prior phases
@@ -1683,6 +1795,7 @@ async function runFullGenerationBackground(
       proposalId,
       briefText:       buildBriefText(tender, requirements),
       strategyContext: buildStrategyContext(latestStrategy),
+      generationAttemptId,
     });
 
     // Mark orchestration complete
@@ -1690,6 +1803,8 @@ async function runFullGenerationBackground(
 
   } catch (err) {
     await fail(err);
+  } finally {
+    stopHeartbeat();
   }
 }
 
@@ -1714,6 +1829,7 @@ ${tender.description}`;
 
   let proposalId: number;
   let currentGenStatus: string;
+  const generationAttemptId = randomUUID();
 
   try {
     const result = await db.transaction(async (tx: DbTx) => {
@@ -1782,6 +1898,8 @@ ${tender.description}`;
       await tx.execute(sql`
         UPDATE proposals
         SET generation_status = 'extracting',
+            generation_error  = NULL,
+            generation_attempt_id = ${generationAttemptId},
             status            = 'proposal_drafting',
             client_name       = ${tender.agency},
             industry          = ${tender.category},
@@ -1801,7 +1919,12 @@ ${tender.description}`;
       // The draft service creates sections atomically after AI output is validated,
       // preserving any prior content if the draft phase fails.
 
-      return { proposalId: locked.id, generationStatus: "extracting", alreadyRunning: false };
+      return {
+        proposalId: locked.id,
+        generationStatus: "extracting",
+        generationAttemptId,
+        alreadyRunning: false,
+      };
     });
 
     proposalId      = result.proposalId;
@@ -1827,7 +1950,7 @@ ${tender.description}`;
   }
 
   res.status(202).json({ proposalId, generationStatus: "extracting" });
-  void runFullGenerationBackground(id, proposalId);
+  void runFullGenerationBackground(id, proposalId, generationAttemptId);
 });
 
 // ── Manual tender import ───────────────────────────────────────────────────

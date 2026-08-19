@@ -363,6 +363,25 @@ describe("§16 proposal-detail — polling and form sync", () => {
     );
   });
 
+  it("proposal detail does not treat legacy proposal_drafting status alone as active", () => {
+    const activeStart = detailSrc.indexOf("const isGenActive");
+    const activeEnd = detailSrc.indexOf(";", activeStart) + 1;
+    const activeExpression = activeStart >= 0 ? detailSrc.slice(activeStart, activeEnd) : "";
+    assert.ok(activeExpression.includes('"extracting"'));
+    assert.ok(activeExpression.includes('"strategizing"'));
+    assert.ok(activeExpression.includes('"drafting"'));
+    assert.equal(
+      activeExpression.includes("proposal_drafting"),
+      false,
+      "detail polling must stop when no explicit generation phase is active",
+    );
+    assert.equal(
+      detailSrc.includes('generationStatus === "drafting" || isDrafting'),
+      false,
+      "detail status panel must not spin from legacy proposal status alone",
+    );
+  });
+
   it("proposals-workspace uses run-full-generation to launch generation", () => {
     // The workspace page (not proposal-detail) now drives generation via run-full-generation
     assert.ok(
@@ -372,6 +391,35 @@ describe("§16 proposal-detail — polling and form sync", () => {
     assert.ok(
       workspaceSrc.includes("Generate Proposal"),
       "proposals-workspace.tsx must show a Generate Proposal action"
+    );
+  });
+
+  it("workspace polling is gated only by explicit active generation phases", () => {
+    const fnStart = workspaceSrc.indexOf("function isActiveGeneration");
+    const fnEnd = workspaceSrc.indexOf("\n}", fnStart) + 2;
+    const fnBody = fnStart >= 0 ? workspaceSrc.slice(fnStart, fnEnd) : "";
+    assert.ok(fnBody.includes('"extracting"'));
+    assert.ok(fnBody.includes('"strategizing"'));
+    assert.ok(fnBody.includes('"drafting"'));
+    assert.equal(
+      fnBody.includes("proposal_drafting"),
+      false,
+      "legacy proposal_drafting status alone must not cause perpetual polling",
+    );
+  });
+
+  it("failed workspace rows explain the interruption and retry through the canonical flow", () => {
+    assert.ok(
+      workspaceSrc.includes("proposal.generationError"),
+      "workspace must display the persisted generation failure explanation",
+    );
+    assert.ok(
+      workspaceSrc.includes("Retry to start again"),
+      "workspace must explain that the user can safely retry",
+    );
+    assert.ok(
+      workspaceSrc.includes("onGenerate(item.id)"),
+      "Retry must use the same canonical full-generation action as Generate Proposal",
     );
   });
 });
@@ -657,5 +705,109 @@ describe("§B-5 session init failure → dbReady rejects", () => {
     const exitPos   = indexSrc.indexOf("process.exit(1)");
     const listenPos = indexSrc.indexOf("app.listen");
     assert.ok(exitPos < listenPos, "process.exit(1) must precede app.listen");
+  });
+});
+
+// ── §B-6  Retry a recovered generation through the canonical flow ────────────
+
+describe("§B-6 failed generation → explicit safe retry", () => {
+  it("reuses the canonical proposal and claims the full-generation flow", async () => {
+    const tenderId = await _createTestTender();
+    const [proposal] = await db.insert(proposalsTable).values({
+      clientName: "Test Agency",
+      industry: "General",
+      briefText: "Recovered proposal brief.",
+      proposalContent: "",
+      status: "draft",
+      generationStatus: "failed",
+      generationError: "Generation was interrupted. Retry to start again.",
+      tenderId,
+    }).returning({ id: proposalsTable.id });
+    await db
+      .update(tendersTable)
+      .set({ proposalId: proposal.id, status: "draft" })
+      .where(eq(tendersTable.id, tenderId));
+
+    let resolveFirstAi!: () => void;
+    let firstCall = true;
+    const firstAiCalled = new Promise<void>((resolve) => {
+      resolveFirstAi = resolve;
+    });
+    let releaseFirstAi!: () => void;
+    const firstAiGate = new Promise<void>((resolve) => {
+      releaseFirstAi = resolve;
+    });
+
+    __setInvokeAISpy(async (params) => {
+      if (firstCall) {
+        firstCall = false;
+        resolveFirstAi();
+        await firstAiGate;
+      }
+      if (params.feature === "requirements_extraction") {
+        return {
+          content: JSON.stringify({
+            requirements: [
+              { requirementText: "Submit a proposal", category: "general", isMandatory: true },
+            ],
+          }),
+          model: "test",
+        };
+      }
+      if (params.feature === "strategy_generation") {
+        return {
+          content: JSON.stringify({
+            positioning: "Clear response",
+            winThemes: ["Clarity"],
+            recommendedCaseStudies: [],
+            risks: [],
+            messagingGuidance: "Be direct",
+          }),
+          model: "test",
+        };
+      }
+      return { content: JSON.stringify({ sections: [] }), model: "test" };
+    });
+
+    try {
+      const response = await fetch(
+        `${_baseUrl}/api/opportunities/${tenderId}/run-full-generation`,
+        { method: "POST", headers: { "Content-Type": "application/json" } },
+      );
+      const body = await response.json() as { proposalId?: number; generationStatus?: string };
+      assert.equal(response.status, 202);
+      assert.equal(body.proposalId, proposal.id, "retry must reuse the canonical proposal");
+      assert.equal(body.generationStatus, "extracting");
+
+      await Promise.race([
+        firstAiCalled,
+        new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error("retry did not reach AI within 5 s")), 5000),
+        ),
+      ]);
+
+      const [claimed] = await db
+        .select()
+        .from(proposalsTable)
+        .where(eq(proposalsTable.id, proposal.id));
+      assert.equal(claimed.generationStatus, "extracting");
+      assert.equal(claimed.status, "proposal_drafting");
+      assert.equal(claimed.generationError, null);
+    } finally {
+      releaseFirstAi();
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
+        const [row] = await db
+          .select({ generationStatus: proposalsTable.generationStatus })
+          .from(proposalsTable)
+          .where(eq(proposalsTable.id, proposal.id));
+        if (!row || row.generationStatus === "ready" || row.generationStatus === "failed") {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      __setInvokeAISpy(null);
+      await _cleanupTestTender(tenderId);
+    }
   });
 });

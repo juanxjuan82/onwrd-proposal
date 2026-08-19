@@ -321,7 +321,7 @@ describe("§G run-full-generation and proposals workspace", () => {
 
   it("runFullGenerationBackground is invoked with void after 202 response", () => {
     assert.ok(
-      oppsSrc.includes("void runFullGenerationBackground(id, proposalId)"),
+      oppsSrc.includes("void runFullGenerationBackground(id, proposalId, generationAttemptId)"),
       "background pipeline must be launched with void (fire-and-forget) after responding 202"
     );
   });
@@ -385,12 +385,12 @@ describe("§G run-full-generation and proposals workspace", () => {
     );
   });
 
-  it("runFullGenerationBackground sets generationStatus=failed on error", () => {
+  it("runFullGenerationBackground delegates owned failure reconciliation", () => {
     const bgStart = oppsSrc.indexOf("async function runFullGenerationBackground");
-    const failBlock = oppsSrc.slice(bgStart, bgStart + 1000);
+    const failBlock = oppsSrc.slice(bgStart, bgStart + 3000);
     assert.ok(
-      failBlock.includes("generation_status = 'failed'"),
-      "background fn fail() helper must set generationStatus=failed in the proposals table"
+      failBlock.includes("failOwnedProposalGeneration"),
+      "background fn fail() helper must atomically reconcile the proposal and tender"
     );
   });
 
@@ -595,14 +595,20 @@ describe("§F Frontend workflow gating", () => {
     );
   });
 
-  it("isGenActive combines isDrafting with active generation status values", () => {
+  it("isGenActive uses only explicit active generation status values", () => {
+    const activeStart = detailSrc.indexOf("const isGenActive");
+    const activeEnd = detailSrc.indexOf(";", activeStart) + 1;
+    const activeExpression = activeStart >= 0 ? detailSrc.slice(activeStart, activeEnd) : "";
     assert.ok(
-      detailSrc.includes("isGenActive"),
+      activeExpression.includes('"extracting"') &&
+        activeExpression.includes('"strategizing"') &&
+        activeExpression.includes('"drafting"'),
       "proposal-detail.tsx must define isGenActive to track generation in flight"
     );
-    assert.ok(
-      detailSrc.includes("isDrafting"),
-      "isGenActive must incorporate isDrafting"
+    assert.equal(
+      activeExpression.includes("proposal_drafting"),
+      false,
+      "legacy proposal_drafting status alone must not keep detail polling active"
     );
   });
 

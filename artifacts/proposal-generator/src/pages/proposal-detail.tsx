@@ -458,6 +458,7 @@ export default function ProposalDetail() {
   // Derived from proposal
   const linkedTenderId = (proposal as Record<string, unknown> | undefined)?.tenderId as number | null | undefined;
   const generationStatus = (proposal as Record<string, unknown> | undefined)?.generationStatus as string | null | undefined;
+  const generationError = (proposal as Record<string, unknown> | undefined)?.generationError as string | null | undefined;
 
   const hasSections = sectionsLoaded && sections && sections.length > 0;
 
@@ -504,8 +505,8 @@ export default function ProposalDetail() {
   }, [proposal, form]);
 
   // ── Continuous polling while proposal is being generated ──────────────────
-  const isDrafting = (proposal?.status as string | undefined) === "proposal_drafting";
-  const isGenActive = isDrafting || ["extracting", "strategizing", "drafting"].includes(generationStatus ?? "");
+  const isGenActive = ["extracting", "strategizing", "drafting"].includes(generationStatus ?? "");
+  const isDrafting = isGenActive;
   useEffect(() => {
     if (!isGenActive) return;
     const poll = setInterval(() => {
@@ -772,7 +773,7 @@ export default function ProposalDetail() {
                   </span>
                 );
               }
-              if (generationStatus === "drafting" || isDrafting) {
+              if (generationStatus === "drafting") {
                 return (
                   <span className="inline-flex items-center gap-1.5 text-sm text-amber-400" data-testid="gen-status-text">
                     <Loader2 className="w-3.5 h-3.5 animate-spin" /> Writing draft…
@@ -789,7 +790,8 @@ export default function ProposalDetail() {
               if (generationStatus === "failed") {
                 return (
                   <span className="inline-flex items-center gap-1.5 text-sm text-red-400" data-testid="gen-status-text">
-                    <AlertCircle className="w-3.5 h-3.5" /> Generation failed — retry from Proposals
+                    <AlertCircle className="w-3.5 h-3.5" />
+                    {generationError ?? "Generation stopped — retry from Proposals"}
                   </span>
                 );
               }

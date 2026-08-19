@@ -124,6 +124,8 @@ export interface DraftInput {
   briefText: string;
   /** Assembled from the latest strategy row; empty string if none. */
   strategyContext: string;
+  /** Ownership token for a route-launched generation attempt. */
+  generationAttemptId?: string;
 }
 
 export interface DraftResult {
@@ -159,6 +161,7 @@ export async function generateProposalDraftAndPersist({
   proposalId,
   briefText,
   strategyContext,
+  generationAttemptId,
 }: DraftInput): Promise<DraftResult> {
   type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -235,6 +238,24 @@ export async function generateProposalDraftAndPersist({
 
   // ── 4. ONE atomic transaction: replace sections + update snapshot ────────
   await db.transaction(async (tx: DbTx) => {
+    // A stale worker must never overwrite a newer retry. Route-launched jobs
+    // carry an ownership token; direct service callers (primarily tests) may
+    // omit it and retain the original service contract.
+    if (generationAttemptId) {
+      const ownerResult = await tx.execute(sql`
+        SELECT generation_attempt_id
+        FROM proposals
+        WHERE id = ${proposalId}
+        FOR UPDATE
+      `);
+      const owner = ownerResult.rows[0] as { generation_attempt_id: string | null } | undefined;
+      if (!owner || owner.generation_attempt_id !== generationAttemptId) {
+        const err = new Error("GENERATION_SUPERSEDED") as NodeJS.ErrnoException;
+        err.code = "GENERATION_SUPERSEDED";
+        throw err;
+      }
+    }
+
     // a. Record generation run
     const [genRun] = await tx
       .insert(proposalGenerationRunsTable)

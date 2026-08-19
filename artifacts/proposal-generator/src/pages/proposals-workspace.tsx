@@ -22,6 +22,7 @@ interface WorkspaceProposal {
   googleFileId: string | null;
   reviewRequired?: boolean;
   flaggedPhrases?: string[];
+  generationError?: string | null;
   updatedAt: string | null;
 }
 
@@ -78,7 +79,7 @@ function sourceBadge(sourceType: string | null) {
   }
 }
 
-function generationStatusLabel(genStatus: string | null, proposalStatus: string): { label: string; color: string } | null {
+function generationStatusLabel(genStatus: string | null): { label: string; color: string } | null {
   switch (genStatus) {
     case "extracting":
       return { label: "Extracting requirements…", color: "text-blue-400" };
@@ -91,17 +92,13 @@ function generationStatusLabel(genStatus: string | null, proposalStatus: string)
     case "ready":
       return null; // show action button instead
     default:
-      if (proposalStatus === "proposal_drafting") {
-        return { label: "Generating…", color: "text-yellow-400" };
-      }
       return null;
   }
 }
 
 function isActiveGeneration(item: WorkspaceItem): boolean {
   const gs = item.proposal?.generationStatus;
-  return gs === "extracting" || gs === "strategizing" || gs === "drafting" ||
-    item.proposal?.status === "proposal_drafting";
+  return gs === "extracting" || gs === "strategizing" || gs === "drafting";
 }
 
 function isHandoffComplete(proposal: WorkspaceProposal | null): boolean {
@@ -175,7 +172,7 @@ function ActionCell({
 
   // Active generation → spinner + status text
   if (proposal && isActiveGeneration(item)) {
-    const info = generationStatusLabel(proposal.generationStatus, proposal.status);
+    const info = generationStatusLabel(proposal.generationStatus);
     return (
       <span className={`inline-flex items-center gap-1.5 text-xs ${info?.color ?? "text-muted-foreground"} whitespace-nowrap`}>
         <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
@@ -187,16 +184,24 @@ function ActionCell({
   // Failed → Retry
   if (proposal?.generationStatus === "failed") {
     return (
-      <Button
-        size="sm"
-        variant="outline"
-        className="gap-1.5 text-xs border-red-800 text-red-400 hover:bg-red-950/30 whitespace-nowrap"
-        onClick={(e) => { e.stopPropagation(); onGenerate(item.id); }}
-        disabled={generating}
-      >
-        {generating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
-        Retry
-      </Button>
+      <div className="flex items-center gap-3">
+        <span
+          className="max-w-56 text-xs text-red-400"
+          title={proposal.generationError ?? "Generation stopped before it completed."}
+        >
+          {proposal.generationError ?? "Generation stopped. Retry to start again."}
+        </span>
+        <Button
+          size="sm"
+          variant="outline"
+          className="gap-1.5 text-xs border-red-800 text-red-400 hover:bg-red-950/30 whitespace-nowrap"
+          onClick={(e) => { e.stopPropagation(); onGenerate(item.id); }}
+          disabled={generating}
+        >
+          {generating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+          Retry
+        </Button>
+      </div>
     );
   }
 

@@ -28,6 +28,10 @@ import {
   UpdateProposalParams,
   DeleteProposalParams,
 } from "@workspace/api-zod";
+import {
+  reconcileProposalGenerationState,
+  recoverStaleProposalGenerations,
+} from "../lib/proposal-generation-recovery.js";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -462,6 +466,10 @@ router.post("/proposals", async (req, res) => {
 // they've been selected (proposal_id IS NOT NULL on the tender).
 router.get("/proposals/workspace", async (req, res) => {
   try {
+    // Reconcile before reading so an interrupted job cannot be rendered as an
+    // active spinner for the lifetime of a running server.
+    await reconcileProposalGenerationState();
+
     const result = await db.execute(sql`
       SELECT
         t.id,
@@ -484,6 +492,7 @@ router.get("/proposals/workspace", async (req, res) => {
         p.google_file_id           AS p_google_file_id,
         p.review_required          AS p_review_required,
         p.flagged_phrases          AS p_flagged_phrases,
+        p.generation_error          AS p_generation_error,
         p.updated_at               AS p_updated_at
       FROM tenders t
       LEFT JOIN proposals p ON p.tender_id = t.id
@@ -504,6 +513,7 @@ router.get("/proposals/workspace", async (req, res) => {
               googleFileId:     r.p_google_file_id as string | null,
               reviewRequired:   Boolean(r.p_review_required),
               flaggedPhrases:   (r.p_flagged_phrases as string[] | null) ?? [],
+               generationError:  r.p_generation_error as string | null,
               updatedAt:        r.p_updated_at as string | null,
             }
           : null;
@@ -539,6 +549,10 @@ router.get("/proposals/:id", async (req, res) => {
   }
 
   try {
+    // Detail polling must recover abandoned work even when the user never
+    // returns to the workspace list.
+    await recoverStaleProposalGenerations();
+
     const [proposal] = await db
       .select()
       .from(proposalsTable)
