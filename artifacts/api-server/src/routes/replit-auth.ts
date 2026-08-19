@@ -14,6 +14,7 @@ import {
   deleteSession,
   getOidcConfig,
   getSessionId,
+  isAllowedEmail,
   ISSUER_URL,
   SESSION_COOKIE,
   SESSION_TTL,
@@ -258,7 +259,13 @@ router.get('/callback', async (req: Request, res: Response) => {
     return;
   }
 
-  const dbUser = await upsertUser(claims as unknown as Record<string, unknown>);
+  const claimData = claims as unknown as Record<string, unknown>;
+  if (!isAllowedEmail(claimData.email)) {
+    res.status(403).send('Only @onwrdadvisors.com accounts can access this workspace.');
+    return;
+  }
+
+  const dbUser = await upsertUser(claimData);
 
   const now = Math.floor(Date.now() / 1000);
   const sessionData: SessionData = {
@@ -328,9 +335,16 @@ router.post(
         return;
       }
 
-      const dbUser = await upsertUser(
-        claims as unknown as Record<string, unknown>,
-      );
+      const claimData = claims as unknown as Record<string, unknown>;
+      if (!isAllowedEmail(claimData.email)) {
+        res.status(403).json({
+          error: 'Only @onwrdadvisors.com accounts can access this workspace.',
+          code: 'email_domain_not_allowed',
+        });
+        return;
+      }
+
+      const dbUser = await upsertUser(claimData);
 
       const now = Math.floor(Date.now() / 1000);
       const sessionData: SessionData = {

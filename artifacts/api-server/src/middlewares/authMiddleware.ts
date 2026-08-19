@@ -7,6 +7,7 @@ import {
   getOidcConfig,
   getSession,
   getSessionId,
+  isAllowedEmail,
   updateSession,
   type SessionData,
 } from '../lib/auth';
@@ -75,6 +76,15 @@ export async function authMiddleware(
 
   const refreshed = await refreshIfExpired(sid, session);
   if (!refreshed) {
+    await clearSession(res, sid);
+    next();
+    return;
+  }
+
+  // Enforce the workspace email policy for existing sessions too. This
+  // prevents a previously-created non-ONWRD session from bypassing the
+  // domain check that runs during the OIDC callback.
+  if (!isAllowedEmail(refreshed.user.email)) {
     await clearSession(res, sid);
     next();
     return;

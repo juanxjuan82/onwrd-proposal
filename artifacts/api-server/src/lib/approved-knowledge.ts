@@ -265,7 +265,7 @@ export function extractOrgCandidates(text: string): string[] {
 
 /**
  * Return organisation names cited in the credentials section that are not
- * covered by the approved-title allowlist (or the extra allowed terms —
+ * exactly matched by the approved-title allowlist (or the extra allowed terms —
  * e.g. the tender's own agency, which a proposal legitimately names).
  */
 export function scanUnverifiedCredentials(
@@ -279,49 +279,90 @@ export function scanUnverifiedCredentials(
   const isAllowed = (candidate: string): boolean => {
     const c = normalize(candidate);
     if (!c) return true;
-    // Allowed when the candidate is contained in an allowed phrase (e.g.
-    // "Securities Commission" ⊂ approved title) or exactly equals one.
-    // Deliberately NOT the reverse: a candidate merely containing an allowed
-    // word ("... Provider of The Bahamas") is still unverified.
-    return allowed.some((a) => a === c || a.includes(c));
+    // A credential must cite the complete approved title. `normalize` permits
+    // harmless formatting/case differences but never a partial or renamed
+    // title such as "Templeton Religion" for "Templeton Religion Trust".
+    return allowed.some((a) => a === c);
   };
   return extractOrgCandidates(sectionContent).filter((name) => !isAllowed(name));
 }
 
 /**
  * Extract the "Case Studies" / credentials portion of a whole proposal
- * document (markdown). Returns null when no such section heading exists.
- * Captures from the matching heading until the next heading or `---` divider.
+ * document. Supports Markdown/bold headings and the numbered plain-text
+ * headings used by the canonical proposal template. Returns null when no such
+ * section heading exists. Captures until the next comparable section boundary
+ * or divider.
  */
 export function extractCaseStudiesPortion(markdown: string): string | null {
   const lines = markdown.split("\n");
-  // Heading level: 1-6 for markdown headings, 7 for bold-line pseudo-headings,
-  // 0 for non-headings.
-  const headingLevel = (l: string): number => {
+  type SectionHeading = {
+    kind: "markdown" | "bold" | "numbered";
+    level: number;
+  };
+  const getHeading = (l: string): SectionHeading | null => {
     const m = /^\s{0,3}(#{1,6})\s+\S/.exec(l);
-    if (m) return m[1].length;
-    if (/^\s*\*\*[^*]+\*\*:?\s*$/.test(l)) return 7;
-    return 0;
+    if (m) return { kind: "markdown", level: m[1].length };
+    if (/^\s*\*\*[^*]+\*\*:?\s*$/.test(l)) {
+      return { kind: "bold", level: 7 };
+    }
+    // Top-level numbered headers from PROPOSAL_TEMPLATE: "13. CASE STUDIES
+    // AND CREDENTIALS". Deliberately excludes subclauses such as "14.1
+    // Confidentiality", which belong to the following top-level section.
+    if (/^\s*\d+\.\s+[A-Z][A-Z0-9 \t&/–—'():,.-]*\s*$/.test(l)) {
+      return { kind: "numbered", level: 1 };
+    }
+    return null;
   };
   const isCaseStudiesHeading = (l: string) =>
     /case\s+stud|credential|past\s+(work|client)|track\s+record/i.test(l);
+  // Bold pseudo-headings have no inherent hierarchy. These are proposal
+  // section labels rather than client-style bold subheadings, so they end a
+  // bold credentials section; `**World Central Kitchen**` does not.
+  const isLikelyTopLevelSection = (l: string) =>
+    /\b(executive\s+summary|project\s+overview|our\s+approach|scope|deliverable|timeline|investment|pricing|why\s+onwrd|legal|terms|team|next\s+steps)\b/i.test(l);
 
   const out: string[] = [];
   let capturing = false;
   let found = false;
   let sectionLevel = 0;
+  let sectionKind: SectionHeading["kind"] | null = null;
 
   for (const line of lines) {
-    const level = headingLevel(line);
-    if (level > 0) {
-      if (capturing && level <= sectionLevel) {
-        // Same-or-shallower heading ends the section…
+    const heading = getHeading(line);
+    if (heading) {
+      const isBoundary = (() => {
+        if (!capturing) return false;
+        // A top-level numbered header always begins the next template section.
+        if (heading.kind === "numbered") return true;
+        // In a numbered credentials section, Markdown/bold headings are
+        // subordinate content unless another numbered section starts.
+        if (sectionKind === "numbered") return false;
+        if (sectionKind === "bold") {
+          // `### Client Name` and `**Client Name**` are normal ways to name
+          // credentials beneath a bold section header. Markdown H1/H2 and
+          // recognizable proposal section labels are genuine boundaries.
+          return (
+            (heading.kind === "markdown" && heading.level <= 2) ||
+            (heading.kind === "bold" && isLikelyTopLevelSection(line))
+          );
+        }
+        // Markdown credentials headings preserve normal heading hierarchy.
+        return (
+          (heading.kind === "bold" && isLikelyTopLevelSection(line)) ||
+          heading.level <= sectionLevel
+        );
+      })();
+      if (isBoundary) {
+        // Same-or-shallower Markdown/bold headings, and all following
+        // top-level numbered template headings, end the credentials section.
         capturing = false;
       }
       if (!capturing && isCaseStudiesHeading(line)) {
         capturing = true;
         found = true;
-        sectionLevel = level;
+        sectionLevel = heading.level;
+        sectionKind = heading.kind;
         continue;
       }
       // …but subordinate headings inside the section are CONTENT: proposals

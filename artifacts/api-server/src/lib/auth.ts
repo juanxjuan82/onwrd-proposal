@@ -8,6 +8,21 @@ import * as client from 'openid-client';
 export const ISSUER_URL = process.env.ISSUER_URL ?? 'https://replit.com/oidc';
 export const SESSION_COOKIE = 'sid';
 export const SESSION_TTL = 7 * 24 * 60 * 60 * 1000;
+export const ALLOWED_EMAIL_DOMAIN = 'onwrdadvisors.com';
+
+/**
+ * ONWRD workspace accounts must use an exact @onwrdadvisors.com address.
+ * The comparison is case-insensitive and rejects subdomains or lookalike
+ * addresses such as user@onwrdadvisors.com.evil.example.
+ */
+export function isAllowedEmail(email: unknown): email is string {
+  if (typeof email !== 'string') return false;
+  const normalized = email.trim().toLowerCase();
+  const suffix = `@${ALLOWED_EMAIL_DOMAIN}`;
+  if (!normalized.endsWith(suffix)) return false;
+  const localPart = normalized.slice(0, -suffix.length);
+  return localPart.length > 0 && !/[\s@]/.test(localPart);
+}
 
 export interface SessionData {
   user: AuthUser;

@@ -19,6 +19,8 @@ import {
   getApprovedKnowledge,
   buildKnowledgeBlock,
   extractOrgCandidates,
+  extractCaseStudiesPortion,
+  scanDocumentCredentials,
   scanUnverifiedCredentials,
 } from "./approved-knowledge.js";
 import { generateProposalDraftAndPersist } from "./proposal-draft-service.js";
@@ -62,6 +64,24 @@ describe("knowledge credentials (task #64)", () => {
       const content = "We rebranded the Caribbean Telecommunications Provider app suite.";
       const unverified = scanUnverifiedCredentials(content, APPROVED_TITLES);
       assert.ok(unverified.some((n) => n.includes("Telecommunications Provider")));
+    });
+
+    it("flags partial variants of every approved-title shape rather than treating them as credentials", () => {
+      const partials = [
+        "Templeton Religion",
+        "Securities Commission",
+        "Telecommunications",
+      ];
+      for (const name of partials) {
+        const unverified = scanUnverifiedCredentials(
+          `ONWRD delivered a campaign for ${name}.`,
+          APPROVED_TITLES,
+        );
+        assert.ok(
+          unverified.includes(name),
+          `partial title ${name} must be flagged, got: ${JSON.stringify(unverified)}`,
+        );
+      }
     });
 
     it("flags one-word and acronym invented clients (Acme, Disney, UNICEF)", () => {
@@ -120,6 +140,49 @@ describe("knowledge credentials (task #64)", () => {
         "Our Approach is simple. This Project will succeed. We Deliver results.",
       );
       assert.deepEqual(candidates, []);
+    });
+
+    it("scans the numbered Case Studies header used by the canonical proposal template", () => {
+      const document = [
+        "ONWRD PROJECT PROPOSAL",
+        "12. WHY ONWRD",
+        "Senior strategy and delivery.",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "13. CASE STUDIES AND CREDENTIALS",
+        "ONWRD delivered a regional rebrand for World Central Kitchen.",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "14. LEGAL AND OPERATIONAL TERMS",
+        "14.1 Confidentiality",
+        "The parties keep materials confidential.",
+      ].join("\n");
+      const portion = extractCaseStudiesPortion(document);
+      assert.ok(portion?.includes("World Central Kitchen"));
+      assert.ok(!portion?.includes("LEGAL AND OPERATIONAL TERMS"));
+      const unverified = scanDocumentCredentials(document, APPROVED_TITLES);
+      assert.ok(
+        unverified.some((name) => name.includes("World Central Kitchen")),
+        `numbered-template credential must be flagged, got ${JSON.stringify(unverified)}`,
+      );
+    });
+
+    it("retains Markdown and bold client subheadings beneath a bold credentials heading", () => {
+      const document = [
+        "**CASE STUDIES AND CREDENTIALS**",
+        "### World Central Kitchen",
+        "A regional brand engagement.",
+        "**UNICEF**",
+        "A youth outreach programme.",
+        "**LEGAL AND OPERATIONAL TERMS**",
+        "### Confidentiality",
+        "All materials remain confidential.",
+      ].join("\n");
+      const portion = extractCaseStudiesPortion(document);
+      assert.ok(portion?.includes("World Central Kitchen"));
+      assert.ok(portion?.includes("UNICEF"));
+      assert.ok(!portion?.includes("All materials remain confidential."));
+      const unverified = scanDocumentCredentials(document, APPROVED_TITLES);
+      assert.ok(unverified.includes("World Central Kitchen"));
+      assert.ok(unverified.includes("UNICEF"));
     });
   });
 
@@ -432,6 +495,118 @@ describe("knowledge credentials (task #64)", () => {
       }
     });
 
+    it("partial variants of approved titles are blocked on create and export", async () => {
+      const partials = [
+        "Templeton Religion",
+        "Securities Commission",
+        "Telecommunications",
+      ];
+      for (const name of partials) {
+        const content = [
+          "# Proposal",
+          "## Case Studies and Credentials",
+          `ONWRD delivered a campaign for ${name}.`,
+          "## Investment",
+          "Pricing to be confirmed.",
+        ].join("\n");
+        const createRes = await fetch(`${baseUrl}/api/proposals`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            clientName: "Ministry of Tourism",
+            industry: "Marketing",
+            briefText: "brief",
+            proposalContent: content,
+          }),
+        });
+        assert.equal(createRes.status, 201);
+        const created = await createRes.json() as { id: number; unverifiedCredentials: string[] };
+        try {
+          assert.ok(
+            created.unverifiedCredentials.includes(name),
+            `partial title ${name} must be flagged on save`,
+          );
+          const exportRes = await fetch(`${baseUrl}/api/proposals/${created.id}/export`, { method: "POST" });
+          assert.equal(exportRes.status, 422, `partial title ${name} must block export`);
+          assert.equal(((await exportRes.json()) as { code?: string }).code, "unverified_credentials");
+        } finally {
+          await db.delete(proposalsTable).where(eq(proposalsTable.id, created.id));
+        }
+      }
+    });
+
+    it("numbered parse-brief proposal format with an invented credential is blocked on create and export", async () => {
+      const content = [
+        "ONWRD PROJECT PROPOSAL",
+        "12. WHY ONWRD",
+        "Senior strategy and delivery.",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "13. CASE STUDIES AND CREDENTIALS",
+        "ONWRD previously delivered a rebrand for World Central Kitchen.",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "14. LEGAL AND OPERATIONAL TERMS",
+        "14.1 Confidentiality",
+        "The parties keep materials confidential.",
+      ].join("\n");
+      const createRes = await fetch(`${baseUrl}/api/proposals`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientName: "Ministry of Tourism",
+          industry: "Marketing",
+          briefText: "brief",
+          proposalContent: content,
+        }),
+      });
+      assert.equal(createRes.status, 201);
+      const created = await createRes.json() as { id: number; unverifiedCredentials: string[] };
+      try {
+        assert.ok(
+          created.unverifiedCredentials.some((name) => name.includes("World Central Kitchen")),
+          `numbered-template credential must be flagged on save, got ${JSON.stringify(created.unverifiedCredentials)}`,
+        );
+        const exportRes = await fetch(`${baseUrl}/api/proposals/${created.id}/export`, { method: "POST" });
+        assert.equal(exportRes.status, 422);
+        assert.equal(((await exportRes.json()) as { code?: string }).code, "unverified_credentials");
+      } finally {
+        await db.delete(proposalsTable).where(eq(proposalsTable.id, created.id));
+      }
+    });
+
+    it("bold credentials heading with Markdown and bold client subheadings is blocked on create and export", async () => {
+      const content = [
+        "**CASE STUDIES AND CREDENTIALS**",
+        "### World Central Kitchen",
+        "A regional brand engagement.",
+        "**UNICEF**",
+        "A youth outreach programme.",
+        "**LEGAL AND OPERATIONAL TERMS**",
+        "### Confidentiality",
+        "All materials remain confidential.",
+      ].join("\n");
+      const createRes = await fetch(`${baseUrl}/api/proposals`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientName: "Ministry of Tourism",
+          industry: "Marketing",
+          briefText: "brief",
+          proposalContent: content,
+        }),
+      });
+      assert.equal(createRes.status, 201);
+      const created = await createRes.json() as { id: number; unverifiedCredentials: string[] };
+      try {
+        assert.ok(created.unverifiedCredentials.includes("World Central Kitchen"));
+        assert.ok(created.unverifiedCredentials.includes("UNICEF"));
+        const exportRes = await fetch(`${baseUrl}/api/proposals/${created.id}/export`, { method: "POST" });
+        assert.equal(exportRes.status, 422);
+        assert.equal(((await exportRes.json()) as { code?: string }).code, "unverified_credentials");
+      } finally {
+        await db.delete(proposalsTable).where(eq(proposalsTable.id, created.id));
+      }
+    });
+
     it("invented clients named only in Case Studies sub-headings are still caught (multi-word + acronym)", async () => {
       const content = [
         "# Proposal for Ministry of Tourism",
@@ -472,7 +647,7 @@ describe("knowledge credentials (task #64)", () => {
 
     it("unapproving a cited knowledge doc re-blocks export live — even for a completed proposal", async () => {
       // Own approved case study we can safely revoke
-      const marker = `Marquee Island Client ${Date.now()}`;
+      const marker = "Marquee Island Client";
       const [doc] = await db
         .insert(knowledgeDocumentsTable)
         .values({ title: marker, content: "Case study body.", docType: "case_study", isApproved: true })
