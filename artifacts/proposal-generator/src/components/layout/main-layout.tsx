@@ -6,8 +6,7 @@ import {
 } from "lucide-react";
 import { WalkthroughWizard, useWalkthrough } from "@/components/walkthrough-wizard";
 import { useAuth } from "@workspace/replit-auth-web";
-
-const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+import { PUBLIC_INTAKE_URL } from "@/lib/public-links";
 
 export function MainLayout({ children }: { children: React.ReactNode }) {
   const [location, navigate] = useLocation();
@@ -43,7 +42,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
       active ? "text-white border-[#0000FF]" : "text-[#555] border-transparent hover:text-[#999]"
     }`;
 
-  const intakeUrl = `${window.location.origin}${BASE}/intake`;
+  const intakeUrl = PUBLIC_INTAKE_URL;
 
   const menuItems: { label: string; icon: React.ElementType; action: () => void }[] = [
     {
