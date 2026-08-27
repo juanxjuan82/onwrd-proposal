@@ -106,7 +106,7 @@ export function AccessDeniedScreen() {
 export function RequireAuth({ children }: { children: React.ReactNode }) {
   const [expired, setExpired] = useState(false);
   const [accessDenied, setAccessDenied] = useState(false);
-  const { signOut, openSignIn } = useClerk();
+  const { signOut } = useClerk();
 
   useEffect(() => {
     const expiredHandler = () => setExpired(true);
@@ -123,11 +123,25 @@ export function RequireAuth({ children }: { children: React.ReactNode }) {
     return <AccessDeniedScreen />;
   }
 
+  const handleLoginAgain = async () => {
+    const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
+    const signInPath = `${basePath}/sign-in`;
+    try {
+      await signOut({ redirectUrl: `${window.location.origin}${signInPath}` });
+    } catch (error) {
+      console.error(
+        "Session recovery failed:",
+        error instanceof Error ? error : new Error(String(error)),
+      );
+      window.location.assign(signInPath);
+    }
+  };
+
   return (
     <>
       <Show when="signed-in">
         {expired && (
-          <SessionExpiredBanner onLogin={() => openSignIn()} />
+          <SessionExpiredBanner onLogin={() => { void handleLoginAgain(); }} />
         )}
         {children}
       </Show>

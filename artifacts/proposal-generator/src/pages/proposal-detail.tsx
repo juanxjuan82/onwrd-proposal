@@ -185,7 +185,11 @@ function SectionsPanel({ proposalId }: { proposalId: number }) {
       const data = await r.json();
       if (!r.ok) {
         const err = data as { error?: string; blockers?: string[]; hint?: string };
-        throw { message: err.error ?? "Approve failed", blockers: err.blockers ?? [] };
+        const approvalError = new Error(err.error ?? "Approve failed") as Error & {
+          blockers: string[];
+        };
+        approvalError.blockers = err.blockers ?? [];
+        throw approvalError;
       }
       return data;
     },
