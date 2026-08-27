@@ -23,6 +23,16 @@ declare module "express-session" {
     googleOAuthState?: string;
     googleOAuthReturnTo?: string;
     /**
+     * Clerk user ID that initiated the in-flight Google OAuth flow. The
+     * callback route is intentionally public (Google redirects the browser
+     * there without our own auth guard), so this is how it verifies the
+     * browser completing the flow is still the same identity that started
+     * it — without it, a Clerk sign-out/sign-in race during the OAuth
+     * round-trip could bind one user's Google Drive tokens to another
+     * user's session.
+     */
+    googleOAuthClerkUserId?: string;
+    /**
      * Clerk native user ID that last authenticated in this Express session.
      * The Express session cookie and Clerk's own session cookie are
      * independent — signing out of Clerk does not clear this cookie — so

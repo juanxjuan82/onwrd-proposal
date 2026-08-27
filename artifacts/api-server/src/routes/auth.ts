@@ -1,6 +1,7 @@
 import { Router } from "express";
 import crypto from "crypto";
 import { getValidGoogleAccessToken, GoogleAuthError } from "../lib/google-auth.js";
+import { resolveClerkAuth } from "../middlewares/apiGuard.js";
 import { logger } from "../lib/logger.js";
 
 const router = Router();
@@ -61,8 +62,15 @@ router.get("/auth/google", (req, res) => {
   const returnTo = sanitiseReturnTo(req.query.returnTo as string | undefined);
   const state = crypto.randomBytes(32).toString("hex");
 
+  // This route is authenticated (not in PUBLIC_ROUTES), so requireAuth has
+  // already set req.session.clerkUserId for the current request. Bind the
+  // flow to that identity so the callback — which IS public, since Google
+  // redirects the browser there directly — can refuse to save tokens if a
+  // different Clerk user completes it (e.g. a sign-out/sign-in race during
+  // the OAuth round-trip).
   req.session.googleOAuthState = state;
   req.session.googleOAuthReturnTo = returnTo;
+  req.session.googleOAuthClerkUserId = req.session.clerkUserId;
 
   req.session.save((err) => {
     if (err) {
@@ -91,9 +99,11 @@ router.get("/auth/google/callback", async (req, res) => {
 
   // Read and immediately delete state — single use, reject replays
   const savedState = req.session.googleOAuthState;
+  const savedClerkUserId = req.session.googleOAuthClerkUserId;
   const returnTo = sanitiseReturnTo(req.session.googleOAuthReturnTo);
   delete req.session.googleOAuthState;
   delete req.session.googleOAuthReturnTo;
+  delete req.session.googleOAuthClerkUserId;
 
   if (error || !code) {
     req.session.save(() => res.redirect(`${returnTo}?google_error=1`));
@@ -116,6 +126,18 @@ router.get("/auth/google/callback", async (req, res) => {
       return;
     }
   } catch {
+    req.session.save(() => res.redirect(`${returnTo}?google_error=1`));
+    return;
+  }
+
+  // This route is public (Google redirects the browser here directly, so
+  // requireAuth never runs for it) — but a real Clerk session can still be
+  // present. Refuse to save tokens unless the identity completing the
+  // callback matches the one that started it: without this, a Clerk
+  // sign-out/sign-in race mid-flow could bind user A's Google Drive tokens
+  // into user B's session (see googleOAuthClerkUserId doc comment).
+  const currentAuth = resolveClerkAuth(req);
+  if (!savedClerkUserId || !currentAuth?.userId || currentAuth.userId !== savedClerkUserId) {
     req.session.save(() => res.redirect(`${returnTo}?google_error=1`));
     return;
   }

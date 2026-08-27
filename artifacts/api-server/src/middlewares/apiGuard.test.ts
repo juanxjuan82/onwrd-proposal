@@ -58,12 +58,29 @@ async function deleteTestUsers(emails: string[]): Promise<void> {
  * strict same-tick visibility.
  */
 async function waitForSessionRow(sid: string): Promise<void> {
+  await waitForSessionField(sid, () => true, "session row never appeared");
+}
+
+/**
+ * Same reasoning as waitForSessionRow, but polls until a specific write is
+ * visible (e.g. a session.save() from a just-completed fetch()) rather than
+ * just row existence — a fetch() resolving does not guarantee this test's
+ * own separate pool connection can already see that write.
+ */
+async function waitForSessionField(
+  sid: string,
+  predicate: (sess: Record<string, unknown>) => boolean,
+  timeoutMessage: string,
+): Promise<Record<string, unknown>> {
   for (let i = 0; i < 40; i++) {
-    const { rows } = await pool.query(`SELECT 1 FROM session WHERE sid = $1`, [sid]);
-    if (rows.length > 0) return;
+    const { rows } = await pool.query<{ sess: Record<string, unknown> }>(
+      `SELECT sess FROM session WHERE sid = $1`,
+      [sid],
+    );
+    if (rows[0] && predicate(rows[0].sess)) return rows[0].sess;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error(`session row for sid=${sid} never appeared`);
+  throw new Error(`sid=${sid}: ${timeoutMessage}`);
 }
 
 describe("requireAuth — Clerk identity resolution & session isolation", () => {
@@ -199,6 +216,78 @@ describe("requireAuth — Clerk identity resolution & session isolation", () => 
         "A's Drive access token must be wiped once B authenticates",
       );
       assert.equal(rows[0].sess.clerkUserId, "user_drive_b", "session should now be bound to B");
+    } finally {
+      await deleteTestUsers([emailA, emailB]);
+    }
+  });
+
+  it("refuses to bind Google Drive tokens if a different Clerk user completes the OAuth callback (sign-out/sign-in race)", async () => {
+    const emailA = "oauth-race-a@onwrdadvisors.com";
+    const emailB = "oauth-race-b@onwrdadvisors.com";
+
+    __setGetAuthOverrideForTesting(() => ({ userId: "user_oauth_race_a" }));
+    __setGetClerkUserOverrideForTesting(async (clerkUserId: string) => {
+      const email = clerkUserId === "user_oauth_race_a" ? emailA : emailB;
+      return {
+        primaryEmailAddressId: "eml",
+        emailAddresses: [{ id: "eml", emailAddress: email, verification: { status: "verified" } }],
+      };
+    });
+
+    try {
+      // 1. User A initiates Google OAuth (authenticated route — binds the
+      //    flow's state to A's Clerk user ID via googleOAuthClerkUserId).
+      const resInitiate = await fetch(`${baseUrl}/api/auth/google?returnTo=%2Fsettings`, {
+        redirect: "manual",
+      });
+      assert.equal(resInitiate.status, 302);
+      const setCookie = resInitiate.headers.get("set-cookie");
+      assert.ok(setCookie, "expected a session cookie to be issued");
+      const sid = extractSid(setCookie!);
+      const cookiePair = setCookie!.split(";")[0];
+      const location = resInitiate.headers.get("location");
+      assert.ok(location, "expected a redirect to Google's OAuth consent screen");
+      const state = new URL(location!).searchParams.get("state");
+      assert.ok(state, "expected a state param in the Google redirect URL");
+
+      // 2. Before A's callback lands, A signs out and B signs in through the
+      //    SAME browser (same Express session cookie — Clerk's own session
+      //    cookie is independent and unaffected by this Express cookie).
+      __setGetAuthOverrideForTesting(() => ({ userId: "user_oauth_race_b" }));
+      const resSwitch = await fetch(`${baseUrl}/api/auth/google/status`, {
+        headers: { Cookie: cookiePair },
+      });
+      assert.equal(resSwitch.status, 200);
+      // A fetch() resolving doesn't guarantee this test's own separate pool
+      // connection can already see resSwitch's write — wait for it.
+      await waitForSessionField(
+        sid,
+        (sess) => sess.clerkUserId === "user_oauth_race_b",
+        "session was never rebound to B",
+      );
+
+      // 3. A's delayed callback now arrives, but the browser is currently
+      //    authenticated as B. It must be rejected before any tokens are
+      //    saved, and it must NOT need to reach Google's token endpoint.
+      const resCallback = await fetch(
+        `${baseUrl}/api/auth/google/callback?code=fake-code&state=${encodeURIComponent(state!)}`,
+        { headers: { Cookie: cookiePair }, redirect: "manual" },
+      );
+      assert.equal(resCallback.status, 302);
+      const callbackLocation = resCallback.headers.get("location");
+      assert.ok(callbackLocation?.includes("google_error=1"), "expected the callback to report an error, not connect");
+
+      const { rows } = await pool.query<{ sess: Record<string, unknown> }>(
+        `SELECT sess FROM session WHERE sid = $1`,
+        [sid],
+      );
+      assert.ok(rows[0], "session row should still exist");
+      assert.equal(
+        rows[0].sess.googleAccessToken,
+        undefined,
+        "A's Google tokens must never be saved into B's session",
+      );
+      assert.equal(rows[0].sess.clerkUserId, "user_oauth_race_b", "session should remain bound to B");
     } finally {
       await deleteTestUsers([emailA, emailB]);
     }

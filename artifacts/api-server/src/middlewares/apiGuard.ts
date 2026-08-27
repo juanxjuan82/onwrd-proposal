@@ -79,6 +79,19 @@ export function __setGetClerkUserOverrideForTesting(
   emailCache.clear();
 }
 
+/**
+ * Resolves the current Clerk identity for a request, honoring the test
+ * override. Shared by requireAuth and the Google OAuth callback route (the
+ * callback is intentionally public — Google redirects the browser there
+ * without our own auth guard — but it still needs to check identity to
+ * prevent binding tokens to the wrong session).
+ */
+export function resolveClerkAuth(req: Request): { userId: string } | null {
+  if (__getAuthOverrideForTesting) return __getAuthOverrideForTesting(req);
+  const auth = getAuth(req);
+  return auth.userId ? { userId: auth.userId } : null;
+}
+
 async function resolveVerifiedEmail(clerkUserId: string): Promise<string | null> {
   const now = Date.now();
   const cached = emailCache.get(clerkUserId);
@@ -142,7 +155,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     return;
   }
 
-  const auth = __getAuthOverrideForTesting ? __getAuthOverrideForTesting(req) : getAuth(req);
+  const auth = resolveClerkAuth(req);
   if (!auth?.userId) {
     res.status(401).json({ error: "Unauthorized" });
     return;
