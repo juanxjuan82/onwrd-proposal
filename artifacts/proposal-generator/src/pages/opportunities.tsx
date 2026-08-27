@@ -11,11 +11,15 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Target, CheckCircle2, XCircle, Clock, AlertCircle,
   Globe, Upload, AlertTriangle, RefreshCw, ExternalLink, Loader2,
-  ChevronRight, Pencil, Zap, FileText,
+  ChevronRight, Pencil, Zap, FileText, Trash2,
 } from "lucide-react";
 import { format } from "date-fns";
 
@@ -229,6 +233,26 @@ function usePursue(id: number) {
       return r.json();
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["opportunities"] }),
+  });
+}
+
+function useDeleteOpportunity(id: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      const r = await fetch(`${BASE}/api/opportunities/${id}`, { method: "DELETE" });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        throw new Error((e as { error?: string }).error ?? "Failed to delete opportunity");
+      }
+    },
+    onSuccess: () => {
+      qc.setQueryData<Opportunity[]>(["opportunities"], (current) =>
+        current?.filter((opportunity) => opportunity.id !== id),
+      );
+      qc.invalidateQueries({ queryKey: ["opportunities"] });
+      qc.invalidateQueries({ queryKey: ["opportunity", id] });
+    },
   });
 }
 
@@ -598,6 +622,8 @@ function OpportunityCard({ opp, onReview }: { opp: Opportunity; onReview: () => 
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const pursue = usePursue(opp.id);
+  const deleteOpportunity = useDeleteOpportunity(opp.id);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   const isAlreadySelected = [
     "bid_started", "proposal_drafting", "needs_onwrd_input",
@@ -611,6 +637,16 @@ function OpportunityCard({ opp, onReview }: { opp: Opportunity; onReview: () => 
       setLocation("/proposals");
     } catch (err) {
       toast({ title: "Failed to select", description: (err as Error).message, variant: "destructive" });
+    }
+  };
+
+  const handleDelete = async () => {
+    try {
+      await deleteOpportunity.mutateAsync();
+      setDeleteOpen(false);
+      toast({ title: "Opportunity deleted", description: "It was removed from Discover." });
+    } catch (err) {
+      toast({ title: "Delete failed", description: (err as Error).message, variant: "destructive" });
     }
   };
 
@@ -690,8 +726,50 @@ function OpportunityCard({ opp, onReview }: { opp: Opportunity; onReview: () => 
           >
             <ChevronRight className="w-4 h-4" />
           </button>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="h-8 w-8 p-0 text-muted-foreground hover:bg-red-950/30 hover:text-red-400"
+            aria-label={`Delete ${opp.title}`}
+            title="Delete opportunity"
+            onClick={(e) => {
+              e.stopPropagation();
+              setDeleteOpen(true);
+            }}
+            disabled={deleteOpportunity.isPending}
+          >
+            {deleteOpportunity.isPending
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <Trash2 className="w-3.5 h-3.5" />}
+          </Button>
         </div>
       </div>
+      <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this opportunity?</AlertDialogTitle>
+            <AlertDialogDescription>
+              “{opp.title}” will be permanently removed from Discover. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteOpportunity.isPending}>No, keep it</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                void handleDelete();
+              }}
+              disabled={deleteOpportunity.isPending}
+              className="bg-red-600 text-white hover:bg-red-700"
+            >
+              {deleteOpportunity.isPending
+                ? <><Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />Deleting…</>
+                : "Yes, delete"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
