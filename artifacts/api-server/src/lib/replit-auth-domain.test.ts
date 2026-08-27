@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { isAllowedEmail } from './auth.js';
+import { isAllowedEmail } from './allowed-domain.js';
 
 describe('ONWRD login email policy', () => {
   it('accepts an exact company-domain email', () => {

@@ -36,9 +36,6 @@
     },
     {
       "path": "../../lib/proposal-content"
-    },
-    {
-      "path": "../../lib/replit-auth-web"
     }
   ]
 }

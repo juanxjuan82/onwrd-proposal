@@ -5,8 +5,10 @@ import {
   Upload, FileText, Link2, ChevronDown, X, HelpCircle,
 } from "lucide-react";
 import { WalkthroughWizard, useWalkthrough } from "@/components/walkthrough-wizard";
-import { useAuth } from "@workspace/replit-auth-web";
+import { useUser, useClerk } from "@clerk/react";
 import { PUBLIC_INTAKE_URL } from "@/lib/public-links";
+
+const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 
 export function MainLayout({ children }: { children: React.ReactNode }) {
   const [location, navigate] = useLocation();
@@ -14,7 +16,9 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
   const [showIntakeModal, setShowIntakeModal] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const tour = useWalkthrough();
-  const { user, logout } = useAuth();
+  const { user } = useUser();
+  const { signOut } = useClerk();
+  const logout = () => signOut({ redirectUrl: window.location.origin + basePath });
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -184,10 +188,12 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
             <div className="pt-3 mt-2 border-t border-[#1a1a1a] -mx-1 flex items-center justify-between gap-2 px-3">
               <div className="min-w-0" data-testid="text-user-indicator">
                 <p className="text-xs text-[#ccc] truncate">
-                  {user.firstName || user.email || "Signed in"}
+                  {user.firstName || user.primaryEmailAddress?.emailAddress || "Signed in"}
                 </p>
-                {user.firstName && user.email && (
-                  <p className="text-[10px] text-[#555] truncate">{user.email}</p>
+                {user.firstName && user.primaryEmailAddress?.emailAddress && (
+                  <p className="text-[10px] text-[#555] truncate">
+                    {user.primaryEmailAddress.emailAddress}
+                  </p>
                 )}
               </div>
               <button

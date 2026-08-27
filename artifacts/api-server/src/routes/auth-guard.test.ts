@@ -9,7 +9,6 @@
  *       This is a permanent regression guard — any new route added without
  *       auth consideration fails here.
  *   §2  Public intake endpoints stay reachable without auth.
- *   §3  Auth endpoints are reachable without auth.
  *   §4  Rate limiting: intake burst returns 429 after the limit.
  *   §5  AI-route pattern coverage (every invokeAI-calling route is matched).
  */
@@ -27,9 +26,6 @@ import crypto from "node:crypto";
 import app, { dbReady } from "../app.js";
 import router from "./index.js";
 import { isPublicRoute, isAiRoute } from "../middlewares/apiGuard.js";
-import { getSafeReturnTo } from "./google-workspace-auth.js";
-import { createSession, deleteSession } from "../lib/auth.js";
-import { getGoogleCallbackUrl } from "../lib/google-oauth.js";
 import { pool } from "@workspace/db";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -169,58 +165,6 @@ describe("auth guard (task #62)", () => {
     });
   });
 
-  // §3 Auth endpoints
-  describe("§3 auth endpoints are public", () => {
-    it("GET /auth/user returns {user:null} when unauthenticated", async () => {
-      const res = await req("GET", "/auth/user");
-      assert.equal(res.status, 200);
-      const body = (await res.json()) as { user: unknown };
-      assert.equal(body.user, null);
-    });
-
-    it("GET /login redirects to Google Workspace with the company-domain hint", async () => {
-      const res = await req("GET", "/login");
-      assert.equal(res.status, 302);
-      const location = new URL(res.headers.get("location") ?? "");
-      assert.equal(location.origin, "https://accounts.google.com");
-      assert.equal(location.pathname, "/o/oauth2/v2/auth");
-      assert.equal(location.searchParams.get("hd"), "onwrdadvisors.com");
-      assert.equal(location.searchParams.get("response_type"), "code");
-      assert.ok(location.searchParams.get("state"));
-      assert.match(
-        location.searchParams.get("redirect_uri") ?? "",
-        /\/api\/auth\/google\/callback$/,
-      );
-      assert.deepEqual(
-        location.searchParams.get("scope")?.split(" ").sort(),
-        ["email", "openid", "profile"],
-      );
-    });
-
-    it("rejects a session created before the Google Workspace migration", async () => {
-      const sid = await createSession({
-        user: {
-          id: "legacy-replit-user",
-          email: "person@onwrdadvisors.com",
-          firstName: "Legacy",
-          lastName: "User",
-          profileImageUrl: null,
-        },
-        access_token: "legacy-token",
-      });
-
-      try {
-        const res = await fetch(`${baseUrl}/api/auth/user`, {
-          headers: { Cookie: `sid=${sid}` },
-        });
-        assert.equal(res.status, 200);
-        assert.deepEqual(await res.json(), { user: null });
-      } finally {
-        await deleteSession(sid);
-      }
-    });
-  });
-
   // §4 Rate limiting burst
   describe("§4 rate limiting", () => {
     it("intake POST bursts beyond the limit return 429", async () => {
@@ -238,34 +182,6 @@ describe("auth guard (task #62)", () => {
       } finally {
         delete process.env.RATE_LIMIT_TEST;
       }
-    });
-  });
-
-  // §4b returnTo sanitization — open-redirect regression guard
-  describe("§4b returnTo sanitization", () => {
-    it("rejects external/scheme-relative/malformed targets", () => {
-      for (const bad of [
-        "//evil.example",
-        "/\\evil.example",
-        "\\evil.example",
-        "/%5Cevil.example", // encoded backslash
-        "/foo\\bar",
-        "/javascript:alert(1)",
-        "/\x00",
-        "%2F%2Fevil.example", // encoded //
-        "https://evil.example",
-        "javascript:alert(1)",
-        123,
-        null,
-        "%ZZ", // malformed encoding
-      ]) {
-        assert.equal(getSafeReturnTo(bad), "/", `must reject: ${String(bad)}`);
-      }
-    });
-
-    it("accepts plain same-origin paths", () => {
-      assert.equal(getSafeReturnTo("/proposal-generator"), "/proposal-generator");
-      assert.equal(getSafeReturnTo("/proposals?tab=all"), "/proposals?tab=all");
     });
   });
 
@@ -287,65 +203,6 @@ describe("auth guard (task #62)", () => {
       });
       assert.equal(res.headers.get("access-control-allow-origin"), origin);
       assert.equal(res.headers.get("access-control-allow-credentials"), "true");
-    });
-  });
-
-  // §4d Google callback origin is pinned — forged Host headers must not leak in
-  describe("§4d forwarded-host cannot hijack Google callback redirects", () => {
-    it("GET /login with forged X-Forwarded-Host does not use it in redirect_uri", async () => {
-      const res = await fetch(`${baseUrl}/api/login`, {
-        redirect: "manual",
-        headers: { "X-Forwarded-Host": "evil.example", Host: "evil.example" },
-      });
-      assert.equal(res.status, 302);
-      const location = res.headers.get("location") ?? "";
-      const redirectUri = new URL(location).searchParams.get("redirect_uri") ?? "";
-      assert.ok(
-        !redirectUri.includes("evil.example"),
-        `redirect_uri must not contain a forged host: ${redirectUri}`,
-      );
-    });
-  });
-
-  // §4e callback URLs come only from fixed environment configuration
-  describe("§4e Google callback URL is configuration-derived", () => {
-    const saved = {
-      GOOGLE_OAUTH_CALLBACK_URL: process.env.GOOGLE_OAUTH_CALLBACK_URL,
-      REPLIT_DOMAINS: process.env.REPLIT_DOMAINS,
-      REPLIT_DEV_DOMAIN: process.env.REPLIT_DEV_DOMAIN,
-    };
-    function restore() {
-      for (const [k, v] of Object.entries(saved)) {
-        if (v === undefined) delete process.env[k];
-        else process.env[k] = v;
-      }
-    }
-    it("uses the explicit callback URL when configured", () => {
-      try {
-        process.env.GOOGLE_OAUTH_CALLBACK_URL =
-          "https://workspace.example/api/auth/google/callback";
-        assert.equal(
-          getGoogleCallbackUrl(),
-          "https://workspace.example/api/auth/google/callback",
-        );
-      } finally {
-        restore();
-      }
-    });
-
-    it("uses a configured public domain without consulting request headers", () => {
-      try {
-        delete process.env.GOOGLE_OAUTH_CALLBACK_URL;
-        process.env.REPLIT_DOMAINS = "workspace.replit.app";
-        delete process.env.REPLIT_DOMAINS;
-        process.env.REPLIT_DOMAINS = "workspace.replit.app";
-        assert.equal(
-          getGoogleCallbackUrl(),
-          "https://workspace.replit.app/api/auth/google/callback",
-        );
-      } finally {
-        restore();
-      }
     });
   });
 

@@ -1,9 +1,14 @@
 import express, { type Express } from "express";
 import cors from "cors";
-import cookieParser from "cookie-parser";
 import pinoHttp from "pino-http";
 import session from "express-session";
-import { authMiddleware } from "./middlewares/authMiddleware";
+import { clerkMiddleware } from "@clerk/express";
+import { publishableKeyFromHost } from "@clerk/shared/keys";
+import {
+  CLERK_PROXY_PATH,
+  clerkProxyMiddleware,
+  getClerkProxyHost,
+} from "./middlewares/clerkProxyMiddleware";
 import connectPgSimple from "connect-pg-simple";
 import { pool } from "@workspace/db";
 import router from "./routes";
@@ -17,8 +22,14 @@ declare module "express-session" {
     googleUserEmail?: string;
     googleOAuthState?: string;
     googleOAuthReturnTo?: string;
-    googleLoginState?: string;
-    googleLoginReturnTo?: string;
+    /**
+     * Clerk native user ID that last authenticated in this Express session.
+     * The Express session cookie and Clerk's own session cookie are
+     * independent — signing out of Clerk does not clear this cookie — so
+     * requireAuth uses this to detect "a different Clerk user is now using
+     * this browser session" and wipe any Google Drive tokens left behind.
+     */
+    clerkUserId?: string;
   }
 }
 
@@ -119,6 +130,10 @@ const app: Express = express();
 
 app.set("trust proxy", 1);
 
+// Clerk Frontend API proxy — must be mounted before body parsers (it streams
+// raw bytes). Production-only; a no-op passthrough in development.
+app.use(CLERK_PROXY_PATH, clerkProxyMiddleware());
+
 app.use(
   pinoHttp({
     logger,
@@ -173,9 +188,23 @@ app.use(
     },
   }),
 );
-app.use(cookieParser());
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+// Resolve the publishable key from the incoming request host so the same
+// server can serve multiple Clerk custom domains. Falls back to
+// CLERK_PUBLISHABLE_KEY when the host doesn't map to a custom domain.
+//
+// getClerkProxyHost is shared with clerkProxyMiddleware so that both
+// halves of the auth setup agree on which hostname is canonical.
+app.use(
+  clerkMiddleware((req) => ({
+    publishableKey: publishableKeyFromHost(
+      getClerkProxyHost(req) ?? "",
+      process.env.CLERK_PUBLISHABLE_KEY,
+    ),
+  })),
+);
 
 app.use(
   session({
@@ -194,8 +223,6 @@ app.use(
     },
   }),
 );
-
-app.use(authMiddleware);
 
 app.use("/api", router);
 

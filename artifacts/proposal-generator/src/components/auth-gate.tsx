@@ -1,17 +1,24 @@
 import { useEffect, useState } from "react";
-import { useAuth } from "@workspace/replit-auth-web";
+import { Redirect } from "wouter";
+import { Show, useClerk } from "@clerk/react";
 
 const SESSION_EXPIRED_EVENT = "onwrd:session-expired";
+const ACCESS_DENIED_EVENT = "onwrd:access-denied";
 
 /** Call when any API request returns 401 — surfaces the session-expired banner. */
 export function notifySessionExpired() {
   window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
 }
 
+/** Call when the server rejects a signed-in Clerk user for being outside the company domain. */
+export function notifyAccessDenied() {
+  window.dispatchEvent(new Event(ACCESS_DENIED_EVENT));
+}
+
 /**
- * Patches window.fetch once so every direct API call that comes back 401
- * surfaces the session-expired banner — pages call fetch directly, so
- * react-query error hooks alone can't see the status code.
+ * Patches window.fetch once so every direct API call that comes back
+ * 401/403 surfaces the right banner — pages call fetch directly, so
+ * react-query error hooks alone can't see the status code or error code.
  */
 let fetchPatched = false;
 export function installUnauthorizedInterceptor() {
@@ -27,8 +34,17 @@ export function installUnauthorizedInterceptor() {
           : input instanceof URL
             ? input.pathname
             : input.url;
-      if (res.status === 401 && url.includes("/api/") && !url.includes("/api/auth/")) {
+      const isApiCall = url.includes("/api/") && !url.includes("/api/__clerk");
+      if (isApiCall && res.status === 401) {
         notifySessionExpired();
+      } else if (isApiCall && res.status === 403) {
+        const body = await res
+          .clone()
+          .json()
+          .catch(() => null);
+        if (body?.code === "domain_not_allowed") {
+          notifyAccessDenied();
+        }
       }
     } catch {
       // never break the caller over banner bookkeeping
@@ -53,62 +69,71 @@ function SessionExpiredBanner({ onLogin }: { onLogin: () => void }) {
 }
 
 /**
- * Blocks rendering of protected pages until the user is authenticated.
- * Unauthenticated visitors see a minimal login screen.
+ * Terminal state for a Clerk-authenticated user whose Google account is
+ * outside the company domain. Deliberately does NOT redirect to /sign-in —
+ * Clerk still considers them signed in, so a redirect there would just
+ * bounce back here (or worse, loop).
  */
-export function AuthGate({ children }: { children: React.ReactNode }) {
-  const { isLoading, isAuthenticated, login } = useAuth();
+export function AccessDeniedScreen() {
+  const { signOut } = useClerk();
+  return (
+    <div className="min-h-screen bg-black text-white flex flex-col items-center justify-center px-6">
+      <img
+        src="/onwrd-logo-white.png"
+        alt="ONWRD"
+        className="h-12 object-contain mb-8"
+      />
+      <p className="text-[#999999] text-sm mb-6 text-center max-w-sm">
+        This workspace is private. Sign in with a verified{" "}
+        <span className="text-white">@onwrdadvisors.com</span> Google account
+        to access proposals, opportunities, and settings.
+      </p>
+      <button
+        onClick={() => signOut({ redirectUrl: window.location.origin + import.meta.env.BASE_URL })}
+        className="bg-[#0000FF] hover:bg-[#2222FF] text-white text-sm font-semibold px-8 py-3 transition-colors"
+        data-testid="button-access-denied-signout"
+      >
+        Try a different account
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Blocks rendering of protected pages until the user is authenticated.
+ * Unauthenticated visitors are redirected to the dedicated sign-in route.
+ */
+export function RequireAuth({ children }: { children: React.ReactNode }) {
   const [expired, setExpired] = useState(false);
-  const googleError = new URLSearchParams(window.location.search).get("google_error");
+  const [accessDenied, setAccessDenied] = useState(false);
+  const { signOut, openSignIn } = useClerk();
 
   useEffect(() => {
-    const handler = () => setExpired(true);
-    window.addEventListener(SESSION_EXPIRED_EVENT, handler);
-    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, handler);
+    const expiredHandler = () => setExpired(true);
+    const deniedHandler = () => setAccessDenied(true);
+    window.addEventListener(SESSION_EXPIRED_EVENT, expiredHandler);
+    window.addEventListener(ACCESS_DENIED_EVENT, deniedHandler);
+    return () => {
+      window.removeEventListener(SESSION_EXPIRED_EVENT, expiredHandler);
+      window.removeEventListener(ACCESS_DENIED_EVENT, deniedHandler);
+    };
   }, []);
 
-  if (isLoading) {
-    return (
-      <div className="min-h-screen bg-black flex items-center justify-center">
-        <div className="w-6 h-6 border-2 border-[#333] border-t-white rounded-full animate-spin" />
-      </div>
-    );
-  }
-
-  if (!isAuthenticated) {
-    return (
-      <div className="min-h-screen bg-black text-white flex flex-col items-center justify-center px-6">
-        <img
-          src="/onwrd-logo-white.png"
-          alt="ONWRD"
-          className="h-12 object-contain mb-8"
-        />
-        <p className="text-[#999999] text-sm mb-6 text-center max-w-sm">
-          This workspace is private. Sign in with your ONWRD Google Workspace
-          account to access proposals, opportunities, and settings.
-        </p>
-        {googleError && (
-          <p className="text-sm text-red-300 mb-5 text-center max-w-sm">
-            {googleError === "domain_not_allowed"
-              ? "Use a verified @onwrdadvisors.com Google account."
-              : "Google sign-in could not be completed. Please try again."}
-          </p>
-        )}
-        <button
-          onClick={login}
-          className="bg-[#0000FF] hover:bg-[#2222FF] text-white text-sm font-semibold px-8 py-3 transition-colors"
-          data-testid="button-login"
-        >
-          Continue with Google
-        </button>
-      </div>
-    );
+  if (accessDenied) {
+    return <AccessDeniedScreen />;
   }
 
   return (
     <>
-      {expired && <SessionExpiredBanner onLogin={login} />}
-      {children}
+      <Show when="signed-in">
+        {expired && (
+          <SessionExpiredBanner onLogin={() => openSignIn()} />
+        )}
+        {children}
+      </Show>
+      <Show when="signed-out">
+        <Redirect to="/sign-in" />
+      </Show>
     </>
   );
 }

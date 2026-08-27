@@ -2,12 +2,6 @@ import { Router } from "express";
 import crypto from "crypto";
 import { getValidGoogleAccessToken, GoogleAuthError } from "../lib/google-auth.js";
 import { logger } from "../lib/logger.js";
-import { exchangeGoogleCode } from "../lib/google-oauth.js";
-import {
-  createGoogleWorkspaceSession,
-  redirectWithError,
-  stateMatches,
-} from "./google-workspace-auth.js";
 
 const router = Router();
 
@@ -94,37 +88,6 @@ router.get("/auth/google", (req, res) => {
 // ── OAuth callback ──────────────────────────────────────────────────────────
 router.get("/auth/google/callback", async (req, res) => {
   const { code, state, error } = req.query as Record<string, string>;
-
-  // Workspace login and Drive authorization deliberately share the same
-  // registered Google callback URI. The separately stored state determines
-  // which flow may consume this single-use callback.
-  if (req.session.googleLoginState || req.session.googleLoginReturnTo) {
-    const savedState = req.session.googleLoginState;
-    const returnTo = sanitiseReturnTo(req.session.googleLoginReturnTo);
-    delete req.session.googleLoginState;
-    delete req.session.googleLoginReturnTo;
-
-    if (error || !code || !stateMatches(savedState, state)) {
-      req.session.save(() => redirectWithError(res, returnTo, "sign_in_failed"));
-      return;
-    }
-
-    try {
-      const tokens = await exchangeGoogleCode(code, getCallbackUrl());
-      const result = await createGoogleWorkspaceSession(res, tokens);
-      if (result.status === "not_allowed") {
-        req.session.save(() =>
-          redirectWithError(res, returnTo, "domain_not_allowed"),
-        );
-        return;
-      }
-
-      req.session.save(() => res.redirect(returnTo));
-    } catch {
-      req.session.save(() => redirectWithError(res, returnTo, "sign_in_failed"));
-    }
-    return;
-  }
 
   // Read and immediately delete state — single use, reject replays
   const savedState = req.session.googleOAuthState;
