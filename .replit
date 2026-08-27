@@ -34,6 +34,9 @@ RESEND_FROM = "ONWRD Tender Desk <desk@onwrdadvisors.com>"
 GITHUB_REPO = "https://github.com/juanxjuan82/onwrd-proposal"
 PROPOSAL_NOTIFY_EMAIL = "j.aymes@onwrdadvisors.com"
 
+[userenv.production]
+GOOGLE_OAUTH_CALLBACK_URL = "https://proposals.onwrdadvisors.com/api/auth/google/callback"
+
 [[ports]]
 localPort = 8080
 externalPort = 8080
