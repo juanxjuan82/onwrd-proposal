@@ -9,6 +9,7 @@ export const tenderSourcesTable = pgTable("tender_sources", {
   active: boolean("active").notNull().default(true),
   browserEnabled: boolean("browser_enabled").notNull().default(false),
   approvedDomains: jsonb("approved_domains"),
+  configurationVersion: integer("configuration_version").notNull().default(1),
   lastCheckedAt: timestamp("last_checked_at"),
   lastSuccessAt: timestamp("last_success_at"),
   itemsFoundCount: integer("items_found_count").notNull().default(0),

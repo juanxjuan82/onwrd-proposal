@@ -87,14 +87,15 @@ function SelectBox({ opts, val, set, label, placeholder = "Select…" }: {
         value={val}
         onChange={(e) => set(e.target.value)}
         aria-label={label}
-        className={`w-full h-10 appearance-none rounded-md bg-[#0a0a0a] border border-[#2a2a2a] px-3 pr-9 text-sm
-          focus:outline-none focus:border-[#0000FF] transition-colors cursor-pointer
-          ${val ? "text-white" : "text-[#777]"}`}
+        data-testid={`select-${label.replace(/[^a-z0-9]/gi, '-').toLowerCase()}`}
+        className={`w-full h-10 appearance-none rounded-md bg-background border border-border px-3 pr-9 text-sm
+          focus:outline-none focus:border-primary transition-colors cursor-pointer
+          ${val ? "text-foreground" : "text-muted-foreground"}`}
       >
         <option value="" disabled>{placeholder}</option>
-        {opts.map(o => <option key={o} value={o} className="bg-[#111] text-white">{o}</option>)}
+        {opts.map(o => <option key={o} value={o} className="bg-card text-foreground">{o}</option>)}
       </select>
-      <svg className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[#777]" viewBox="0 0 16 16" fill="none">
+      <svg className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" viewBox="0 0 16 16" fill="none">
         <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
     </div>
@@ -107,10 +108,11 @@ function Pill({ label, checked, onToggle }: { label: string; checked: boolean; o
       type="button"
       aria-pressed={checked}
       onClick={onToggle}
-      className={`rounded-full border px-4 py-2 text-[13px] leading-snug transition-colors select-none text-left
+      data-testid={`button-pill-${label.replace(/[^a-z0-9]/gi, '-').toLowerCase()}`}
+      className={`rounded-full border px-4 py-2 text-sm leading-snug transition-colors select-none text-left
         ${checked
-          ? "border-[#0000FF] bg-[#0000FF] text-white font-medium"
-          : "border-[#333] bg-transparent text-[#aaa] hover:border-[#0000FF]/60 hover:text-white"}`}
+          ? "border-primary bg-primary text-primary-foreground font-medium"
+          : "border-border bg-transparent text-muted-foreground hover:border-primary/60 hover:text-foreground"}`}
     >
       {label}
     </button>
@@ -142,10 +144,10 @@ function Err({ msg }: { msg?: string }) {
 function Field({ label, req, opt, children }: { label: string; req?: boolean; opt?: boolean; children: React.ReactNode }) {
   return (
     <div className="flex flex-col gap-2">
-      <span className="text-sm font-medium text-[#ccc] flex items-center gap-1.5">
+      <span className="text-sm font-medium text-foreground/90 flex items-center gap-1.5">
         {label}
         {req && <span className="text-destructive">*</span>}
-        {opt && <span className="text-[#888] font-normal text-xs">(optional)</span>}
+        {opt && <span className="text-muted-foreground font-normal text-xs">(optional)</span>}
       </span>
       {children}
     </div>
@@ -155,13 +157,13 @@ function Field({ label, req, opt, children }: { label: string; req?: boolean; op
 // ─── Section card ─────────────────────────────────────────────────────────
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <Card className="bg-[#111] border-transparent shadow-none">
-      <CardHeader className="pb-5 pt-6 px-8">
+    <Card className="bg-card border-transparent shadow-none">
+      <CardHeader className="pb-5 pt-6 px-4 sm:px-8">
         <CardTitle className="text-lg font-semibold text-white tracking-tight">
           {title}
         </CardTitle>
       </CardHeader>
-      <CardContent className="px-8 pb-8">
+      <CardContent className="px-4 sm:px-8 pb-8">
         {children}
       </CardContent>
     </Card>
@@ -314,11 +316,11 @@ export default function Intake() {
     return (
       <div className="min-h-screen bg-black text-white flex items-center justify-center">
         <div className="text-center space-y-3 max-w-xs px-6">
-          <div className="mx-auto w-12 h-12 rounded-full bg-[#111] border border-[#222] flex items-center justify-center">
+          <div className="mx-auto w-12 h-12 rounded-full bg-card border border-border flex items-center justify-center">
             <CheckCircle className="w-6 h-6" style={{ color: "#00FFD5" }} />
           </div>
           <h2 className="text-xl font-semibold">Thank you.</h2>
-          <p className="text-[#aaa] text-sm leading-relaxed">
+          <p className="text-muted-foreground text-sm leading-relaxed">
             We'll be in touch within two business days.{" "}
             <a href="https://onwrdadvisors.com" target="_blank" rel="noopener noreferrer" className="text-white underline underline-offset-2">onwrdadvisors.com</a>
           </p>
@@ -330,23 +332,22 @@ export default function Intake() {
   return (
     <div className="min-h-screen bg-black text-white">
       {/* Header */}
-      <header className="border-b border-[#1a1a1a] px-6 fixed inset-x-0 top-0 bg-black z-10">
+      <header className="border-b border-border px-4 sm:px-6 fixed inset-x-0 top-0 bg-black z-10">
         <div className="max-w-4xl mx-auto flex items-center justify-between py-3">
-          <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-[22px] object-contain object-left" />
-          <div className="flex items-center gap-3 min-w-[180px]">
-            <span className="text-[11px] text-[#aaa] whitespace-nowrap">
+          <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-[18px] sm:h-[22px] max-w-[96px] sm:max-w-none object-contain object-left" />
+          <div className="flex items-center justify-end gap-2 sm:gap-3 min-w-0">
+            <span className="hidden sm:inline text-xs text-muted-foreground whitespace-nowrap">
               {SECTION_TITLES[step - 1]}
             </span>
             <div className="flex gap-1">
               {SECTION_TITLES.map((_, i) => (
                 <div
                   key={i}
-                  className="h-1 w-6 rounded-full transition-colors duration-300"
-                  style={{ background: i < step ? "#0000FF" : "#333" }}
+                  className={`h-1 w-4 sm:w-6 rounded-full transition-colors duration-300 ${i < step ? "bg-primary" : "bg-muted"}`}
                 />
               ))}
             </div>
-            <span className="text-[11px] text-[#aaa] whitespace-nowrap">{step}/4</span>
+            <span className="text-xs text-muted-foreground whitespace-nowrap">{step}/4</span>
           </div>
         </div>
       </header>
@@ -355,16 +356,16 @@ export default function Intake() {
       <main className="max-w-4xl mx-auto w-full px-4 sm:px-6 pb-8 pt-[57px]">
         {/* Credibility strip */}
         <div className="flex items-center gap-3 mb-5 flex-wrap">
-          <span className="text-[11px] text-[#777] uppercase tracking-widest shrink-0">Trusted by</span>
-          <div className="h-px flex-1 bg-[#333]" />
+          <span className="text-xs text-muted-foreground uppercase tracking-widest shrink-0">Trusted by</span>
+          <div className="h-px flex-1 bg-muted" />
           {CLIENTS.map(name => (
-            <span key={name} className="text-[11px] font-semibold tracking-wider text-[#999] uppercase">{name}</span>
+            <span key={name} className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">{name}</span>
           ))}
         </div>
 
         <div className="mb-5">
           <h1 className="text-xl font-semibold text-white mb-1">Tell us about your project</h1>
-          <p className="text-sm text-[#aaa]">Fill in the sections below and we'll prepare a tailored proposal.</p>
+          <p className="text-sm text-muted-foreground">Fill in the sections below and we'll prepare a tailored proposal.</p>
         </div>
 
         <form onSubmit={form.handleSubmit(submit, onInvalid)} noValidate className="space-y-5">
@@ -373,29 +374,29 @@ export default function Intake() {
           {step === 1 && <div key="step1" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section title="Contact Details">
 
             <div className="space-y-6">
-              <div className="grid grid-cols-2 gap-5 items-start">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 items-start">
                 <Field label="First name" req>
-                  <Input className="h-9 text-[13px]" {...form.register("firstName")} />
+                  <Input className="h-10 text-sm" {...form.register("firstName")} data-testid="input-firstname" />
                   <Err msg={errors.firstName?.message} />
                 </Field>
                 <Field label="Last name" req>
-                  <Input className="h-9 text-[13px]" {...form.register("lastName")} />
+                  <Input className="h-10 text-sm" {...form.register("lastName")} data-testid="input-lastname" />
                   <Err msg={errors.lastName?.message} />
                 </Field>
               </div>
-              <div className="grid grid-cols-2 gap-5 items-start">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 items-start">
                 <Field label="Job title" req>
-                  <Input className="h-9 text-[13px]" {...form.register("jobTitle")} />
+                  <Input className="h-10 text-sm" {...form.register("jobTitle")} data-testid="input-jobtitle" />
                   <Err msg={errors.jobTitle?.message} />
                 </Field>
                 <Field label="Email" req>
-                  <Input className="h-9 text-[13px]" type="email" {...form.register("email")} />
+                  <Input className="h-10 text-sm" type="email" {...form.register("email")} data-testid="input-email" />
                   <Err msg={errors.email?.message} />
                 </Field>
               </div>
-              <div className="grid grid-cols-2 gap-5 items-start">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 items-start">
                 <Field label="Phone" opt>
-                  <Input className="h-9 text-[13px]" {...form.register("phone")} />
+                  <Input className="h-10 text-sm" {...form.register("phone")} data-testid="input-phone" />
                 </Field>
                 <Field label="Preferred contact" opt>
                   <Controller control={form.control} name="preferredContact" render={({ field }) => (
@@ -407,11 +408,12 @@ export default function Intake() {
                         <button
                           key={val}
                           type="button"
+                          data-testid={`button-contact-${val.toLowerCase()}`}
                           onClick={() => field.onChange(field.value === val ? "" : val)}
-                          className={`flex items-center gap-2 rounded border px-3 py-2 text-[13px] transition-colors flex-1 justify-center min-w-0
+                          className={`flex items-center gap-2 rounded border px-3 py-2 text-sm transition-colors flex-1 justify-center min-w-0
                             ${field.value === val
-                              ? "border-[#0000FF] bg-[#0000FF]/10 text-white font-medium"
-                              : "border-[#333] bg-[#0d0d0d] text-[#aaa] hover:border-[#0000FF]/50 hover:text-white"}`}
+                              ? "border-primary bg-primary/10 text-primary-foreground font-medium"
+                              : "border-border bg-background text-muted-foreground hover:border-primary/50 hover:text-foreground"}`}
                         >
                           {icon}
                           <span className="truncate">{label}</span>
@@ -422,7 +424,7 @@ export default function Intake() {
                 </Field>
               </div>
               {autosaved && (
-                <p className="text-xs text-[#999] flex items-center gap-1">
+                <p className="text-xs text-muted-foreground flex items-center gap-1">
                   <CheckCircle className="w-3 h-3 text-[#00FFD5]" />
                   Contact details saved
                 </p>
@@ -433,13 +435,13 @@ export default function Intake() {
           {/* ── Step 2: Company & Market ── */}
           {step === 2 && <div key="step2" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section title="Company & Market">
             <div className="space-y-6">
-              <div className="grid grid-cols-2 gap-5 items-start">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 items-start">
                 <Field label="Organisation name" req>
-                  <Input className="h-9 text-[13px]" {...form.register("orgName")} />
+                  <Input className="h-10 text-sm" {...form.register("orgName")} data-testid="input-orgname" />
                   <Err msg={errors.orgName?.message} />
                 </Field>
                 <Field label="Website" opt>
-                  <Input className="h-9 text-[13px]" placeholder="https://…" {...form.register("website")} />
+                  <Input className="h-10 text-sm" placeholder="https://…" {...form.register("website")} data-testid="input-website" />
                 </Field>
               </div>
 
@@ -450,7 +452,7 @@ export default function Intake() {
                   )} />
                   <Err msg={errors.hearAbout?.message} />
                   {hearAbout === "Other" && (
-                    <Input className="h-9 text-[13px]" placeholder="Please specify…" {...form.register("hearAboutOther")} />
+                    <Input className="h-10 text-sm mt-2" placeholder="Please specify…" {...form.register("hearAboutOther")} data-testid="input-hearabout-other" />
                   )}
                   <Err msg={errors.hearAboutOther?.message} />
                 </Field>
@@ -461,7 +463,7 @@ export default function Intake() {
                   )} />
                   <Err msg={errors.industry?.message} />
                   {industry === "Other" && (
-                    <Input className="h-9 text-[13px]" placeholder="Please specify…" {...form.register("industryOther")} />
+                    <Input className="h-10 text-sm mt-2" placeholder="Please specify…" {...form.register("industryOther")} data-testid="input-industry-other" />
                   )}
                   <Err msg={errors.industryOther?.message} />
                 </Field>
@@ -473,7 +475,7 @@ export default function Intake() {
                 )} />
                 <Err msg={errors.market?.message} />
                 {market === "Other" && (
-                  <Input className="h-9 text-[13px]" placeholder="Please specify…" {...form.register("marketOther")} />
+                  <Input className="h-10 text-sm mt-2" placeholder="Please specify…" {...form.register("marketOther")} data-testid="input-market-other" />
                 )}
                 <Err msg={errors.marketOther?.message} />
               </Field>
@@ -485,13 +487,13 @@ export default function Intake() {
             <div className="space-y-6">
               <Field label="What's the challenge?" req>
                 <div className="space-y-2">
-                  <p className="text-xs text-[#999]">Select all that apply</p>
+                  <p className="text-xs text-muted-foreground">Select all that apply</p>
                   <Controller control={form.control} name="problems" render={({ field }) => (
                     <Chips opts={PROBLEMS} val={field.value} set={field.onChange} />
                   )} />
                   <Err msg={errors.problems?.message} />
                   {problems.includes("Other") && (
-                    <Input className="h-9 text-[13px]" placeholder="Please specify…" {...form.register("problemsOther")} />
+                    <Input className="h-10 text-sm mt-2" placeholder="Please specify…" {...form.register("problemsOther")} data-testid="input-problems-other" />
                   )}
                   <Err msg={errors.problemsOther?.message} />
                 </div>
@@ -505,13 +507,13 @@ export default function Intake() {
 
               <Field label="Where do you need help?" req>
                 <div className="space-y-2">
-                  <p className="text-xs text-[#999]">Select all that apply</p>
+                  <p className="text-xs text-muted-foreground">Select all that apply</p>
                   <Controller control={form.control} name="support" render={({ field }) => (
                     <Chips opts={SUPPORT} val={field.value} set={field.onChange} />
                   )} />
                   <Err msg={errors.support?.message} />
                   {support.includes("Other") && (
-                    <Input className="h-9 text-[13px]" placeholder="Please specify…" {...form.register("supportOther")} />
+                    <Input className="h-10 text-sm mt-2" placeholder="Please specify…" {...form.register("supportOther")} data-testid="input-support-other" />
                   )}
                   <Err msg={errors.supportOther?.message} />
                 </div>
@@ -534,32 +536,32 @@ export default function Intake() {
               <Field label="Project brief" req>
                 <div className="space-y-2">
                   <Textarea
-                    className="text-[13px] resize-none"
+                    className="text-sm resize-none"
                     rows={5}
                     placeholder="Tell us about your goals, challenges, or anything that helps us understand what you need…"
                     {...form.register("projectBrief")}
                   />
                   <div className="flex justify-between items-start">
                     <Err msg={errors.projectBrief?.message} />
-                    <span className="text-xs text-[#777] ml-auto">{form.watch("projectBrief").length} chars</span>
+                    <span className="text-xs text-muted-foreground ml-auto">{form.watch("projectBrief").length} chars</span>
                   </div>
 
                   {/* File upload area */}
-                  <div className="border border-dashed border-[#333] rounded-lg p-4">
-                    <p className="text-xs text-[#999] mb-2">
+                  <div className="border border-dashed border-border rounded-lg p-4">
+                    <p className="text-xs text-muted-foreground mb-2">
                       Have an existing brief? Upload your RFP or project document instead of (or alongside) typing.
                     </p>
                     {briefFile ? (
-                      <div className="flex items-center gap-2 bg-[#111] border border-[#222] rounded px-3 py-2">
-                        <FileText className="w-4 h-4 text-[#0000FF] shrink-0" />
+                      <div className="flex items-center gap-2 bg-card border border-border rounded px-3 py-2">
+                        <FileText className="w-4 h-4 text-primary shrink-0" />
                         <div className="min-w-0 flex-1">
-                          <p className="text-[13px] text-white truncate">{briefFile.name}</p>
-                          <p className="text-xs text-[#888]">{formatBytes(briefFile.size)}</p>
+                          <p className="text-sm text-white truncate">{briefFile.name}</p>
+                          <p className="text-xs text-muted-foreground">{formatBytes(briefFile.size)}</p>
                         </div>
                         <button
                           type="button"
                           onClick={() => { setBriefFile(null); if (fileInputRef.current) fileInputRef.current.value = ""; }}
-                          className="text-[#888] hover:text-white transition-colors shrink-0"
+                          className="text-muted-foreground hover:text-white transition-colors shrink-0"
                         >
                           <X className="w-4 h-4" />
                         </button>
@@ -568,11 +570,11 @@ export default function Intake() {
                       <button
                         type="button"
                         onClick={() => fileInputRef.current?.click()}
-                        className="flex items-center gap-2 text-[13px] text-[#aaa] hover:text-white transition-colors"
+                        className="flex items-center gap-2 text-sm text-muted-foreground hover:text-white transition-colors"
                       >
                         <UploadCloud className="w-4 h-4 shrink-0" />
                         <span>Choose file</span>
-                        <span className="text-[#777]">· PDF, DOCX, TXT · Max 20 MB</span>
+                        <span className="text-muted-foreground">· PDF, DOCX, TXT · Max 20 MB</span>
                       </button>
                     )}
                     <input
@@ -591,7 +593,7 @@ export default function Intake() {
 
               <Field label="How are you thinking about investment?" opt>
                 <div className="space-y-2">
-                  <p className="text-xs text-[#999]">Optional — helps us tailor our thinking</p>
+                  <p className="text-xs text-muted-foreground">Optional — helps us tailor our thinking</p>
                   <Controller control={form.control} name="investment" render={({ field }) => (
                     <SelectBox opts={INVESTMENT} val={field.value ?? ""} set={field.onChange} label="How are you thinking about investment?" />
                   )} />
@@ -612,16 +614,16 @@ export default function Intake() {
             {submitErr && <p className="text-xs text-destructive">{submitErr}</p>}
             <div className="flex items-center justify-between">
               {step > 1 ? (
-                <Button type="button" variant="outline" size="sm" className="h-9 px-6 text-[13px]" onClick={goBack}>
+                <Button type="button" variant="outline" size="sm" className="h-9 px-6 text-sm" onClick={goBack}>
                   Back
                 </Button>
               ) : <span />}
               {step < 4 ? (
-                <Button type="button" size="sm" className="h-9 px-8 text-[13px]" onClick={goNext}>
+                <Button type="button" size="sm" className="h-9 px-8 text-sm" onClick={goNext}>
                   Next
                 </Button>
               ) : (
-                <Button type="submit" size="sm" className="h-9 px-8 text-[13px]" disabled={busy || isSubmitting}>
+                <Button type="submit" size="sm" className="h-9 px-8 text-sm" disabled={busy || isSubmitting}>
                   {busy ? "Submitting…" : "Submit"}
                 </Button>
               )}

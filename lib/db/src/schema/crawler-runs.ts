@@ -3,6 +3,7 @@ import { pgTable, text, serial, timestamp, integer, boolean, jsonb } from "drizz
 export const crawlerRunsTable = pgTable("crawler_runs", {
   id: serial("id").primaryKey(),
   sourceId: integer("source_id").notNull(),
+  sourceConfigurationVersion: integer("source_configuration_version").notNull().default(0),
   startedAt: timestamp("started_at").notNull().defaultNow(),
   completedAt: timestamp("completed_at"),
   status: text("status").notNull().default("running"),

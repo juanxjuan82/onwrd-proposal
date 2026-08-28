@@ -9,6 +9,10 @@ describe("Crawl4AI schema migration", () => {
       new URL("../../../../scripts/migrations/20260827_crawl4ai_enrichment.sql", import.meta.url),
       "utf8",
     );
+    const sourceVersionSql = await readFile(
+      new URL("../../../../scripts/migrations/20260828_source_configuration_version.sql", import.meta.url),
+      "utf8",
+    );
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -32,6 +36,8 @@ describe("Crawl4AI schema migration", () => {
       await client.query(sql);
       // Running the migration twice must remain safe.
       await client.query(sql);
+      await client.query(sourceVersionSql);
+      await client.query(sourceVersionSql);
 
       const sources = await client.query<{
         adapter_type: string;
@@ -47,6 +53,22 @@ describe("Crawl4AI schema migration", () => {
         { adapter_type: "caricom", browser_enabled: true, approved_domains: ["caricom.org"] },
         { adapter_type: "world_bank", browser_enabled: false, approved_domains: null },
       ]);
+
+      const versions = await client.query<{
+        source_version: number;
+        run_version: number;
+      }>(`
+        SELECT
+          (SELECT configuration_version FROM tender_sources LIMIT 1) AS source_version,
+          (SELECT column_default::integer
+             FROM information_schema.columns
+            WHERE table_schema LIKE 'pg_temp_%'
+              AND table_name = 'crawler_runs'
+              AND column_name = 'source_configuration_version'
+            LIMIT 1) AS run_version
+      `);
+      assert.equal(versions.rows[0].source_version, 1);
+      assert.equal(versions.rows[0].run_version, 0);
 
       const diagnostic = [{
         code: "crawl4ai_timeout",

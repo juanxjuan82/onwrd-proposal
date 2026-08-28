@@ -32,3 +32,4 @@
 - [Browser crawler boundary](browser-crawler-boundary.md) — browser enrichment is opt-in, domain-pinned, bounded, version-attested, direct-first, detail-specific, and zero-AI
 - [Compliance traceability lifecycle](compliance-traceability-lifecycle.md) — requirement coverage is atomic, edit-invalidated, live-evidence-checked, and only fresh documented overrides can waive issues
 - [Deterministic knowledge evidence](deterministic-knowledge-evidence.md) — requirements alone select approved evidence; AI writes prose but never chooses sources
+- [Source activation proof](source-activation-proof.md) — activation evidence must be configuration-versioned and committed with compare-and-set semantics

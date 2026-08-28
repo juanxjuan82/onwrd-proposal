@@ -5,7 +5,7 @@ import {
   crawlerRunsTable,
   crawlerLockTable,
 } from "@workspace/db";
-import { eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { WorldBankAdapter } from "./world-bank.js";
 import { UNGMAdapter } from "./ungm.js";
@@ -59,6 +59,64 @@ interface ScoringResult {
 const CRAWL_LOCK_KEY = "default";
 const LOCK_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours — 2× max expected crawl duration
 const INSTANCE_ID = randomUUID();
+
+export interface SourceAdapterDefinition {
+  adapterType: string;
+  label: string;
+  sourceType: string;
+  allowedHosts: readonly string[];
+  supportsBrowser: boolean;
+  recommended: boolean;
+  blockedReason?: string;
+}
+
+// This is the only catalog exposed to source administration. Keeping it next
+// to the adapter registry prevents the UI/API from implying support for an
+// arbitrary URL or an adapter that the crawler cannot actually run.
+export const SOURCE_ADAPTER_CATALOG: readonly SourceAdapterDefinition[] = [
+  { adapterType: "world_bank", label: "World Bank Procurement", sourceType: "development_bank", allowedHosts: ["worldbank.org"], supportsBrowser: false, recommended: true },
+  { adapterType: "ungm", label: "UNGM / UNDP Procurement", sourceType: "un", allowedHosts: ["undp.org"], supportsBrowser: false, recommended: true },
+  { adapterType: "bahamas_gov", label: "Bahamas Government Procurement", sourceType: "government", allowedHosts: ["bahamas.gov.bs"], supportsBrowser: true, recommended: true },
+  { adapterType: "caricom", label: "CARICOM Secretariat", sourceType: "regional", allowedHosts: ["caricom.org"], supportsBrowser: true, recommended: true },
+  { adapterType: "idb", label: "Inter-American Development Bank", sourceType: "development_bank", allowedHosts: ["iadb.org"], supportsBrowser: false, recommended: false, blockedReason: "The current IDB web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
+  { adapterType: "cdb", label: "Caribbean Development Bank", sourceType: "development_bank", allowedHosts: ["caribank.org"], supportsBrowser: false, recommended: false, blockedReason: "The current CDB web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
+  { adapterType: "cto", label: "Caribbean Tourism Organization", sourceType: "regional", allowedHosts: ["caribtourism.com"], supportsBrowser: false, recommended: false, blockedReason: "The current CTO web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
+  { adapterType: "eu_caribbean", label: "EU Caribbean Development Fund", sourceType: "development_fund", allowedHosts: ["cariforum.org"], supportsBrowser: false, recommended: false, blockedReason: "The current EU Caribbean web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
+] as const;
+
+export function getSourceAdapterDefinition(adapterType: string): SourceAdapterDefinition | undefined {
+  return SOURCE_ADAPTER_CATALOG.find((definition) => definition.adapterType === adapterType);
+}
+
+export function validateSourceConfiguration(input: {
+  adapterType: string;
+  url: string;
+  approvedDomains?: unknown;
+}): { definition: SourceAdapterDefinition; domains: string[] } | { error: string } {
+  const definition = getSourceAdapterDefinition(input.adapterType);
+  if (!definition) return { error: "Unsupported adapter. Choose a registered crawler adapter." };
+
+  let parsed: URL;
+  try {
+    parsed = new URL(input.url);
+  } catch {
+    return { error: "Source URL must be an absolute http(s) URL." };
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { error: "Source URL must use HTTP or HTTPS." };
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  if (!definition.allowedHosts.some((allowed) => host === allowed || host.endsWith(`.${allowed}`))) {
+    return {
+      error: `This adapter only supports registered ${definition.label} domains (${definition.allowedHosts.join(", ")}).`,
+    };
+  }
+  try {
+    return { definition, domains: normalizeSourceApprovedDomains(input.url, input.approvedDomains) };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
 
 /** @internal Exported for testing only — prefer testing behaviour through runCrawler(). */
 export async function acquireCrawlLock(): Promise<boolean> {
@@ -433,27 +491,38 @@ export async function runCrawler(sourceId?: number): Promise<{
     throw new Error("A crawl is already in progress — skipping to prevent overlap.");
   }
 
-  const sources = sourceId
-    ? await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.id, sourceId))
-    : await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.active, true));
-
-  let totalFound = 0;
-  let totalNew = 0;
-  let crawl4aiClient: ReturnType<typeof createCrawl4AIClient> = null;
-  let crawl4aiConfigError: Error | undefined;
   try {
-    crawl4aiClient = createCrawl4AIClient(getCrawl4AIConfig());
-  } catch (error) {
-    crawl4aiConfigError = error instanceof Error ? error : new Error(String(error));
-  }
+    const queriedSources = sourceId
+      ? await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.id, sourceId))
+      : await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.active, true));
+    if (sourceId) {
+      const blocked = queriedSources[0] && getSourceAdapterDefinition(queriedSources[0].adapterType)?.blockedReason;
+      if (blocked) throw new Error(blocked);
+    }
+    // Scheduled crawls are deny-by-default too. This protects deployments with
+    // stale rows that predate the startup deactivation sweep.
+    const sources = queriedSources.filter((source) => {
+      const definition = getSourceAdapterDefinition(source.adapterType);
+      return Boolean(definition && !definition.blockedReason);
+    });
 
-  try {
+    let totalFound = 0;
+    let totalNew = 0;
+    let crawl4aiClient: ReturnType<typeof createCrawl4AIClient> = null;
+    let crawl4aiConfigError: Error | undefined;
+    try {
+      crawl4aiClient = createCrawl4AIClient(getCrawl4AIConfig());
+    } catch (error) {
+      crawl4aiConfigError = error instanceof Error ? error : new Error(String(error));
+    }
+
     for (const source of sources) {
       const adapter = getAdapter(source.adapterType);
       if (!adapter) continue;
 
       const [run] = await db.insert(crawlerRunsTable).values({
         sourceId:  source.id,
+        sourceConfigurationVersion: source.configurationVersion,
         startedAt: new Date(),
         status:    "running",
         aiProvider: null,
@@ -554,8 +623,9 @@ export async function runCrawler(sourceId?: number): Promise<{
           totalNew++;
         }
 
+        const completedAt = new Date();
         await db.update(crawlerRunsTable).set({
-          completedAt:    new Date(),
+          completedAt,
           status:         "success",
           itemsFound:     opportunities.length,
           itemsNew:       newCount,
@@ -569,11 +639,14 @@ export async function runCrawler(sourceId?: number): Promise<{
         }).where(eq(crawlerRunsTable.id, run.id));
 
         await db.update(tenderSourcesTable).set({
-          lastCheckedAt:   new Date(),
-          lastSuccessAt:   new Date(),
+          lastCheckedAt:   completedAt,
+          lastSuccessAt:   completedAt,
           itemsFoundCount: source.itemsFoundCount + newCount,
-          updatedAt:       new Date(),
-        }).where(eq(tenderSourcesTable.id, source.id));
+          updatedAt:       completedAt,
+        }).where(and(
+          eq(tenderSourcesTable.id, source.id),
+          eq(tenderSourcesTable.configurationVersion, source.configurationVersion),
+        ));
 
       } catch (err) {
         const failureCode = crawl4aiErrorCode(err);
@@ -599,21 +672,24 @@ export async function runCrawler(sourceId?: number): Promise<{
         await db.update(tenderSourcesTable).set({
           lastCheckedAt: new Date(),
           updatedAt:     new Date(),
-        }).where(eq(tenderSourcesTable.id, source.id));
+        }).where(and(
+          eq(tenderSourcesTable.id, source.id),
+          eq(tenderSourcesTable.configurationVersion, source.configurationVersion),
+        ));
       }
     }
+
+    return {
+      total:          totalFound,
+      newItems:       totalNew,
+      sources:        sources.length,
+      aiCallCount:    0,
+      aiFallbackCount: 0,
+      quotaErrorHit:  false,
+    };
   } finally {
     await releaseCrawlLock();
   }
-
-  return {
-    total:          totalFound,
-    newItems:       totalNew,
-    sources:        sources.length,
-    aiCallCount:    0,
-    aiFallbackCount: 0,
-    quotaErrorHit:  false,
-  };
 }
 
 // ── Seed default sources ─────────────────────────────────────────────────────

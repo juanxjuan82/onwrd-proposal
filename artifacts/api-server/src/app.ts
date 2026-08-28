@@ -63,6 +63,8 @@ export const dbReady: Promise<void> = pool
   .then(() => pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS generation_status TEXT`))
   .then(() => pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS generation_error TEXT`))
   .then(() => pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS generation_attempt_id TEXT`))
+  .then(() => pool.query(`ALTER TABLE tender_sources ADD COLUMN IF NOT EXISTS configuration_version integer NOT NULL DEFAULT 1`))
+  .then(() => pool.query(`ALTER TABLE crawler_runs ADD COLUMN IF NOT EXISTS source_configuration_version integer NOT NULL DEFAULT 0`))
   // ── Session table ─────────────────────────────────────────────────────────
   .then(() =>
     pool.query(

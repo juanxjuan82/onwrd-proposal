@@ -6,7 +6,25 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
-import { RefreshCw, Trash2, Play, CheckCircle2, XCircle, Clock, Plus, Mail, Send, AlertTriangle } from "lucide-react";
+import { RefreshCw, Trash2, Play, CheckCircle2, XCircle, Clock, Plus, Mail, Send, AlertTriangle, Edit2 } from "lucide-react";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Label } from "@/components/ui/label";
 import { formatDistanceToNow } from "date-fns";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -18,9 +36,25 @@ interface TenderSource {
   url: string;
   adapterType: string;
   active: boolean;
+  browserEnabled: boolean;
+  healthState: "healthy" | "inactive" | "failing" | "never_run";
+  adapterSupported: boolean;
+  activationBlocked: string | null;
+  lastError: string | null;
+  recentFailures: Array<{ id: number; at: string; message: string | null }>;
   lastCheckedAt?: string | null;
   lastSuccessAt?: string | null;
   itemsFoundCount: number;
+}
+
+interface SourceAdapterDefinition {
+  adapterType: string;
+  label: string;
+  sourceType: string;
+  allowedHosts: string[];
+  supportsBrowser: boolean;
+  recommended: boolean;
+  blockedReason?: string;
 }
 
 interface CrawlerRun {
@@ -48,10 +82,28 @@ function SourceTypeLabel({ type }: { type: string }) {
     government: "Government",
     un: "United Nations",
     development_bank: "Dev Bank",
+    regional: "Regional",
+    development_fund: "Dev Fund",
     ngo: "NGO",
     other: "Other",
   };
   return <span>{map[type] ?? type}</span>;
+}
+
+function SourceHealthBadge({ state }: { state: TenderSource["healthState"] }) {
+  const styles: Record<TenderSource["healthState"], string> = {
+    healthy: "border-emerald-700/60 bg-emerald-950/40 text-emerald-300",
+    inactive: "border-slate-700 bg-slate-950/40 text-slate-300",
+    failing: "border-orange-700/60 bg-orange-950/40 text-orange-300",
+    never_run: "border-blue-700/60 bg-blue-950/40 text-blue-300",
+  };
+  const labels: Record<TenderSource["healthState"], string> = {
+    healthy: "Healthy",
+    inactive: "Inactive",
+    failing: "Failing",
+    never_run: "Never run",
+  };
+  return <Badge variant="outline" className={`text-xs py-0 ${styles[state]}`}>{labels[state]}</Badge>;
 }
 
 interface DigestSettings {
@@ -65,11 +117,26 @@ export default function SettingsSources() {
   const qc = useQueryClient();
   const [tab, setTab] = useState<"sources" | "scoring" | "runs" | "digest" | "profiles">("sources");
   const [newEmail, setNewEmail] = useState("");
+  const [editSourceId, setEditSourceId] = useState<number | null>(null);
+  const [editSourceData, setEditSourceData] = useState<{name: string, url: string, adapterType: string, browserEnabled: boolean}>({name: "", url: "", adapterType: "", browserEnabled: false});
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
+  const [pendingToggle, setPendingToggle] = useState<{ id: number; name: string; active: boolean } | null>(null);
+  const [deleteDialogData, setDeleteDialogData] = useState<{id: number, name: string} | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
 
   const { data: sources = [], isLoading: sourcesLoading } = useQuery<TenderSource[]>({
     queryKey: ["tender-sources"],
     queryFn: async () => {
       const r = await fetch(`${BASE}/api/tender-sources`);
+      if (!r.ok) throw new Error("Failed");
+      return r.json();
+    },
+  });
+
+  const { data: adapters = [] } = useQuery<SourceAdapterDefinition[]>({
+    queryKey: ["tender-source-adapters"],
+    queryFn: async () => {
+      const r = await fetch(`${BASE}/api/tender-source-adapters`);
       if (!r.ok) throw new Error("Failed");
       return r.json();
     },
@@ -102,20 +169,66 @@ export default function SettingsSources() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ active }),
       });
-      if (!r.ok) throw new Error("Failed");
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || "Activation failed");
+      }
       return r.json();
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["tender-sources"] }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: ["tender-sources"] });
+      toast({
+        title: variables.active ? "Source activated" : "Source deactivated",
+        description: variables.active
+          ? "This source will be included in scheduled monitoring."
+          : "Historical records are preserved, but this source will not be monitored.",
+      });
+      setPendingToggle(null);
+    },
+    onError: (err: Error) => toast({ title: "Activation Failed", description: err.message, variant: "destructive" })
+  });
+
+  const saveSource = useMutation({
+    mutationFn: async (data: {id?: number, name: string, url: string, adapterType: string, sourceType: string, browserEnabled: boolean}) => {
+      const isUpdate = !!data.id;
+      const url = isUpdate ? `${BASE}/api/tender-sources/${data.id}` : `${BASE}/api/tender-sources`;
+      const r = await fetch(url, {
+        method: isUpdate ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || "Failed to save source");
+      }
+      return r.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["tender-sources"] });
+      toast({ title: "Source saved" });
+      setIsEditDialogOpen(false);
+    },
+    onError: (err: Error) => toast({ title: "Save Failed", description: err.message, variant: "destructive" })
   });
 
   const deleteSource = useMutation({
-    mutationFn: async (id: number) => {
-      await fetch(`${BASE}/api/tender-sources/${id}`, { method: "DELETE" });
+    mutationFn: async ({ id, confirm }: {id: number, confirm: string}) => {
+      const r = await fetch(`${BASE}/api/tender-sources/${id}`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm })
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(d.error || "Failed to delete source");
+      }
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["tender-sources"] });
       toast({ title: "Source removed" });
+      setDeleteDialogData(null);
     },
+    onError: (err: Error) => toast({ title: "Cannot Delete", description: err.message, variant: "destructive" })
   });
 
   const crawlSource = useMutation({
@@ -231,6 +344,34 @@ export default function SettingsSources() {
     onError: (err: Error) => toast({ title: "Failed to send", description: err.message, variant: "destructive" }),
   });
 
+
+  const handleEditSource = (s?: TenderSource) => {
+    if (s) {
+      setEditSourceId(s.id);
+      setEditSourceData({ name: s.name, url: s.url, adapterType: s.adapterType, browserEnabled: s.browserEnabled });
+    } else {
+      setEditSourceId(null);
+      setEditSourceData({ name: "", url: "", adapterType: adapters[0]?.adapterType || "", browserEnabled: false });
+    }
+    setIsEditDialogOpen(true);
+  };
+
+  const submitEditSource = () => {
+    const adapter = adapters.find(a => a.adapterType === editSourceData.adapterType);
+    if (!adapter) {
+      toast({ title: "Validation Error", description: "Please select an adapter.", variant: "destructive" });
+      return;
+    }
+    saveSource.mutate({
+      id: editSourceId || undefined,
+      name: editSourceData.name,
+      url: editSourceData.url,
+      adapterType: editSourceData.adapterType,
+      sourceType: adapter.sourceType,
+      browserEnabled: editSourceData.browserEnabled,
+    });
+  };
+
   const TABS = [
     { value: "sources",  label: "Sources" },
     { value: "scoring",  label: "Scoring" },
@@ -240,18 +381,18 @@ export default function SettingsSources() {
   ] as const;
 
   return (
-    <div className="p-8 max-w-4xl mx-auto">
+    <div className="p-4 sm:p-8 max-w-4xl mx-auto">
       <div className="mb-8">
-        <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">Tender Intelligence</h1>
-        <p className="text-muted-foreground">Manage sources, search profiles, and crawl history.</p>
+        <h1 className="text-3xl sm:text-4xl font-bold text-white mb-2 tracking-tight">Tender Intelligence</h1>
+        <p className="text-muted-foreground text-sm sm:text-base">Manage sources, search profiles, and crawl history.</p>
       </div>
 
-      <div className="flex gap-1 mb-6 border-b border-border">
+      <div className="flex gap-1 mb-6 border-b border-border overflow-x-auto pb-[1px]">
         {TABS.map((t) => (
           <button
             key={t.value}
             onClick={() => setTab(t.value)}
-            className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px ${
+            className={`px-4 py-2 text-sm font-medium transition-colors border-b-2 -mb-px whitespace-nowrap ${
               tab === t.value
                 ? "border-primary text-white"
                 : "border-transparent text-muted-foreground hover:text-white"
@@ -264,61 +405,147 @@ export default function SettingsSources() {
 
       {tab === "sources" && (
         <div className="space-y-3">
-          <div className="flex items-center justify-between mb-4">
+          <div className="rounded-lg border border-blue-900/60 bg-blue-950/20 p-4 text-sm">
+            <p className="font-medium text-white">Current monitored set</p>
+            <p className="mt-1 text-muted-foreground leading-relaxed">
+              World Bank, UNGM / UNDP, Bahamas Government, and CARICOM are the recommended sources.
+              IDB, CDB, CTO, and EU Caribbean require a verified official or authenticated replacement before reactivation.
+              Browser-assisted investigation belongs in the controlled crawler pilot, not in live source settings.
+            </p>
+          </div>
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 mb-4">
             <p className="text-sm text-muted-foreground">{sources.filter((s) => s.active).length} of {sources.length} sources active</p>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => crawlSource.mutate(undefined)}
-              disabled={crawlSource.isPending}
-            >
-              <Play className="w-3.5 h-3.5 mr-1.5" />
-              Run All Now
-            </Button>
+            <div className="flex gap-2 w-full sm:w-auto">
+              <Button
+                size="sm"
+                variant="outline"
+                className="flex-1 sm:flex-none"
+                onClick={() => handleEditSource()}
+                data-testid="button-add-source"
+              >
+                <Plus className="w-3.5 h-3.5 mr-1.5" />
+                Add Source
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="flex-1 sm:flex-none"
+                onClick={() => crawlSource.mutate(undefined)}
+                disabled={crawlSource.isPending}
+                data-testid="button-run-all"
+              >
+                <Play className="w-3.5 h-3.5 mr-1.5" />
+                Run All Now
+              </Button>
+            </div>
           </div>
 
           {sourcesLoading ? (
-            [1, 2, 3].map((i) => <Skeleton key={i} className="h-20 w-full rounded-lg" />)
+            [1, 2, 3].map((i) => <Skeleton key={i} className="h-24 w-full rounded-lg" />)
           ) : (
-            sources.map((s) => (
-              <div key={s.id} className="flex items-center gap-4 p-4 rounded-lg border border-border bg-card">
-                <Switch
-                  checked={s.active}
-                  onCheckedChange={(active) => toggleSource.mutate({ id: s.id, active })}
-                />
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 mb-0.5">
-                    <span className="font-medium text-sm text-white">{s.name}</span>
-                    <Badge variant="outline" className="text-xs py-0"><SourceTypeLabel type={s.sourceType} /></Badge>
+            sources.map((s) => {
+              const blocked = Boolean(s.activationBlocked);
+              const adapter = adapters.find(a => a.adapterType === s.adapterType);
+              return (
+                <div key={s.id} className="flex flex-col sm:flex-row items-start gap-4 p-4 rounded-lg border border-border bg-card" data-testid={`card-source-${s.id}`}>
+                  <div className="flex items-center gap-4 w-full sm:w-auto">
+                    <Switch
+                      checked={s.active}
+                      disabled={blocked || toggleSource.isPending}
+                      onCheckedChange={(active) => setPendingToggle({ id: s.id, name: s.name, active })}
+                      data-testid={`switch-source-${s.id}`}
+                      aria-label={`${s.active ? "Deactivate" : "Activate"} ${s.name}`}
+                    />
+                    <div className="flex-1 min-w-0 sm:hidden">
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <span className="font-medium text-sm text-white truncate">{s.name}</span>
+                      </div>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                    <span>{s.itemsFoundCount} found total</span>
-                    {s.lastCheckedAt && (
-                      <span>· Last checked {formatDistanceToNow(new Date(s.lastCheckedAt), { addSuffix: true })}</span>
-                    )}
+
+                  <div className="flex-1 min-w-0 w-full sm:w-auto">
+                    <div className="hidden sm:flex items-center gap-2 mb-0.5">
+                      <span className="font-medium text-sm text-white">{s.name}</span>
+                      <Badge variant="outline" className="text-xs py-0"><SourceTypeLabel type={s.sourceType} /></Badge>
+                      <SourceHealthBadge state={s.healthState} />
+                      {blocked && <Badge variant="destructive" className="text-xs py-0">Blocked</Badge>}
+                    </div>
+                    <div className="sm:hidden flex items-center gap-2 mb-1.5">
+                      <Badge variant="outline" className="text-xs py-0"><SourceTypeLabel type={s.sourceType} /></Badge>
+                      <SourceHealthBadge state={s.healthState} />
+                      {blocked && <Badge variant="destructive" className="text-xs py-0">Blocked</Badge>}
+                    </div>
+
+                    <div className="text-xs text-muted-foreground space-y-1">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                        <span>{s.itemsFoundCount} found total</span>
+                        {s.lastCheckedAt ? (
+                          <span>Last checked {formatDistanceToNow(new Date(s.lastCheckedAt), { addSuffix: true })}</span>
+                        ) : (
+                          <span>Never checked</span>
+                        )}
+                        <span>
+                          Last success {s.lastSuccessAt
+                            ? formatDistanceToNow(new Date(s.lastSuccessAt), { addSuffix: true })
+                            : "not recorded"}
+                        </span>
+                      </div>
+                      {blocked && (
+                        <p className="text-orange-300 font-medium mt-1 leading-relaxed">
+                           {s.activationBlocked ?? adapter?.blockedReason}
+                        </p>
+                      )}
+                      {!blocked && s.healthState === "failing" && s.lastError && (
+                        <p className="text-orange-300 mt-1 break-words" title={s.lastError}>
+                           Latest error: {s.lastError}
+                        </p>
+                      )}
+                      {s.recentFailures.length > 0 && (
+                        <p className="text-muted-foreground">
+                          {s.recentFailures.length} recent failure{s.recentFailures.length === 1 ? "" : "s"} recorded
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="flex gap-1 w-full sm:w-auto justify-end mt-2 sm:mt-0 pt-2 sm:pt-0 border-t sm:border-0 border-border">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-10 w-10"
+                      onClick={() => handleEditSource(s)}
+                      title="Edit"
+                      data-testid={`button-edit-source-${s.id}`}
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-10 w-10"
+                      onClick={() => crawlSource.mutate(s.id)}
+                      disabled={crawlSource.isPending || blocked}
+                      title={blocked ? "Blocked" : "Run now"}
+                      data-testid={`button-run-source-${s.id}`}
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-10 w-10 text-destructive hover:text-destructive"
+                      onClick={() => {
+                        setDeleteDialogData({ id: s.id, name: s.name });
+                        setDeleteConfirmText("");
+                      }}
+                      data-testid={`button-delete-source-${s.id}`}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </Button>
                   </div>
                 </div>
-                <div className="flex gap-1">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => crawlSource.mutate(s.id)}
-                    disabled={crawlSource.isPending}
-                    title="Run now"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="text-destructive hover:text-destructive"
-                    onClick={() => deleteSource.mutate(s.id)}
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </Button>
-                </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       )}
@@ -403,8 +630,8 @@ export default function SettingsSources() {
             <p className="text-xs text-muted-foreground mb-4">Final fit score determines the recommendation shown in Opportunities.</p>
             <div className="space-y-2">
               {[
-                { label: "🔥 PURSUE",   range: "≥ 60", note: "Strong fit across geography, capabilities, and sector", color: "border-emerald-800 bg-emerald-900/20 text-emerald-400" },
-                { label: "⚡ CONSIDER", range: "40 – 59", note: "Partial fit — worth reviewing before deciding", color: "border-yellow-800 bg-yellow-900/20 text-yellow-400" },
+                { label: "PURSUE",   range: "≥ 60", note: "Strong fit across geography, capabilities, and sector", color: "border-emerald-800 bg-emerald-900/20 text-emerald-400" },
+                { label: "CONSIDER", range: "40 – 59", note: "Partial fit — worth reviewing before deciding", color: "border-yellow-800 bg-yellow-900/20 text-yellow-400" },
                 { label: "— SKIP",     range: "< 40",  note: "Poor fit or failed Stage 1 filter", color: "border-gray-700 bg-gray-900/20 text-gray-400" },
               ].map(({ label, range, note, color }) => (
                 <div key={label} className={`flex items-center justify-between px-4 py-3 rounded-md border ${color}`}>
@@ -424,11 +651,11 @@ export default function SettingsSources() {
             <p className="text-xs text-muted-foreground mb-4">Detected from country field, title, and description. Bahamas and Caribbean auto-pass Stage 1.</p>
             <div className="space-y-2">
               {[
-                { region: "🇧🇸 Bahamas",      pts: 35, signals: "Nassau, Freeport, New Providence, Grand Bahama, Andros, Exuma…", highlight: true },
-                { region: "🌴 Caribbean",     pts: 28, signals: "CARICOM, OECS, Jamaica, Barbados, Trinidad, Guyana, Belize, St Lucia…", highlight: false },
-                { region: "🏝️ SIDS",          pts: 20, signals: "Small Island Developing States, Pacific Island, Maldives, Fiji…", highlight: false },
-                { region: "🌎 Latin America", pts: 15, signals: "Mexico, Colombia, Peru, Brazil, Panama, Costa Rica…", highlight: false },
-                { region: "🌐 Global",        pts: 10, signals: "Multilateral or remote-eligible international (passed Stage 1)", highlight: false },
+                { region: "Bahamas",      pts: 35, signals: "Nassau, Freeport, New Providence, Grand Bahama, Andros, Exuma…", highlight: true },
+                { region: "Caribbean",     pts: 28, signals: "CARICOM, OECS, Jamaica, Barbados, Trinidad, Guyana, Belize, St Lucia…", highlight: false },
+                { region: "SIDS",          pts: 20, signals: "Small Island Developing States, Pacific Island, Maldives, Fiji…", highlight: false },
+                { region: "Latin America", pts: 15, signals: "Mexico, Colombia, Peru, Brazil, Panama, Costa Rica…", highlight: false },
+                { region: "Global",        pts: 10, signals: "Multilateral or remote-eligible international (passed Stage 1)", highlight: false },
               ].map(({ region, pts, signals, highlight }) => (
                 <div key={region} className={`flex items-start gap-3 px-4 py-3 rounded-md border ${highlight ? "border-amber-800/50 bg-amber-900/10" : "border-border bg-muted/10"}`}>
                   <div className={`w-10 text-center text-lg font-bold flex-shrink-0 ${highlight ? "text-amber-400" : "text-white"}`}>{pts}</div>
@@ -578,7 +805,7 @@ export default function SettingsSources() {
               disabled={rescore.isPending}
               className="text-xs px-3 py-1.5 rounded-md border border-border bg-card hover:bg-accent text-muted-foreground hover:text-white transition-colors disabled:opacity-50"
             >
-              {rescore.isPending ? "Re-scoring…" : "⚡ Re-score with keywords"}
+              {rescore.isPending ? "Re-scoring…" : "Re-score with keywords"}
             </button>
           </div>
           {runs.length === 0 ? (
@@ -618,6 +845,160 @@ export default function SettingsSources() {
           )}
         </div>
       )}
+
+      {/* Source lifecycle confirmation */}
+      <AlertDialog open={!!pendingToggle} onOpenChange={(open) => !open && setPendingToggle(null)}>
+        <AlertDialogContent className="bg-card border border-border">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {pendingToggle?.active ? "Activate source?" : "Deactivate source?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription className="leading-relaxed">
+              {pendingToggle?.active
+                ? `${pendingToggle.name} will be included in scheduled monitoring. Activation is allowed only after a successful test crawl returns usable records.`
+                : `${pendingToggle?.name} will stop being monitored. Existing opportunities and crawl history will be preserved.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button
+              onClick={() => pendingToggle && toggleSource.mutate({ id: pendingToggle.id, active: pendingToggle.active })}
+              disabled={toggleSource.isPending}
+              data-testid="button-source-toggle-confirm"
+            >
+              {toggleSource.isPending
+                ? "Saving…"
+                : pendingToggle?.active ? "Activate source" : "Deactivate source"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Delete Source Dialog */}
+      <AlertDialog open={!!deleteDialogData} onOpenChange={(open) => !open && setDeleteDialogData(null)}>
+        <AlertDialogContent className="bg-card border border-border">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Source</AlertDialogTitle>
+            <AlertDialogDescription>
+              Permanently deleting a source will drop it from the UI. To proceed, type the name of the source:
+              <strong className="text-white ml-1">{deleteDialogData?.name}</strong>
+              <br/><br/>
+              If this source has existing crawl history, deletion will be rejected to protect historical records.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="py-2">
+            <Input
+              value={deleteConfirmText}
+              onChange={(e) => setDeleteConfirmText(e.target.value)}
+              placeholder={deleteDialogData?.name}
+              data-testid="input-delete-confirm"
+            />
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button
+              variant="destructive"
+              disabled={deleteConfirmText !== deleteDialogData?.name || deleteSource.isPending}
+              onClick={() => {
+                if (deleteDialogData) deleteSource.mutate({ id: deleteDialogData.id, confirm: deleteConfirmText });
+              }}
+              data-testid="button-delete-confirm"
+            >
+              {deleteSource.isPending ? "Deleting..." : "Delete"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Edit/Create Source Dialog */}
+      <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
+        <DialogContent className="bg-card border border-border">
+          <DialogHeader>
+            <DialogTitle>{editSourceId ? "Edit Source" : "Add Source"}</DialogTitle>
+            <DialogDescription>
+              Configure the crawler source adapter and URL.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <Label>Source Name</Label>
+              <Input
+                value={editSourceData.name}
+                onChange={(e) => setEditSourceData({...editSourceData, name: e.target.value})}
+                placeholder="e.g. World Bank Notices"
+                data-testid="input-source-name"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Adapter</Label>
+              <select
+                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                value={editSourceData.adapterType}
+                onChange={(e) => {
+                  const nextAdapter = adapters.find((adapter) => adapter.adapterType === e.target.value);
+                  setEditSourceData({
+                    ...editSourceData,
+                    adapterType: e.target.value,
+                    browserEnabled: nextAdapter?.supportsBrowser ? editSourceData.browserEnabled : false,
+                  });
+                }}
+                data-testid="select-source-adapter"
+              >
+                {adapters.map(a => (
+                  <option key={a.adapterType} value={a.adapterType}>
+                    {a.label}{a.blockedReason ? " — verification required" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Source URL</Label>
+              <Input
+                value={editSourceData.url}
+                onChange={(e) => setEditSourceData({...editSourceData, url: e.target.value})}
+                placeholder="https://..."
+                data-testid="input-source-url"
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Must match an allowed host for the selected adapter
+                ({adapters.find(a => a.adapterType === editSourceData.adapterType)?.allowedHosts.join(", ") || "none"}).
+              </p>
+            </div>
+            {adapters.find(a => a.adapterType === editSourceData.adapterType)?.blockedReason && (
+              <div className="rounded-md border border-orange-800/60 bg-orange-950/30 p-3 text-sm text-orange-200">
+                {adapters.find(a => a.adapterType === editSourceData.adapterType)?.blockedReason}
+                The source will remain inactive.
+              </div>
+            )}
+            {adapters.find(a => a.adapterType === editSourceData.adapterType)?.supportsBrowser && (
+              <div className="flex items-start justify-between gap-4 rounded-md border border-border p-3">
+                <div>
+                  <Label htmlFor="source-browser-enabled">Browser-assisted fetch</Label>
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                    Keep disabled unless this source is part of the controlled browser-crawler pilot.
+                  </p>
+                </div>
+                <Switch
+                  id="source-browser-enabled"
+                  checked={editSourceData.browserEnabled}
+                  onCheckedChange={(browserEnabled) => setEditSourceData({ ...editSourceData, browserEnabled })}
+                  data-testid="switch-source-browser"
+                />
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsEditDialogOpen(false)}>Cancel</Button>
+            <Button
+              onClick={submitEditSource}
+              disabled={!editSourceData.name || !editSourceData.url || !editSourceData.adapterType || saveSource.isPending}
+              data-testid="button-save-source"
+            >
+              {saveSource.isPending ? "Saving..." : "Save"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
