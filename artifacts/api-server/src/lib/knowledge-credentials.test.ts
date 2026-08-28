@@ -13,7 +13,16 @@
 
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { db, knowledgeDocumentsTable, proposalsTable, proposalSectionsTable, proposalGenerationRunsTable, tendersTable } from "@workspace/db";
+import {
+  db,
+  knowledgeDocumentsTable,
+  proposalGenerationRunsTable,
+  proposalRequirementCoverageTable,
+  proposalsTable,
+  proposalSectionsTable,
+  tenderRequirementsTable,
+  tendersTable,
+} from "@workspace/db";
 import { eq } from "drizzle-orm";
 import {
   getApprovedKnowledge,
@@ -381,6 +390,109 @@ describe("knowledge credentials (task #64)", () => {
       return p.id;
     }
 
+    async function makeComplianceFixture() {
+      const suffix = Date.now();
+      const [knowledge] = await db
+        .insert(knowledgeDocumentsTable)
+        .values({
+          title: `Compliance Evidence ${suffix}`,
+          content: "Approved evidence for a required delivery plan.",
+          docType: "capability",
+          isApproved: true,
+        })
+        .returning({ id: knowledgeDocumentsTable.id });
+      const [tender] = await db
+        .insert(tendersTable)
+        .values({
+          title: `Compliance Route Tender ${suffix}`,
+          agency: "Test Agency",
+          category: "Marketing",
+          description: "Requires a detailed delivery plan.",
+          status: "screened",
+          sourceType: "pasted_text",
+        })
+        .returning({ id: tendersTable.id });
+      const [proposal] = await db
+        .insert(proposalsTable)
+        .values({
+          clientName: "Test Agency",
+          industry: "Marketing",
+          briefText: "Compliance route test",
+          proposalContent: "## Deliverables\nA complete delivery plan.",
+          status: "ready_for_review",
+          tenderId: tender.id,
+        })
+        .returning({ id: proposalsTable.id });
+      const [section] = await db
+        .insert(proposalSectionsTable)
+        .values({
+          proposalId: proposal.id,
+          sectionKey: "deliverables",
+          title: "Deliverables",
+          content: "A complete delivery plan.",
+          orderIndex: 5,
+          status: "drafted",
+        })
+        .returning({ id: proposalSectionsTable.id });
+      const [requirement] = await db
+        .insert(tenderRequirementsTable)
+        .values({
+          tenderId: tender.id,
+          requirementText: "Provide a complete delivery plan.",
+          category: "deliverable",
+          isMandatory: true,
+          orderIndex: 0,
+          isAnswered: true,
+          answeredInSectionId: section.id,
+        })
+        .returning({ id: tenderRequirementsTable.id });
+      const [coverage] = await db
+        .insert(proposalRequirementCoverageTable)
+        .values({
+          proposalId: proposal.id,
+          requirementId: requirement.id,
+          mappedSectionId: section.id,
+          status: "covered",
+          confidence: 90,
+          evidenceReferences: JSON.stringify([
+            {
+              type: "knowledge",
+              knowledgeDocumentId: knowledge.id,
+              title: `Compliance Evidence ${suffix}`,
+              excerpt: "Approved evidence for a required delivery plan.",
+            },
+          ]),
+        })
+        .returning({ id: proposalRequirementCoverageTable.id });
+      return {
+        knowledgeId: knowledge.id,
+        tenderId: tender.id,
+        proposalId: proposal.id,
+        sectionId: section.id,
+        requirementId: requirement.id,
+        coverageId: coverage.id,
+      };
+    }
+
+    async function cleanupComplianceFixture(fixture: Awaited<ReturnType<typeof makeComplianceFixture>>) {
+      await db
+        .delete(proposalRequirementCoverageTable)
+        .where(eq(proposalRequirementCoverageTable.proposalId, fixture.proposalId));
+      await db
+        .delete(tenderRequirementsTable)
+        .where(eq(tenderRequirementsTable.tenderId, fixture.tenderId));
+      await db
+        .delete(proposalSectionsTable)
+        .where(eq(proposalSectionsTable.proposalId, fixture.proposalId));
+      await db
+        .delete(proposalsTable)
+        .where(eq(proposalsTable.id, fixture.proposalId));
+      await db.delete(tendersTable).where(eq(tendersTable.id, fixture.tenderId));
+      await db
+        .delete(knowledgeDocumentsTable)
+        .where(eq(knowledgeDocumentsTable.id, fixture.knowledgeId));
+    }
+
     it("POST /proposals/:id/export → 422 unverified_credentials while flag is set", async () => {
       const id = await makeFlaggedProposal();
       try {
@@ -430,6 +542,203 @@ describe("knowledge credentials (task #64)", () => {
         assert.equal(body.code, "unverified_credentials");
       } finally {
         await db.delete(proposalsTable).where(eq(proposalsTable.id, id));
+      }
+    });
+
+    it("editing a covered section invalidates its mappings and proposal approval", async () => {
+      const fixture = await makeComplianceFixture();
+      try {
+        const response = await fetch(
+          `${baseUrl}/api/proposals/${fixture.proposalId}/sections/${fixture.sectionId}`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              content: "The delivery plan was changed and needs validation.",
+              status: "drafted",
+            }),
+          },
+        );
+        assert.equal(response.status, 200);
+
+        const [coverage] = await db
+          .select()
+          .from(proposalRequirementCoverageTable)
+          .where(eq(proposalRequirementCoverageTable.id, fixture.coverageId));
+        const [requirement] = await db
+          .select()
+          .from(tenderRequirementsTable)
+          .where(eq(tenderRequirementsTable.id, fixture.requirementId));
+        const [proposal] = await db
+          .select()
+          .from(proposalsTable)
+          .where(eq(proposalsTable.id, fixture.proposalId));
+        assert.equal(coverage.status, "needs_review");
+        assert.equal(coverage.confidence, 0);
+        assert.equal(requirement.isAnswered, false);
+        assert.equal(requirement.answeredInSectionId, null);
+        assert.equal(proposal.complianceReviewRequired, true);
+        assert.equal(proposal.reviewRequired, true);
+        assert.equal(proposal.status, "draft");
+
+        const approvalResponse = await fetch(
+          `${baseUrl}/api/proposals/${fixture.proposalId}/sections/${fixture.sectionId}`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: "approved" }),
+          },
+        );
+        assert.equal(approvalResponse.status, 200);
+        const [approvedCoverage] = await db
+          .select()
+          .from(proposalRequirementCoverageTable)
+          .where(eq(proposalRequirementCoverageTable.id, fixture.coverageId));
+        const [approvedProposal] = await db
+          .select()
+          .from(proposalsTable)
+          .where(eq(proposalsTable.id, fixture.proposalId));
+        assert.equal(approvedCoverage.status, "covered");
+        assert.equal(approvedCoverage.confidence, 100);
+        assert.equal(approvedProposal.complianceReviewRequired, false);
+        assert.equal(approvedProposal.reviewRequired, false);
+      } finally {
+        await cleanupComplianceFixture(fixture);
+      }
+    });
+
+    it("a mandatory requirement added after generation is visible to the approval gate", async () => {
+      const fixture = await makeComplianceFixture();
+      try {
+        const cleanApproval = await fetch(
+          `${baseUrl}/api/proposals/${fixture.proposalId}/approve-for-export`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          },
+        );
+        assert.equal(cleanApproval.status, 200);
+        await db.insert(tenderRequirementsTable).values({
+          tenderId: fixture.tenderId,
+          requirementText: "Provide a mandatory risk register.",
+          category: "compliance",
+          isMandatory: true,
+          orderIndex: 1,
+        });
+        const exportResponse = await fetch(
+          `${baseUrl}/api/proposals/${fixture.proposalId}/export`,
+          { method: "POST" },
+        );
+        assert.equal(exportResponse.status, 422);
+        assert.equal(
+          ((await exportResponse.json()) as { code?: string }).code,
+          "compliance_review_required",
+        );
+        const response = await fetch(
+          `${baseUrl}/api/proposals/${fixture.proposalId}/approve-for-export`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          },
+        );
+        assert.equal(response.status, 422);
+        const body = (await response.json()) as { blockers?: string[] };
+        assert.ok(
+          body.blockers?.some((blocker) =>
+            blocker.includes("mandatory risk register"),
+          ),
+        );
+
+        const overrideApproval = await fetch(
+          `${baseUrl}/api/proposals/${fixture.proposalId}/approve-for-export`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              overrideReason: "Risk register will be completed in final review.",
+            }),
+          },
+        );
+        assert.equal(overrideApproval.status, 200);
+        const exportAfterOverride = await fetch(
+          `${baseUrl}/api/proposals/${fixture.proposalId}/export`,
+          { method: "POST" },
+        );
+        assert.notEqual(
+          exportAfterOverride.status,
+          422,
+          "a current documented compliance override must be the only bypass",
+        );
+      } finally {
+        await cleanupComplianceFixture(fixture);
+      }
+    });
+
+    it("unapproved knowledge is hidden and makes its coverage review-required", async () => {
+      const fixture = await makeComplianceFixture();
+      try {
+        const cleanApproval = await fetch(
+          `${baseUrl}/api/proposals/${fixture.proposalId}/approve-for-export`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          },
+        );
+        assert.equal(cleanApproval.status, 200);
+        await db
+          .update(knowledgeDocumentsTable)
+          .set({ isApproved: false })
+          .where(eq(knowledgeDocumentsTable.id, fixture.knowledgeId));
+
+        const exportResponse = await fetch(
+          `${baseUrl}/api/proposals/${fixture.proposalId}/export`,
+          { method: "POST" },
+        );
+        assert.equal(exportResponse.status, 422);
+        assert.equal(
+          ((await exportResponse.json()) as { code?: string }).code,
+          "compliance_review_required",
+        );
+
+        const complianceResponse = await fetch(
+          `${baseUrl}/api/proposals/${fixture.proposalId}/compliance`,
+        );
+        assert.equal(complianceResponse.status, 200);
+        const compliance = (await complianceResponse.json()) as Array<{
+          evidence: Array<{ knowledgeDocumentId?: number }>;
+        }>;
+        assert.equal(compliance.length, 1);
+        assert.equal(
+          compliance[0].evidence.some(
+            (source) =>
+              source.knowledgeDocumentId === fixture.knowledgeId,
+          ),
+          false,
+        );
+
+        const approvalResponse = await fetch(
+          `${baseUrl}/api/proposals/${fixture.proposalId}/approve-for-export`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          },
+        );
+        assert.equal(approvalResponse.status, 422);
+        const [coverage] = await db
+          .select()
+          .from(proposalRequirementCoverageTable)
+          .where(eq(proposalRequirementCoverageTable.id, fixture.coverageId));
+        assert.equal(coverage.status, "needs_review");
+        assert.match(
+          coverage.reviewReason ?? "",
+          /no longer approved/i,
+        );
+      } finally {
+        await cleanupComplianceFixture(fixture);
       }
     });
 

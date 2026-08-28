@@ -11,13 +11,16 @@ import { db } from "@workspace/db";
 import {
   proposalSectionsTable,
   proposalGenerationRunsTable,
+  proposalRequirementCoverageTable,
   proposalsTable,
+  tenderRequirementsTable,
   tendersTable,
 } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 import { invokeAI } from "./ai-gateway.js";
 import { assembleProposalFromSections } from "@workspace/proposal-content";
 import {
+  type ApprovedKnowledgeDoc,
   getApprovedKnowledge,
   buildKnowledgeBlock,
   scanUnverifiedCredentials,
@@ -110,9 +113,59 @@ ${UNTRUSTED_CONTENT_POLICY}
 
 ${knowledgeBlock}
 
-Return JSON with a "sections" array. Each element:
+Return JSON with:
+- a "sections" array. Each element:
 - key: the section key
-- content: the section BODY ONLY — do NOT start with the section title as a heading. Internal subheadings should use ### (level 3 only). Use markdown bold with ** and bullets with -.`;
+- content: the section BODY ONLY — do NOT start with the section title as a heading. Internal subheadings should use ### (level 3 only). Use markdown bold with ** and bullets with -.
+- a "coverage" array with exactly one item for every numbered extracted requirement. Each element:
+  - requirementIndex: the 1-based requirement number
+  - sectionKey: the single proposal section that most directly answers it
+  - status: "covered", "needs_review", or "unanswered"
+  - confidence: integer 0-100
+  - reviewReason: null when covered, otherwise a short specific explanation
+  - evidenceKnowledgeIds: IDs from the approved Knowledge Library above that directly support the response; [] when none apply
+
+Coverage rules:
+- Mark "covered" only when the mapped section directly answers the requirement.
+- Mark "unanswered" when required facts or content are absent.
+- Mark "needs_review" when the response is ambiguous, unsupported, or relies on an assumption.
+- Never invent a Knowledge ID or cite a document that does not directly support the response.`;
+}
+
+const DEFAULT_SECTION_BY_CATEGORY: Record<string, string> = {
+  technical: "strategic_approach",
+  budget: "investment",
+  timeline: "timeline",
+  personnel: "team_structure",
+  certifications: "case_studies",
+  format: "next_steps",
+  deliverable: "deliverables",
+  compliance: "legal_terms",
+  general: "scope_of_work",
+};
+
+type CoverageStatus = "covered" | "needs_review" | "unanswered";
+
+interface RawCoverage {
+  requirementIndex?: unknown;
+  sectionKey?: unknown;
+  status?: unknown;
+  confidence?: unknown;
+  reviewReason?: unknown;
+  evidenceKnowledgeIds?: unknown;
+}
+
+function normalizeCoverageStatus(value: unknown): CoverageStatus | null {
+  return value === "covered" || value === "needs_review" || value === "unanswered"
+    ? value
+    : null;
+}
+
+function clampConfidence(value: unknown, fallback: number): number {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric)
+    ? Math.max(0, Math.min(100, Math.round(numeric)))
+    : fallback;
 }
 
 // ── Core service ──────────────────────────────────────────────────────────────
@@ -176,9 +229,18 @@ export async function generateProposalDraftAndPersist({
 
   // The tender's own agency/title are legitimately named in a proposal.
   const [tenderRow] = await db
-    .select({ title: tendersTable.title, agency: tendersTable.agency })
+    .select({
+      title: tendersTable.title,
+      agency: tendersTable.agency,
+      sourceUrl: tendersTable.sourceUrl,
+    })
     .from(tendersTable)
     .where(eq(tendersTable.id, tenderId));
+  const requirements = await db
+    .select()
+    .from(tenderRequirementsTable)
+    .where(eq(tenderRequirementsTable.tenderId, tenderId))
+    .orderBy(tenderRequirementsTable.orderIndex);
 
   // ── 1. AI call — outside any transaction ────────────────────────────────
   const genAiResult = await invokeAI({
@@ -198,8 +260,10 @@ export async function generateProposalDraftAndPersist({
   // ── 2. Parse output ─────────────────────────────────────────────────────
   const genData = JSON.parse(genAiResult.content) as {
     sections?: { key: string; content: string }[];
+    coverage?: RawCoverage[];
   };
   const aiSections = genData.sections ?? [];
+  const aiCoverage = genData.coverage ?? [];
 
   // ── 3. Map section content after successful parse ────────────────────────
   let hasBlockedSections = false;
@@ -234,7 +298,87 @@ export async function generateProposalDraftAndPersist({
       )
     : [];
 
-  const reviewRequired = flaggedPhrases.length > 0 || unverifiedCredentials.length > 0;
+  const approvedDocsById = new Map(approvedDocs.map((doc) => [doc.id, doc]));
+  const validSectionKeys = new Set(SECTION_DEFINITIONS.map((section) => section.key));
+  const coverageValues = requirements.map((requirement, index) => {
+    const rawCoverage = aiCoverage.find(
+      (item) => Number(item.requirementIndex) === index + 1,
+    );
+    const requestedSectionKey =
+      typeof rawCoverage?.sectionKey === "string" ? rawCoverage.sectionKey : "";
+    const sectionKey = validSectionKeys.has(
+      requestedSectionKey as (typeof SECTION_DEFINITIONS)[number]["key"],
+    )
+      ? requestedSectionKey
+      : DEFAULT_SECTION_BY_CATEGORY[requirement.category] ?? "scope_of_work";
+    const section = sectionValues.find((item) => item.sectionKey === sectionKey);
+    const sectionBlocked =
+      !section ||
+      !section.content.trim() ||
+      section.content.includes("[NEEDS ONWRD INPUT");
+    let status =
+      normalizeCoverageStatus(rawCoverage?.status) ??
+      (sectionBlocked ? "unanswered" : "covered");
+    if (sectionBlocked) status = "unanswered";
+
+    const rawEvidenceIds = Array.isArray(rawCoverage?.evidenceKnowledgeIds)
+      ? rawCoverage.evidenceKnowledgeIds
+      : [];
+    const evidenceDocs = [
+      ...new Set(rawEvidenceIds.map(Number).filter(Number.isInteger)),
+    ]
+      .map((id) => approvedDocsById.get(id))
+      .filter((doc): doc is ApprovedKnowledgeDoc => Boolean(doc));
+
+    const reviewReason =
+      status === "covered"
+        ? null
+        : typeof rawCoverage?.reviewReason === "string" &&
+            rawCoverage.reviewReason.trim()
+          ? rawCoverage.reviewReason.trim().slice(0, 500)
+          : status === "unanswered"
+            ? "The generated draft does not fully answer this requirement."
+            : "This response needs human confirmation.";
+    const evidenceReferences = [
+      {
+        type: "tender",
+        title: tenderRow?.title ?? "Tender source",
+        sourceUrl: tenderRow?.sourceUrl ?? null,
+        excerpt: requirement.requirementText,
+      },
+      ...evidenceDocs.map((doc) => ({
+        type: "knowledge",
+        knowledgeDocumentId: doc.id,
+        title: doc.title,
+        sourceUrl: null,
+        excerpt: doc.content.slice(0, 300),
+      })),
+    ];
+
+    return {
+      requirementId: requirement.id,
+      sectionKey,
+      status,
+      confidence: clampConfidence(rawCoverage?.confidence, status === "covered" ? 65 : 35),
+      reviewReason,
+      evidenceReferences: JSON.stringify(evidenceReferences),
+      isMandatory: requirement.isMandatory,
+    };
+  });
+  const complianceReviewRequired = coverageValues.some(
+    (coverage) => coverage.status !== "covered",
+  );
+  const hasMandatoryGap = coverageValues.some(
+    (coverage) => coverage.isMandatory && coverage.status !== "covered",
+  );
+  if (hasMandatoryGap) hasBlockedSections = true;
+  const resolvedFinalStatus = hasBlockedSections
+    ? "needs_onwrd_input"
+    : finalStatus;
+  const reviewRequired =
+    flaggedPhrases.length > 0 ||
+    unverifiedCredentials.length > 0 ||
+    complianceReviewRequired;
 
   // ── 4. ONE atomic transaction: replace sections + update snapshot ────────
   await db.transaction(async (tx: DbTx) => {
@@ -268,9 +412,12 @@ export async function generateProposalDraftAndPersist({
       })
       .returning();
 
-    // b. Replace sections — delete stale rows first, then insert AI content.
+    // b. Replace sections and their traceability rows atomically.
     //    This happens only AFTER AI output is validated, so prior content is
     //    preserved if the AI call or JSON parse above throws.
+    await tx
+      .delete(proposalRequirementCoverageTable)
+      .where(eq(proposalRequirementCoverageTable.proposalId, proposalId));
     await tx.execute(sql`DELETE FROM proposal_sections WHERE proposal_id = ${proposalId}`);
     await tx.insert(proposalSectionsTable).values(
       sectionValues.map((sv) => ({
@@ -291,19 +438,60 @@ export async function generateProposalDraftAndPersist({
       .where(eq(proposalSectionsTable.proposalId, proposalId))
       .orderBy(proposalSectionsTable.orderIndex);
 
+    const sectionIdByKey = new Map(
+      allSections.map((section) => [section.sectionKey, section.id]),
+    );
+    if (coverageValues.length > 0) {
+      await tx.insert(proposalRequirementCoverageTable).values(
+        coverageValues.map((coverage) => ({
+          proposalId,
+          requirementId: coverage.requirementId,
+          mappedSectionId: sectionIdByKey.get(coverage.sectionKey) ?? null,
+          status: coverage.status,
+          confidence: coverage.confidence,
+          reviewReason: coverage.reviewReason,
+          evidenceReferences: coverage.evidenceReferences,
+        })),
+      );
+      for (const coverage of coverageValues) {
+        await tx
+          .update(tenderRequirementsTable)
+          .set({
+            isAnswered: coverage.status === "covered",
+            answeredInSectionId:
+              sectionIdByKey.get(coverage.sectionKey) ?? null,
+          })
+          .where(eq(tenderRequirementsTable.id, coverage.requirementId));
+      }
+    }
+
     // d. Assemble snapshot + update proposal
     const assembledContent = assembleProposalFromSections(allSections);
     await tx
       .update(proposalsTable)
-      .set({ proposalContent: assembledContent, status: finalStatus, reviewRequired, flaggedPhrases, unverifiedCredentials, updatedAt: new Date() })
+      .set({
+        proposalContent: assembledContent,
+        status: resolvedFinalStatus,
+        reviewRequired,
+        complianceReviewRequired,
+        flaggedPhrases,
+        unverifiedCredentials,
+        updatedAt: new Date(),
+      })
       .where(eq(proposalsTable.id, proposalId));
 
     // e. Update tender status
     await tx
       .update(tendersTable)
-      .set({ status: finalStatus, updatedAt: new Date() })
+      .set({ status: resolvedFinalStatus, updatedAt: new Date() })
       .where(eq(tendersTable.id, tenderId));
   });
 
-  return { hasBlockedSections, finalStatus, flaggedPhrases, reviewRequired, unverifiedCredentials };
+  return {
+    hasBlockedSections,
+    finalStatus: resolvedFinalStatus,
+    flaggedPhrases,
+    reviewRequired,
+    unverifiedCredentials,
+  };
 }

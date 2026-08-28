@@ -58,7 +58,7 @@ There are NO approved ONWRD case studies or credentials available.
   const caseStudyBlock = caseStudies
     .map(
       (d, i) =>
-        `${i + 1}. "${d.title}"\n${d.content.slice(0, CASE_STUDY_CONTENT_CHARS)}`,
+        `${i + 1}. [Knowledge ID: ${d.id}] "${d.title}"\n${d.content.slice(0, CASE_STUDY_CONTENT_CHARS)}`,
     )
     .join("\n\n");
 
@@ -68,7 +68,7 @@ APPROVED CASE STUDIES (cite ONLY these, using their EXACT titles verbatim):
 ${caseStudyBlock || "(none)"}
 
 OTHER APPROVED KNOWLEDGE TITLES (background/capability material; may inform tone and approach but are NOT client credentials):
-${others.map((d) => `- "${d.title}"`).join("\n") || "(none)"}
+  ${others.map((d) => `- [Knowledge ID: ${d.id}] "${d.title}"`).join("\n") || "(none)"}
 
 CREDENTIAL CITATION RULES (STRICT):
 - The Case Studies and Credentials section may cite ONLY the approved case studies above, and MUST use their exact titles verbatim — do not rename, paraphrase, or "improve" a client name.

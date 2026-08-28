@@ -4,6 +4,7 @@ export * from "./tenders";
 export * from "./tender-requirements";
 export * from "./bid-scores";
 export * from "./proposal-sections";
+export * from "./proposal-requirement-coverage";
 export * from "./proposal-generation-runs";
 export * from "./proposal-review-events";
 export * from "./knowledge-documents";

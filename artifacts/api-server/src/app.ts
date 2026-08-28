@@ -104,8 +104,33 @@ export const dbReady: Promise<void> = pool
     pool.query(
       `ALTER TABLE proposals
          ADD COLUMN IF NOT EXISTS review_required boolean NOT NULL DEFAULT false,
+         ADD COLUMN IF NOT EXISTS compliance_review_required boolean NOT NULL DEFAULT false,
          ADD COLUMN IF NOT EXISTS flagged_phrases text[] NOT NULL DEFAULT '{}',
          ADD COLUMN IF NOT EXISTS unverified_credentials text[] NOT NULL DEFAULT '{}'`,
+    ),
+  )
+  .then(() =>
+    pool.query(
+      `CREATE TABLE IF NOT EXISTS proposal_requirement_coverage (
+         id serial PRIMARY KEY,
+         proposal_id integer NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+         requirement_id integer NOT NULL REFERENCES tender_requirements(id) ON DELETE CASCADE,
+         mapped_section_id integer REFERENCES proposal_sections(id) ON DELETE SET NULL,
+         status text NOT NULL DEFAULT 'unanswered',
+         confidence integer NOT NULL DEFAULT 0 CHECK (confidence >= 0 AND confidence <= 100),
+         review_reason text,
+         evidence_references text NOT NULL DEFAULT '[]',
+         created_at timestamp NOT NULL DEFAULT now(),
+         updated_at timestamp NOT NULL DEFAULT now(),
+         CONSTRAINT proposal_requirement_coverage_proposal_requirement_unique
+           UNIQUE (proposal_id, requirement_id)
+       )`,
+    ),
+  )
+  .then(() =>
+    pool.query(
+      `CREATE INDEX IF NOT EXISTS proposal_requirement_coverage_proposal_idx
+       ON proposal_requirement_coverage (proposal_id)`,
     ),
   )
   .then(() =>

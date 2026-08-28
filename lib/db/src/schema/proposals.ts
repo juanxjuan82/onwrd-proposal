@@ -10,6 +10,7 @@ export const proposalsTable = pgTable("proposals", {
   briefText: text("brief_text").notNull(),
   proposalContent: text("proposal_content").notNull(),
   reviewRequired: boolean("review_required").notNull().default(false),
+  complianceReviewRequired: boolean("compliance_review_required").notNull().default(false),
   flaggedPhrases: text("flagged_phrases").array().notNull().default([]),
   unverifiedCredentials: text("unverified_credentials").array().notNull().default([]),
   googleDocUrl: text("google_doc_url"),

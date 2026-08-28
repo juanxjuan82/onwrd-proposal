@@ -17,7 +17,15 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { normalizeSectionBody, assembleProposalFromSections } from "@workspace/proposal-content";
-import { db, tendersTable, proposalsTable, proposalSectionsTable } from "@workspace/db";
+import {
+  db,
+  knowledgeDocumentsTable,
+  proposalRequirementCoverageTable,
+  proposalsTable,
+  proposalSectionsTable,
+  tenderRequirementsTable,
+  tendersTable,
+} from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 import { generateProposalDraftAndPersist, SECTION_DEFINITIONS } from "../lib/proposal-draft-service.js";
 import { googleDocCanonicalPayload } from "../lib/proposal-predicates.js";
@@ -426,15 +434,35 @@ describe("§G run-full-generation and proposals workspace", () => {
 describe("§G behavioral — DB-connected", () => {
   let tenderId = -1;
   let proposalId = -1;
+  let knowledgeDocId = -1;
 
   before(async () => {
-    // Spy returns 15 minimal sections so generateProposalDraftAndPersist can complete
+    const [knowledgeDoc] = await db
+      .insert(knowledgeDocumentsTable)
+      .values({
+        title: `Behavioral Evidence ${Date.now()}`,
+        content: "Approved delivery-method evidence for behavioral coverage tests.",
+        docType: "capability",
+        isApproved: true,
+      })
+      .returning({ id: knowledgeDocumentsTable.id });
+    knowledgeDocId = knowledgeDoc.id;
+
+    // Spy returns a full unattended draft plus requirement traceability.
     __setInvokeAISpy(async (_req: unknown) => ({
       content: JSON.stringify({
         sections: SECTION_DEFINITIONS.map((s) => ({
           key:     s.key,
           content: `Behavioral-test content for ${s.title}.`,
         })),
+        coverage: [{
+          requirementIndex: 1,
+          sectionKey: "deliverables",
+          status: "covered",
+          confidence: 92,
+          reviewReason: null,
+          evidenceKnowledgeIds: [knowledgeDocId],
+        }],
       }),
       model:        "spy-model",
       inputTokens:  10,
@@ -462,6 +490,13 @@ describe("§G behavioral — DB-connected", () => {
       tenderId,
     }).returning();
     proposalId = p.id;
+    await db.insert(tenderRequirementsTable).values({
+      tenderId,
+      requirementText: "Provide a complete deliverables register.",
+      category: "deliverable",
+      isMandatory: true,
+      orderIndex: 0,
+    });
   });
 
   after(async () => {
@@ -473,6 +508,11 @@ describe("§G behavioral — DB-connected", () => {
     }
     if (tenderId > 0) {
       await db.execute(sql`DELETE FROM tenders WHERE id = ${tenderId}`);
+    }
+    if (knowledgeDocId > 0) {
+      await db
+        .delete(knowledgeDocumentsTable)
+        .where(eq(knowledgeDocumentsTable.id, knowledgeDocId));
     }
   });
 
@@ -520,6 +560,26 @@ describe("§G behavioral — DB-connected", () => {
       updated.proposalContent && updated.proposalContent.trim().length > 0,
       "proposalContent must be assembled and persisted in the same transaction",
     );
+
+    const [coverage] = await db
+      .select()
+      .from(proposalRequirementCoverageTable)
+      .where(eq(proposalRequirementCoverageTable.proposalId, proposalId));
+    assert.equal(coverage.status, "covered");
+    assert.equal(coverage.confidence, 92);
+    const evidence = JSON.parse(coverage.evidenceReferences) as Array<{
+      type: string;
+      knowledgeDocumentId?: number;
+    }>;
+    assert.ok(evidence.some((source) => source.type === "tender"));
+    assert.ok(
+      evidence.some(
+        (source) =>
+          source.type === "knowledge" &&
+          source.knowledgeDocumentId === knowledgeDocId,
+      ),
+      "coverage must persist only the approved evidence selected by the model",
+    );
   });
 
   it("generateProposalDraftAndPersist is idempotent — second call replaces sections", async () => {
@@ -547,6 +607,66 @@ describe("§G behavioral — DB-connected", () => {
       after2.every((s) => s.content && s.content.includes("Behavioral-test content")),
       "second call must overwrite all section content",
     );
+    const mappings = await db
+      .select()
+      .from(proposalRequirementCoverageTable)
+      .where(eq(proposalRequirementCoverageTable.proposalId, proposalId));
+    assert.equal(
+      mappings.length,
+      1,
+      "retry must replace requirement mappings instead of duplicating them",
+    );
+  });
+
+  it("persists review reasons and marks the proposal when a requirement is unsupported", async () => {
+    __setInvokeAISpy(async (_req: unknown) => ({
+      content: JSON.stringify({
+        sections: SECTION_DEFINITIONS.map((s) => ({
+          key: s.key,
+          content: `Behavioral-test content for ${s.title}.`,
+        })),
+        coverage: [{
+          requirementIndex: 1,
+          sectionKey: "deliverables",
+          status: "needs_review",
+          confidence: 40,
+          reviewReason: "The required delivery format is not specified.",
+          evidenceKnowledgeIds: [],
+        }],
+      }),
+      model: "spy-model",
+      inputTokens: 10,
+      outputTokens: 100,
+    }));
+
+    const result = await generateProposalDraftAndPersist({
+      tenderId,
+      proposalId,
+      briefText: "Unsupported requirement behavioral test",
+      strategyContext: "",
+    });
+    assert.equal(result.reviewRequired, true);
+    assert.equal(result.finalStatus, "needs_onwrd_input");
+
+    const [coverage] = await db
+      .select()
+      .from(proposalRequirementCoverageTable)
+      .where(eq(proposalRequirementCoverageTable.proposalId, proposalId));
+    assert.equal(coverage.status, "needs_review");
+    assert.equal(
+      coverage.reviewReason,
+      "The required delivery format is not specified.",
+    );
+
+    const [proposal] = await db
+      .select({
+        complianceReviewRequired: proposalsTable.complianceReviewRequired,
+        reviewRequired: proposalsTable.reviewRequired,
+      })
+      .from(proposalsTable)
+      .where(eq(proposalsTable.id, proposalId));
+    assert.equal(proposal.complianceReviewRequired, true);
+    assert.equal(proposal.reviewRequired, true);
   });
 
   it("googleDocCanonicalPayload returns error payload when syncStatus=handoff_complete", () => {
@@ -584,6 +704,19 @@ describe("§G behavioral — DB-connected", () => {
 // ── §F  Frontend workflow gating ──────────────────────────────────────────────
 
 describe("§F Frontend workflow gating", () => {
+  it("exposes the compliance API and renders its proposal-detail view", () => {
+    assert.ok(
+      sectionsSrc.includes('"/proposals/:id/compliance"'),
+      "sections router must expose requirement coverage and evidence",
+    );
+    assert.ok(
+      detailSrc.includes("/api/proposals/${proposalId}/compliance"),
+      "proposal detail must load the compliance API",
+    );
+    assert.ok(detailSrc.includes("Compliance Overview"));
+    assert.ok(detailSrc.includes("Source Evidence"));
+  });
+
   it("generationStatus is derived from proposal for linked tenders", () => {
     assert.ok(
       detailSrc.includes("generationStatus"),

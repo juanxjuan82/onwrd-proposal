@@ -30,3 +30,4 @@
 - [Credential scanner heuristics](credential-scanner.md) — invented-client gate: punctuation-aware extraction, service-phrase filter, case_study-only allowlist, one-directional matching
 - [Generation recovery fencing](generation-recovery-fencing.md) — stale-job recovery requires attempt ownership; fence every write and reconcile proposal/tender terminal state atomically
 - [Browser crawler boundary](browser-crawler-boundary.md) — browser enrichment is opt-in, domain-pinned, bounded, version-attested, direct-first, detail-specific, and zero-AI
+- [Compliance traceability lifecycle](compliance-traceability-lifecycle.md) — requirement coverage is atomic, edit-invalidated, live-evidence-checked, and only fresh documented overrides can waive issues

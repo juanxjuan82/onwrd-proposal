@@ -3,8 +3,10 @@ import { googleDocCanonicalPayload } from "../lib/proposal-predicates.js";
 import { db } from "@workspace/db";
 import {
   proposalSectionsTable,
+  proposalRequirementCoverageTable,
   proposalReviewEventsTable,
   proposalsTable,
+  tenderRequirementsTable,
   googleExportsTable,
 } from "@workspace/db";
 import { eq, and, sql } from "drizzle-orm";
@@ -80,7 +82,11 @@ async function rescanAndPersistCredentials(proposal: {
     .update(proposalsTable)
     .set({
       unverifiedCredentials: unverified,
-      reviewRequired: sql`(cardinality(flagged_phrases) > 0 OR ${unverified.length > 0})`,
+      reviewRequired: sql`(
+        cardinality(flagged_phrases) > 0
+        OR ${unverified.length > 0}
+        OR compliance_review_required
+      )`,
       updatedAt: new Date(),
     })
     .where(eq(proposalsTable.id, proposal.id));
@@ -95,6 +101,291 @@ const router = Router();
 
 // ── Shared type for Drizzle transactions ──────────────────────────────────
 type DbTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+type EvidenceReference = {
+  type: "tender" | "knowledge";
+  knowledgeDocumentId?: number;
+  title: string;
+  sourceUrl?: string | null;
+  excerpt: string;
+};
+
+function parseEvidenceReferences(value: string): EvidenceReference[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? (parsed as EvidenceReference[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function recomputeComplianceFlags(
+  tx: DbTx,
+  proposalId: number,
+  tenderId: number | null,
+): Promise<boolean> {
+  if (!tenderId) return false;
+  const result = await tx.execute(sql`
+    SELECT EXISTS (
+      SELECT 1
+      FROM tender_requirements tr
+      LEFT JOIN proposal_requirement_coverage prc
+        ON prc.requirement_id = tr.id
+       AND prc.proposal_id = ${proposalId}
+      WHERE tr.tender_id = ${tenderId}
+        AND (prc.id IS NULL OR prc.status <> 'covered')
+    ) AS unresolved
+  `);
+  const unresolved = Boolean(
+    (result.rows[0] as { unresolved?: boolean } | undefined)?.unresolved,
+  );
+  await tx
+    .update(proposalsTable)
+    .set({
+      complianceReviewRequired: unresolved,
+      reviewRequired: sql`(
+        cardinality(flagged_phrases) > 0
+        OR cardinality(unverified_credentials) > 0
+        OR ${unresolved}
+      )`,
+      updatedAt: new Date(),
+    })
+    .where(eq(proposalsTable.id, proposalId));
+  return unresolved;
+}
+
+async function invalidateSectionCoverage(
+  tx: DbTx,
+  proposalId: number,
+  sectionIds: number[],
+): Promise<void> {
+  if (sectionIds.length === 0) return;
+  const sectionList = sql.join(
+    sectionIds.map((id) => sql`${id}`),
+    sql`, `,
+  );
+  await tx.execute(sql`
+    UPDATE proposal_requirement_coverage
+    SET status = 'needs_review',
+        confidence = 0,
+        review_reason = 'Mapped section changed after requirement coverage was generated.',
+        updated_at = now()
+    WHERE proposal_id = ${proposalId}
+      AND mapped_section_id IN (${sectionList})
+  `);
+  await tx.execute(sql`
+    UPDATE tender_requirements tr
+    SET is_answered = false,
+        answered_in_section_id = NULL
+    FROM proposal_requirement_coverage prc
+    WHERE prc.requirement_id = tr.id
+      AND prc.proposal_id = ${proposalId}
+      AND prc.mapped_section_id IN (${sectionList})
+  `);
+}
+
+async function revalidateCoverageEvidence(
+  proposalId: number,
+  tenderId: number | null,
+): Promise<string[]> {
+  const approvedIds = new Set(
+    (await getApprovedKnowledge()).map((document) => document.id),
+  );
+  const rows = await db
+    .select({
+      id: proposalRequirementCoverageTable.id,
+      evidenceReferences:
+        proposalRequirementCoverageTable.evidenceReferences,
+    })
+    .from(proposalRequirementCoverageTable)
+    .where(eq(proposalRequirementCoverageTable.proposalId, proposalId));
+
+  const revoked = rows
+    .map((row) => ({
+      id: row.id,
+      sources: parseEvidenceReferences(row.evidenceReferences).filter(
+        (source) =>
+          source.type === "knowledge" &&
+          (!source.knowledgeDocumentId ||
+            !approvedIds.has(source.knowledgeDocumentId)),
+      ),
+    }))
+    .filter((row) => row.sources.length > 0);
+  if (revoked.length === 0) return [];
+
+  await db.transaction(async (tx: DbTx) => {
+    for (const row of revoked) {
+      await tx
+        .update(proposalRequirementCoverageTable)
+        .set({
+          status: "needs_review",
+          confidence: 0,
+          reviewReason:
+            "A cited Knowledge Library source is no longer approved.",
+          updatedAt: new Date(),
+        })
+        .where(eq(proposalRequirementCoverageTable.id, row.id));
+    }
+    await recomputeComplianceFlags(tx, proposalId, tenderId);
+  });
+  return Array.from(
+    new Set(revoked.flatMap((row) => row.sources.map((source) => source.title))),
+  );
+}
+
+async function listUnresolvedMandatoryRequirements(
+  proposalId: number,
+  tenderId: number | null,
+): Promise<string[]> {
+  if (!tenderId) return [];
+  const result = await db.execute(sql`
+    SELECT tr.requirement_text
+    FROM tender_requirements tr
+    LEFT JOIN proposal_requirement_coverage prc
+      ON prc.requirement_id = tr.id
+     AND prc.proposal_id = ${proposalId}
+    WHERE tr.tender_id = ${tenderId}
+      AND tr.is_mandatory = true
+      AND (prc.id IS NULL OR prc.status <> 'covered')
+    ORDER BY tr.order_index
+  `);
+  return result.rows.map(
+    (row) => (row as { requirement_text: string }).requirement_text,
+  );
+}
+
+async function hasCurrentComplianceOverride(
+  proposalId: number,
+  tenderId: number | null,
+): Promise<boolean> {
+  if (!tenderId) return false;
+  const result = await db.execute(sql`
+    WITH issue_times AS (
+      SELECT tr.created_at AS issue_at
+      FROM tender_requirements tr
+      LEFT JOIN proposal_requirement_coverage prc
+        ON prc.requirement_id = tr.id
+       AND prc.proposal_id = ${proposalId}
+      WHERE tr.tender_id = ${tenderId}
+        AND tr.is_mandatory = true
+        AND (prc.id IS NULL OR prc.status <> 'covered')
+
+      UNION ALL
+
+      SELECT prc.updated_at AS issue_at
+      FROM proposal_requirement_coverage prc
+      WHERE prc.proposal_id = ${proposalId}
+        AND prc.status <> 'covered'
+    ),
+    latest_override AS (
+      SELECT max(created_at) AS approved_at
+      FROM proposal_review_events
+      WHERE proposal_id = ${proposalId}
+        AND event_type = 'proposal_approved'
+        AND nullif(trim(override_reason), '') IS NOT NULL
+    )
+    SELECT (
+      SELECT approved_at FROM latest_override
+    ) >= (
+      SELECT max(issue_at) FROM issue_times
+    ) AS is_current
+  `);
+  return Boolean(
+    (result.rows[0] as { is_current?: boolean } | undefined)?.is_current,
+  );
+}
+
+// ── Requirement compliance and source provenance ────────────────────────────
+router.get("/proposals/:id/compliance", async (req, res) => {
+  const proposalId = Number(req.params.id);
+  if (isNaN(proposalId)) {
+    res.status(400).json({ error: "Invalid proposal id" });
+    return;
+  }
+
+  try {
+    const [proposal] = await db
+      .select({ id: proposalsTable.id })
+      .from(proposalsTable)
+      .where(eq(proposalsTable.id, proposalId));
+    if (!proposal) {
+      res.status(404).json({ error: "Proposal not found" });
+      return;
+    }
+
+    const rows = await db
+      .select({
+        id: proposalRequirementCoverageTable.id,
+        requirementId: tenderRequirementsTable.id,
+        requirementText: tenderRequirementsTable.requirementText,
+        category: tenderRequirementsTable.category,
+        isMandatory: tenderRequirementsTable.isMandatory,
+        status: proposalRequirementCoverageTable.status,
+        confidence: proposalRequirementCoverageTable.confidence,
+        reviewReason: proposalRequirementCoverageTable.reviewReason,
+        evidenceReferences:
+          proposalRequirementCoverageTable.evidenceReferences,
+        sectionId: proposalSectionsTable.id,
+        sectionKey: proposalSectionsTable.sectionKey,
+        sectionTitle: proposalSectionsTable.title,
+      })
+      .from(proposalRequirementCoverageTable)
+      .innerJoin(
+        tenderRequirementsTable,
+        eq(
+          tenderRequirementsTable.id,
+          proposalRequirementCoverageTable.requirementId,
+        ),
+      )
+      .leftJoin(
+        proposalSectionsTable,
+        eq(
+          proposalSectionsTable.id,
+          proposalRequirementCoverageTable.mappedSectionId,
+        ),
+      )
+      .where(eq(proposalRequirementCoverageTable.proposalId, proposalId))
+      .orderBy(tenderRequirementsTable.orderIndex);
+
+    const approvedKnowledgeIds = new Set(
+      (await getApprovedKnowledge()).map((document) => document.id),
+    );
+    res.json(
+      rows.map((row) => {
+        const evidence = parseEvidenceReferences(
+          row.evidenceReferences,
+        ).filter(
+          (source) =>
+            source.type !== "knowledge" ||
+            (!!source.knowledgeDocumentId &&
+              approvedKnowledgeIds.has(source.knowledgeDocumentId)),
+        );
+        return {
+          id: row.id,
+          requirementId: row.requirementId,
+          requirementText: row.requirementText,
+          category: row.category,
+          isMandatory: row.isMandatory,
+          status: row.status,
+          confidence: row.confidence,
+          reviewReason: row.reviewReason,
+          mappedSection:
+            row.sectionId && row.sectionKey && row.sectionTitle
+              ? {
+                  id: row.sectionId,
+                  key: row.sectionKey,
+                  title: row.sectionTitle,
+                }
+              : null,
+          evidence,
+        };
+      }),
+    );
+  } catch (err) {
+    req.log.error({ err }, "Error listing proposal compliance");
+    res.status(500).json({ error: "Failed to load proposal compliance" });
+  }
+});
 
 // ── Immutability guard helper ─────────────────────────────────────────────
 // Returns a 409-ready payload when the proposal has a canonical Google Doc,
@@ -140,6 +431,7 @@ router.put("/proposals/:id/sections/:sectionId", async (req, res) => {
       googleDocUrl: proposalsTable.googleDocUrl,
       clientName:   proposalsTable.clientName,
       tenderId:     proposalsTable.tenderId,
+      complianceReviewRequired: proposalsTable.complianceReviewRequired,
     })
     .from(proposalsTable)
     .where(eq(proposalsTable.id, proposalId));
@@ -182,6 +474,31 @@ router.put("/proposals/:id/sections/:sectionId", async (req, res) => {
           eventType: "section_approved",
           notes: null,
         });
+        await tx
+          .update(proposalRequirementCoverageTable)
+          .set({
+            status: "covered",
+            confidence: 100,
+            reviewReason: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(proposalRequirementCoverageTable.proposalId, proposalId),
+              eq(proposalRequirementCoverageTable.mappedSectionId, sectionId),
+            ),
+          );
+        await tx.execute(sql`
+          UPDATE tender_requirements tr
+          SET is_answered = true,
+              answered_in_section_id = ${sectionId}
+          FROM proposal_requirement_coverage prc
+          WHERE prc.requirement_id = tr.id
+            AND prc.proposal_id = ${proposalId}
+            AND prc.mapped_section_id = ${sectionId}
+        `);
+      } else if (content !== undefined) {
+        await invalidateSectionCoverage(tx, proposalId, [sectionId]);
       }
 
       // Rebuild proposalContent snapshot atomically when content changes
@@ -201,11 +518,24 @@ router.put("/proposals/:id/sections/:sectionId", async (req, res) => {
             proposalContent: assembled,
             flaggedPhrases,
             unverifiedCredentials,
-            reviewRequired: flaggedPhrases.length > 0 || unverifiedCredentials.length > 0,
+            reviewRequired: sql`(
+              ${flaggedPhrases.length > 0}
+              OR ${unverifiedCredentials.length > 0}
+              OR compliance_review_required
+            )`,
+            status: "draft",
             dirtySince: new Date(),
             updatedAt: new Date(),
           })
           .where(eq(proposalsTable.id, proposalId));
+      }
+
+      if (status === "approved" || content !== undefined) {
+        await recomputeComplianceFlags(
+          tx,
+          proposalId,
+          proposal.tenderId,
+        );
       }
 
       return updated;
@@ -376,6 +706,14 @@ router.post("/proposals/:id/approve-for-export", async (req, res) => {
 
   const blockedSections = sections.filter((s) => s.status === "blocked_missing_input");
   const majorIssues = sections.filter((s) => s.status === "needs_review");
+  const revokedEvidence = await revalidateCoverageEvidence(
+    proposalId,
+    proposal.tenderId,
+  );
+  const unresolvedMandatory = await listUnresolvedMandatoryRequirements(
+    proposalId,
+    proposal.tenderId,
+  );
 
   const blockers: string[] = [];
   if (blockedSections.length > 0 && !overrideReason) {
@@ -383,6 +721,19 @@ router.post("/proposals/:id/approve-for-export", async (req, res) => {
   }
   if (majorIssues.length > 0 && !overrideReason) {
     blockers.push(`${majorIssues.length} section(s) have major critic issues: ${majorIssues.map((s) => s.title).join(", ")}`);
+  }
+  if (unresolvedMandatory.length > 0 && !overrideReason) {
+    blockers.push(
+      `${unresolvedMandatory.length} mandatory requirement(s) need review: ${unresolvedMandatory
+        .slice(0, 3)
+        .map((requirement) => requirement)
+        .join("; ")}`,
+    );
+  }
+  if (revokedEvidence.length > 0 && !overrideReason) {
+    blockers.push(
+      `Knowledge evidence is no longer approved: ${revokedEvidence.join(", ")}`,
+    );
   }
 
   if (blockers.length > 0) {
@@ -472,6 +823,34 @@ router.post("/proposals/:id/export", async (req, res) => {
       code: "unverified_credentials",
       unverifiedCredentials: unverifiedCreds,
       hint: "Edit the Case Studies and Credentials section to cite only approved case studies before sharing.",
+    });
+    return;
+  }
+
+  const revokedEvidence = await revalidateCoverageEvidence(
+    proposalId,
+    proposal.tenderId,
+  );
+  const unresolvedMandatory = await listUnresolvedMandatoryRequirements(
+    proposalId,
+    proposal.tenderId,
+  );
+  const hasComplianceOverride = await hasCurrentComplianceOverride(
+    proposalId,
+    proposal.tenderId,
+  );
+  if (
+    !hasComplianceOverride &&
+    (revokedEvidence.length > 0 || unresolvedMandatory.length > 0)
+  ) {
+    res.status(422).json({
+      error:
+        "Sharing blocked: mandatory compliance or evidence issues need review.",
+      code: "compliance_review_required",
+      unresolvedMandatory,
+      revokedEvidence,
+      hint:
+        "Resolve the compliance exceptions, or approve the proposal with a documented override before sharing.",
     });
     return;
   }
@@ -780,6 +1159,7 @@ ${UNTRUSTED_CONTENT_POLICY}`,
       // If anything fails, no section writes are committed and the prior
       // snapshot is preserved.
       await db.transaction(async (tx: DbTx) => {
+        const changedSectionIds: number[] = [];
         for (const improvement of improvements) {
           const section = sectionsToImprove.find((s) => s.sectionKey === improvement.sectionKey);
           if (!section || !improvement.content) continue;
@@ -797,7 +1177,13 @@ ${UNTRUSTED_CONTENT_POLICY}`,
               eq(proposalSectionsTable.id, section.id),
               eq(proposalSectionsTable.proposalId, proposalId),
             ));
+          changedSectionIds.push(section.id);
         }
+        await invalidateSectionCoverage(
+          tx,
+          proposalId,
+          changedSectionIds,
+        );
 
         // Rebuild snapshot from all sections (including unchanged ones)
         const allSections = await tx
@@ -815,11 +1201,21 @@ ${UNTRUSTED_CONTENT_POLICY}`,
             proposalContent: assembled,
             flaggedPhrases,
             unverifiedCredentials,
-            reviewRequired: flaggedPhrases.length > 0 || unverifiedCredentials.length > 0,
+            reviewRequired: sql`(
+              ${flaggedPhrases.length > 0}
+              OR ${unverifiedCredentials.length > 0}
+              OR compliance_review_required
+            )`,
+            status: "draft",
             dirtySince: new Date(),
             updatedAt: new Date(),
           })
           .where(eq(proposalsTable.id, proposalId));
+        await recomputeComplianceFlags(
+          tx,
+          proposalId,
+          proposal.tenderId,
+        );
       });
     } catch (err) {
       console.error("[ai-improve-sections] failed:", err);
