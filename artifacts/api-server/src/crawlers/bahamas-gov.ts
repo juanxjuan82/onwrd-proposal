@@ -1,11 +1,18 @@
-import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
+import {
+  TenderSourceAdapter,
+  TenderOpportunity,
+  AdapterFetchContext,
+  enrichWithRenderedDetail,
+  extractDeadline,
+  fetchHtmlWithOptionalBrowser,
+  fetchTenderDetailWithOptionalBrowser,
+  stripHtml,
+} from "./base-adapter.js";
 
 const TENDER_URLS = [
   "https://www.bahamas.gov.bs/tender-notices",
   "https://www.bahamas.gov.bs/tender-and-rfps",
 ];
-
-const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 // Map category text to a sector label
 function mapCategory(cat: string): string {
@@ -24,7 +31,7 @@ function mapCategory(cat: string): string {
 export class BahamasGovAdapter implements TenderSourceAdapter {
   adapterType = "bahamas_gov";
 
-  async fetchOpportunities(): Promise<TenderOpportunity[]> {
+  async fetchOpportunities(context?: AdapterFetchContext): Promise<TenderOpportunity[]> {
     const results: TenderOpportunity[] = [];
     const seen = new Set<string>();
     let requestsAttempted = 0;
@@ -34,18 +41,9 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
     for (const pageUrl of TENDER_URLS) {
       requestsAttempted++;
       try {
-        const r = await safeFetch(pageUrl, {
-          headers: { "User-Agent": USER_AGENT, Accept: "text/html" },
-        });
-        if (!r.ok) {
-          warnings.push(`Bahamas Gov HTTP ${r.status} for ${pageUrl}`);
-          continue;
-        }
-        const html = await r.text();
-        if (html.length < 1000) {
-          warnings.push(`Bahamas Gov very short response for ${pageUrl}`);
-          continue;
-        }
+        const resultCountBeforePage = results.length;
+        const page = await fetchHtmlWithOptionalBrowser(pageUrl, context, 1000);
+        const html = page.html;
         requestsSucceeded++;
 
         // Pattern 1: links with title + category span (tender-notices page format)
@@ -68,16 +66,25 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
           if (seen.has(key)) continue;
           seen.add(key);
 
-          const externalId = `bah-${Buffer.from((url + title).slice(0, 50)).toString("base64").slice(0, 16)}`;
+           const fullUrl = url.startsWith("http") ? url : `https://www.bahamas.gov.bs${url}`;
+           const detail = await fetchTenderDetailWithOptionalBrowser(fullUrl, title, context);
+           const detailContent = detail?.content;
+           const description = detailContent ?? extractListingContext(html, m.index, title, category);
 
           results.push({
-            externalId,
+             externalId: `bah-${Buffer.from((fullUrl + title).slice(0, 50)).toString("base64").slice(0, 16)}`,
             title,
             organization: "Government of The Bahamas",
-            url: url.startsWith("http") ? url : `https://www.bahamas.gov.bs${url}`,
-            description: `Bahamas government procurement notice. Category: ${category}. Source: ${pageUrl}`,
+             url: fullUrl,
+             deadline: extractDeadline([description, detail?.metadata.deadline ?? ""].join(" ")),
+             description,
             country: "Bahamas",
             sector: mapCategory(category),
+             rawData: {
+               sourcePage: pageUrl,
+               extractionMethod: detail ? `${detail.method}_detail` : page.method,
+               ...(detail ? { renderedMetadata: detail.metadata } : {}),
+             },
           });
         }
 
@@ -93,15 +100,58 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
           if (seen.has(key)) continue;
           seen.add(key);
 
-          results.push({
+           const detail = await fetchTenderDetailWithOptionalBrowser(url, title, context);
+           const detailContent = detail?.content;
+           const description = detailContent ?? extractListingContext(html, m.index, title, "Government Procurement");
+           results.push({
             externalId: `bah-${Buffer.from(url.slice(-40)).toString("base64").slice(0, 16)}`,
             title,
             organization: "Government of The Bahamas",
             url,
-            description: `Bahamas government tender document: ${title}`,
+             deadline: extractDeadline([description, detail?.metadata.deadline ?? ""].join(" ")),
+             description,
             country: "Bahamas",
             sector: "Government Procurement",
+             rawData: {
+               sourcePage: pageUrl,
+               extractionMethod: detail ? `${detail.method}_detail` : page.method,
+               ...(detail ? { renderedMetadata: detail.metadata } : {}),
+             },
           });
+        }
+
+        // A rendered page can expose links after JavaScript executes even when
+        // the listing HTML has no matching anchor markup.
+        const renderedListing = page.rendered ??
+          (results.length === resultCountBeforePage
+            ? await enrichWithRenderedDetail(pageUrl, context)
+            : undefined);
+        if (renderedListing) {
+          for (const link of renderedListing.links) {
+            const title = stripHtml(link.text, 300);
+            if (!isRelevantBahamasTitle(title) || seen.has(title.toLowerCase().slice(0, 60))) continue;
+            seen.add(title.toLowerCase().slice(0, 60));
+            const detail = await fetchTenderDetailWithOptionalBrowser(link.url, title, context);
+            // A rendered listing alone is not detail-specific tender scope.
+            if (!detail) continue;
+            const description = detail.content;
+            results.push({
+              externalId: `bah-${Buffer.from((link.url + title).slice(0, 50)).toString("base64").slice(0, 16)}`,
+              title,
+              organization: "Government of The Bahamas",
+              url: link.url,
+              deadline: extractDeadline([description, detail?.metadata.deadline ?? ""].join(" ")),
+              description,
+              country: "Bahamas",
+              sector: mapCategory(title),
+              rawData: {
+                sourcePage: pageUrl,
+                extractionMethod: `${detail.method}_detail`,
+                renderedMetadata: detail.metadata,
+              },
+            });
+            if (results.length >= 30) break;
+          }
         }
 
         if (results.length >= 30) break;
@@ -119,4 +169,17 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
 
     return results.slice(0, 30);
   }
+}
+
+function extractListingContext(html: string, matchIndex: number, title: string, category: string): string {
+  const context = stripHtml(html.slice(Math.max(0, matchIndex - 300), matchIndex + 700), 1_200)
+    .replace(/\s+/g, " ")
+    .trim();
+  if (context.length > title.length + 60) return context;
+  return `${title}. Category: ${category}.`;
+}
+
+function isRelevantBahamasTitle(title: string): boolean {
+  return title.length >= 8 &&
+    !/notification of contract award|contract award|junior|senior network|data engineer|systems administrator|software developer|business analyst|job seeker|network engineer|cirt (systems|deputy|security)|computer incident response/i.test(title);
 }

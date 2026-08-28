@@ -15,7 +15,18 @@ import { BahamasGovAdapter } from "./bahamas-gov.js";
 import { CTOAdapter } from "./cto.js";
 import { CARICOMAdapter } from "./caricom.js";
 import { EUCaribbeanAdapter } from "./eu-caribbean.js";
-import { type TenderSourceAdapter, type TenderOpportunity } from "./base-adapter.js";
+import {
+  type AdapterFetchContext,
+  type CrawlDiagnostic,
+  type TenderSourceAdapter,
+  type TenderOpportunity,
+} from "./base-adapter.js";
+import {
+  Crawl4AIError,
+  createCrawl4AIClient,
+  getCrawl4AIConfig,
+  normalizeSourceApprovedDomains,
+} from "./crawl4ai-client.js";
 import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
 import { evaluateCrawlerEligibility } from "../lib/crawler-eligibility.js";
 
@@ -428,6 +439,13 @@ export async function runCrawler(sourceId?: number): Promise<{
 
   let totalFound = 0;
   let totalNew = 0;
+  let crawl4aiClient: ReturnType<typeof createCrawl4AIClient> = null;
+  let crawl4aiConfigError: Error | undefined;
+  try {
+    crawl4aiClient = createCrawl4AIClient(getCrawl4AIConfig());
+  } catch (error) {
+    crawl4aiConfigError = error instanceof Error ? error : new Error(String(error));
+  }
 
   try {
     for (const source of sources) {
@@ -442,8 +460,28 @@ export async function runCrawler(sourceId?: number): Promise<{
         aiModel:    null,
       }).returning();
 
+      const diagnostics: CrawlDiagnostic[] = [];
       try {
-        const opportunities = await adapter.fetchOpportunities();
+        const browserEligible = source.adapterType === "bahamas_gov" || source.adapterType === "caricom";
+        const approvedDomains = getApprovedDomains(source);
+        const fetchContext: AdapterFetchContext = {
+          approvedDomains,
+          diagnostics,
+          // The source flag is the final opt-in. API adapters and disabled
+          // HTML sources never receive a browser client.
+          crawl4ai: browserEligible && source.browserEnabled && crawl4aiClient
+            ? crawl4aiClient
+            : undefined,
+        };
+        if (browserEligible && source.browserEnabled && crawl4aiConfigError) {
+          diagnostics.push({
+            code: "crawl4ai_invalid_config",
+            url: source.url,
+            message: crawl4aiConfigError.message,
+            method: "crawl4ai",
+          });
+        }
+        const opportunities = await adapter.fetchOpportunities(fetchContext);
         totalFound += opportunities.length;
 
         let newCount = 0;
@@ -524,6 +562,10 @@ export async function runCrawler(sourceId?: number): Promise<{
           aiCallCount:    0,
           aiFallbackCount: 0,
           aiQuotaError:   false,
+          crawlMethod: getCrawlMethod(diagnostics),
+          crawl4aiAttempts: diagnostics.filter((item) => item.method === "crawl4ai").length,
+          crawl4aiSuccesses: diagnostics.filter((item) => item.code === "crawl4ai_success").length,
+          crawlDiagnostics: diagnostics,
         }).where(eq(crawlerRunsTable.id, run.id));
 
         await db.update(tenderSourcesTable).set({
@@ -534,6 +576,13 @@ export async function runCrawler(sourceId?: number): Promise<{
         }).where(eq(tenderSourcesTable.id, source.id));
 
       } catch (err) {
+        const failureCode = crawl4aiErrorCode(err);
+        diagnostics.push({
+          code: failureCode,
+          url: source.url,
+          message: err instanceof Error ? err.message : String(err),
+          method: failureCode.startsWith("crawl4ai_") ? "crawl4ai" : "direct",
+        });
         await db.update(crawlerRunsTable).set({
           completedAt:    new Date(),
           status:         "failed",
@@ -541,6 +590,10 @@ export async function runCrawler(sourceId?: number): Promise<{
           aiCallCount:    0,
           aiFallbackCount: 0,
           aiQuotaError:   false,
+          crawlMethod: "failed",
+          crawl4aiAttempts: diagnostics.filter((item) => item.method === "crawl4ai").length,
+          crawl4aiSuccesses: diagnostics.filter((item) => item.code === "crawl4ai_success").length,
+          crawlDiagnostics: diagnostics,
         }).where(eq(crawlerRunsTable.id, run.id));
 
         await db.update(tenderSourcesTable).set({
@@ -570,6 +623,41 @@ export async function runCrawler(sourceId?: number): Promise<{
 // deactivated without needing a separate migration step.
 const PERMANENTLY_BLOCKED_ADAPTERS = ["idb", "cdb", "cto", "eu_caribbean"] as const;
 
+function getApprovedDomains(source: {
+  url: string;
+  approvedDomains?: unknown;
+}): string[] {
+  try {
+    return normalizeSourceApprovedDomains(source.url, source.approvedDomains);
+  } catch {
+    return [];
+  }
+}
+
+function getCrawlMethod(diagnostics: CrawlDiagnostic[]): string {
+  const methods = new Set(diagnostics.map((item) => item.method));
+  if (diagnostics.some((item) => item.code === "crawl4ai_success")) return "crawl4ai";
+  if (methods.has("crawl4ai")) return "direct_fallback";
+  return "direct";
+}
+
+function crawl4aiErrorCode(error: unknown): CrawlDiagnostic["code"] {
+  const code = error instanceof Crawl4AIError ? error.code : undefined;
+  const map: Record<string, CrawlDiagnostic["code"]> = {
+    timeout: "crawl4ai_timeout",
+    authentication: "crawl4ai_authentication",
+    off_domain_redirect: "crawl4ai_off_domain_redirect",
+    unusable_content: "crawl4ai_unusable_content",
+    service_unavailable: "crawl4ai_service_unavailable",
+    malformed_response: "crawl4ai_malformed_response",
+    blocked: "crawl4ai_blocked",
+    invalid_config: "crawl4ai_invalid_config",
+    version_mismatch: "crawl4ai_version_mismatch",
+    response_too_large: "crawl4ai_response_too_large",
+  };
+  return map[code ?? ""] ?? "direct_failed";
+}
+
 export async function seedDefaultSources(): Promise<void> {
   // Retroactive deactivation: runs on every startup, idempotent.
   // Handles upgrades where these sources were previously seeded as active=true.
@@ -584,7 +672,7 @@ export async function seedDefaultSources(): Promise<void> {
     const newSources = [
       // active: false — caribtourism.com is unreachable (connection timeout) from Replit
       { name: "Caribbean Tourism Organization", sourceType: "regional", url: "https://www.caribtourism.com/", adapterType: "cto", active: false },
-      { name: "CARICOM Secretariat", sourceType: "regional", url: "https://caricom.org/", adapterType: "caricom", active: true },
+      { name: "CARICOM Secretariat", sourceType: "regional", url: "https://caricom.org/", adapterType: "caricom", active: true, browserEnabled: true, approvedDomains: ["caricom.org"] },
       // active: false — cariforum.org is unreachable (connection timeout) from Replit
       { name: "EU Caribbean Development Fund", sourceType: "development_fund", url: "https://www.cariforum.org/", adapterType: "eu_caribbean", active: false },
     ];
@@ -603,9 +691,9 @@ export async function seedDefaultSources(): Promise<void> {
     { name: "UNDP Procurement Notices",         sourceType: "un",                url: "https://procurement-notices.undp.org/",                        adapterType: "ungm",         active: true  },
     { name: "Inter-American Development Bank",  sourceType: "development_bank",  url: "https://www.iadb.org/en/projects/all",                         adapterType: "idb",          active: false },
     { name: "Caribbean Development Bank",       sourceType: "development_bank",  url: "https://www.caribank.org/",                                    adapterType: "cdb",          active: false },
-    { name: "Bahamas Government Procurement",   sourceType: "government",        url: "https://www.bahamas.gov.bs/wps/portal/public/gov/government/news", adapterType: "bahamas_gov", active: true  },
+      { name: "Bahamas Government Procurement",   sourceType: "government",        url: "https://www.bahamas.gov.bs/wps/portal/public/gov/government/news", adapterType: "bahamas_gov", active: true, browserEnabled: true, approvedDomains: ["bahamas.gov.bs"] },
     { name: "Caribbean Tourism Organization",   sourceType: "regional",          url: "https://www.caribtourism.com/",                                adapterType: "cto",          active: false },
-    { name: "CARICOM Secretariat",              sourceType: "regional",          url: "https://caricom.org/",                                         adapterType: "caricom",      active: true  },
+      { name: "CARICOM Secretariat",              sourceType: "regional",          url: "https://caricom.org/",                                         adapterType: "caricom",      active: true, browserEnabled: true, approvedDomains: ["caricom.org"] },
     { name: "EU Caribbean Development Fund",    sourceType: "development_fund",  url: "https://www.cariforum.org/",                                   adapterType: "eu_caribbean", active: false },
   ];
 

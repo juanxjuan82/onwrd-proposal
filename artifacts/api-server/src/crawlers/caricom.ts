@@ -1,15 +1,25 @@
-import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
+import {
+  TenderSourceAdapter,
+  TenderOpportunity,
+  AdapterFetchContext,
+  enrichWithRenderedDetail,
+  extractDeadline,
+  fetchHtmlWithOptionalBrowser,
+  fetchTenderDetailWithOptionalBrowser,
+  stripHtml,
+} from "./base-adapter.js";
 
 // CARICOM Secretariat — monitors regional communications, public awareness,
 // stakeholder engagement and policy communications across the Caribbean Community.
 export class CARICOMAdapter implements TenderSourceAdapter {
   adapterType = "caricom";
 
-  async fetchOpportunities(): Promise<TenderOpportunity[]> {
+  async fetchOpportunities(context?: AdapterFetchContext): Promise<TenderOpportunity[]> {
     const results: TenderOpportunity[] = [];
     let requestsAttempted = 0;
     let requestsSucceeded = 0;
     const warnings: string[] = [];
+    const seen = new Set<string>();
 
     const urls = [
       "https://caricom.org/procurement-notices",
@@ -22,34 +32,21 @@ export class CARICOMAdapter implements TenderSourceAdapter {
     for (const url of urls) {
       requestsAttempted++;
       try {
-        const r = await safeFetch(url, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)",
-            Accept: "text/html",
-          },
-        });
-        if (!r.ok) {
-          warnings.push(`CARICOM HTTP ${r.status} for ${url}`);
-          continue;
-        }
-        const html = await r.text();
-        if (html.length < 500) {
-          warnings.push(`CARICOM very short response for ${url}`);
-          continue;
-        }
+        const resultCountBeforePage = results.length;
+        const page = await fetchHtmlWithOptionalBrowser(url, context, 500);
+        const html = page.html;
         requestsSucceeded++;
 
         const linkPattern =
           /<a[^>]+href="([^"]*(?:procur|tender|rfp|bid|consult|communic|campaign|awareness|engagement)[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
         let match;
-        const seen = new Set<string>();
-
         while ((match = linkPattern.exec(html)) !== null) {
-          const href = match[1];
-          const rawTitle = stripHtml(match[2], 200).trim();
+           const href = match[1];
+           const rawTitle = stripHtml(match[2], 200).trim();
           if (!rawTitle || rawTitle.length < 8) continue;
-          if (seen.has(rawTitle)) continue;
-          seen.add(rawTitle);
+           const key = rawTitle.toLowerCase().slice(0, 100);
+           if (seen.has(key)) continue;
+           seen.add(key);
 
           const fullUrl = href.startsWith("http") ? href : `https://caricom.org${href}`;
 
@@ -58,7 +55,7 @@ export class CARICOMAdapter implements TenderSourceAdapter {
           // containing paragraph or article block — deadline, scope summary, reference
           // number, organization unit, etc. Stripping HTML gives genuine content that
           // passes the eligibility content-quality gate without template padding.
-          let description = `CARICOM Secretariat procurement notice: ${rawTitle}`;
+           let description = `CARICOM Secretariat procurement notice: ${rawTitle}`;
           const hrefPos = html.indexOf(href, Math.max(0, (match.index ?? 0) - 20));
           if (hrefPos > 0) {
             const windowStart = Math.max(0, hrefPos - 300);
@@ -70,19 +67,63 @@ export class CARICOMAdapter implements TenderSourceAdapter {
               description = contextText.slice(0, 500);
             }
           }
+           const detail = await fetchTenderDetailWithOptionalBrowser(fullUrl, rawTitle, context);
+           if (detail) description = detail.content;
 
           results.push({
             externalId: `caricom-${Buffer.from(rawTitle.slice(0, 40)).toString("base64").slice(0, 16)}`,
             title: rawTitle,
             organization: "CARICOM Secretariat",
             url: fullUrl,
+             deadline: extractDeadline([description, detail?.metadata.deadline ?? ""].join(" ")),
             description,
             country: "Caribbean",
             sector: "Government & Public Communications",
+             rawData: {
+               sourcePage: url,
+               adapterContext: "CARICOM Secretariat regional procurement and public communications.",
+               extractionMethod: detail ? `${detail.method}_detail` : page.method,
+               ...(detail ? { renderedMetadata: detail.metadata } : {}),
+             },
           });
 
           if (results.length >= 15) break;
         }
+
+         const renderedListing = page.rendered ??
+           (results.length === resultCountBeforePage
+             ? await enrichWithRenderedDetail(url, context)
+             : undefined);
+         if (renderedListing && results.length < 15) {
+           for (const link of renderedListing.links) {
+             const rawTitle = stripHtml(link.text, 200).trim();
+             if (!isRelevantCaricomTitle(rawTitle)) continue;
+             const key = rawTitle.toLowerCase().slice(0, 100);
+             if (seen.has(key)) continue;
+             seen.add(key);
+             const detail = await fetchTenderDetailWithOptionalBrowser(link.url, rawTitle, context);
+             // Never turn generic rendered listing text into tender scope.
+             if (!detail) continue;
+             const description = detail.content;
+             results.push({
+               externalId: `caricom-${Buffer.from(rawTitle.slice(0, 40)).toString("base64").slice(0, 16)}`,
+               title: rawTitle,
+               organization: "CARICOM Secretariat",
+               url: link.url,
+               deadline: extractDeadline([description, detail?.metadata.deadline ?? ""].join(" ")),
+               description,
+               country: "Caribbean",
+               sector: "Government & Public Communications",
+               rawData: {
+                 sourcePage: url,
+                 adapterContext: "CARICOM Secretariat regional procurement and public communications.",
+                 extractionMethod: `${detail.method}_detail`,
+                 renderedMetadata: detail.metadata,
+               },
+             });
+             if (results.length >= 15) break;
+           }
+         }
 
         if (results.length > 0) break;
       } catch (err) {
@@ -99,4 +140,8 @@ export class CARICOMAdapter implements TenderSourceAdapter {
 
     return results;
   }
+}
+
+function isRelevantCaricomTitle(title: string): boolean {
+  return title.length >= 8 && /procur|tender|rfp|bid|consult|communic|campaign|awareness|engagement/i.test(title);
 }

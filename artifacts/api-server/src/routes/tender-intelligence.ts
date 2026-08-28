@@ -10,6 +10,7 @@ import {
 import { eq, desc, and, gte } from "drizzle-orm";
 import { runCrawler, rescoreWithKeywords, backfillPromotions, isCrawlRunning } from "../crawlers/index.js";
 import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
+import { normalizeSourceApprovedDomains } from "../crawlers/crawl4ai-client.js";
 
 const router = Router();
 
@@ -20,15 +21,31 @@ router.get("/tender-sources", async (req, res) => {
 });
 
 router.post("/tender-sources", async (req, res) => {
-  const { name, sourceType, url, adapterType } = req.body as {
-    name: string; sourceType: string; url: string; adapterType: string;
+  const { name, sourceType, url, adapterType, browserEnabled, approvedDomains } = req.body as {
+    name: string;
+    sourceType: string;
+    url: string;
+    adapterType: string;
+    browserEnabled?: boolean;
+    approvedDomains?: string[];
   };
   if (!name || !url || !adapterType) {
     res.status(400).json({ error: "name, url, adapterType required" });
     return;
   }
+  const validatedDomains = validateApprovedDomains(url, approvedDomains);
+  if (validatedDomains.error) {
+    res.status(400).json({ error: validatedDomains.error });
+    return;
+  }
   const [created] = await db.insert(tenderSourcesTable).values({
-    name, sourceType: sourceType ?? "other", url, adapterType, active: true,
+    name,
+    sourceType: sourceType ?? "other",
+    url,
+    adapterType,
+    active: true,
+    browserEnabled: browserEnabled === true,
+    approvedDomains: validatedDomains.domains,
   }).returning();
   res.status(201).json(created);
 });
@@ -38,6 +55,20 @@ router.patch("/tender-sources/:id", async (req, res) => {
   const updates: Record<string, unknown> = { updatedAt: new Date() };
   if (req.body.active !== undefined) updates.active = req.body.active;
   if (req.body.name) updates.name = req.body.name;
+  if (req.body.browserEnabled !== undefined) updates.browserEnabled = req.body.browserEnabled === true;
+  if (req.body.approvedDomains !== undefined) {
+    const [source] = await db
+      .select({ url: tenderSourcesTable.url })
+      .from(tenderSourcesTable)
+      .where(eq(tenderSourcesTable.id, id));
+    if (!source) { res.status(404).json({ error: "Not found" }); return; }
+    const validatedDomains = validateApprovedDomains(source.url, req.body.approvedDomains);
+    if (validatedDomains.error) {
+      res.status(400).json({ error: validatedDomains.error });
+      return;
+    }
+    updates.approvedDomains = validatedDomains.domains;
+  }
   const [updated] = await db.update(tenderSourcesTable).set(updates).where(eq(tenderSourcesTable.id, id)).returning();
   if (!updated) { res.status(404).json({ error: "Not found" }); return; }
   res.json(updated);
@@ -481,3 +512,14 @@ router.post("/tender-intelligence/notify-billing", async (req, res) => {
 });
 
 export default router;
+
+function validateApprovedDomains(
+  sourceUrl: string,
+  values: unknown,
+): { domains: string[]; error?: undefined } | { domains?: undefined; error: string } {
+  try {
+    return { domains: normalizeSourceApprovedDomains(sourceUrl, values) };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}

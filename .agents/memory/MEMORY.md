@@ -29,3 +29,4 @@
 - [Blocked crawler sources](blocked-crawler-sources.md) — IDB/CDB/CTO/EU Caribbean (ids 3,4,6,8) deactivated; TED Europa also WAF-blocked; Caribbean gov portals all timeout from Replit.
 - [Credential scanner heuristics](credential-scanner.md) — invented-client gate: punctuation-aware extraction, service-phrase filter, case_study-only allowlist, one-directional matching
 - [Generation recovery fencing](generation-recovery-fencing.md) — stale-job recovery requires attempt ownership; fence every write and reconcile proposal/tender terminal state atomically
+- [Browser crawler boundary](browser-crawler-boundary.md) — browser enrichment is opt-in, domain-pinned, bounded, version-attested, direct-first, detail-specific, and zero-AI
