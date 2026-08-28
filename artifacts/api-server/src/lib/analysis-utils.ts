@@ -13,6 +13,7 @@ export const MAX_REQUIREMENTS = 40;
 export const MAX_REQ_CHARS = 250;
 export const ANALYSIS_TIMEOUT_MS = 90_000;
 export const STALE_JOB_MS = 5 * 60 * 1_000;
+export const MIN_EXTRACTION_SOURCE_CHARS = 300;
 
 export const ANALYSIS_ACTIVE_STATUSES = [
   "analysing",
@@ -28,6 +29,7 @@ export type ErrorCode =
   | "timeout"
   | "rate_limit_exceeded"
   | "network"
+  | "no_requirements_extracted"
   | "abandoned"
   | "unknown";
 
@@ -102,6 +104,9 @@ export function isRetryable(err: unknown): boolean {
 
 export function classifyError(err: unknown): { code: ErrorCode; message: string } {
   const message = String(err instanceof Error ? err.message : err);
+  if (message.includes("NO_REQUIREMENTS_EXTRACTED")) {
+    return { code: "no_requirements_extracted", message };
+  }
   if (isQuotaError(err)) return { code: "insufficient_quota", message };
   if (isTimeoutError(err)) return { code: "timeout", message };
   if (isTemporaryRateLimitError(err)) return { code: "rate_limit_exceeded", message };

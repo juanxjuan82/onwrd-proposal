@@ -183,6 +183,8 @@ function ActionCell({
 
   // Failed → Retry
   if (proposal?.generationStatus === "failed") {
+    const needsFullSource =
+      proposal.generationError?.includes("full tender/RFP document") ?? false;
     return (
       <div className="flex items-center gap-3">
         <span
@@ -195,11 +197,24 @@ function ActionCell({
           size="sm"
           variant="outline"
           className="gap-1.5 text-xs border-red-800 text-red-400 hover:bg-red-950/30 whitespace-nowrap"
-          onClick={(e) => { e.stopPropagation(); onGenerate(item.id); }}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (needsFullSource) {
+              window.location.href = `${BASE}/new?mode=import`;
+              return;
+            }
+            onGenerate(item.id);
+          }}
           disabled={generating}
         >
-          {generating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
-          Retry
+          {generating ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          ) : needsFullSource ? (
+            <Upload className="w-3.5 h-3.5" />
+          ) : (
+            <RotateCcw className="w-3.5 h-3.5" />
+          )}
+          {needsFullSource ? "Import full RFP" : "Retry"}
         </Button>
       </div>
     );

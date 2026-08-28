@@ -394,6 +394,28 @@ describe("§16 proposal-detail — polling and form sync", () => {
     );
   });
 
+  it("does not relaunch extraction when the source is only a short summary", () => {
+    assert.ok(
+      opportunitiesSrc.includes("MIN_EXTRACTION_SOURCE_CHARS"),
+      "full generation must validate source length before launching extraction",
+    );
+    assert.ok(
+      opportunitiesSrc.includes('"source_text_too_short"'),
+      "thin-source failures must return an actionable error code",
+    );
+    assert.ok(
+      workspaceSrc.includes("Import full RFP"),
+      "the workspace must offer source replacement instead of an identical retry",
+    );
+  });
+
+  it("classifies empty extraction output without reporting unknown", () => {
+    assert.ok(
+      opportunitiesSrc.includes('code === "no_requirements_extracted"'),
+      "empty extraction output must produce an actionable generation error",
+    );
+  });
+
   it("workspace polling is gated only by explicit active generation phases", () => {
     const fnStart = workspaceSrc.indexOf("function isActiveGeneration");
     const fnEnd = workspaceSrc.indexOf("\n}", fnStart) + 2;
@@ -713,6 +735,16 @@ describe("§B-5 session init failure → dbReady rejects", () => {
 describe("§B-6 failed generation → explicit safe retry", () => {
   it("reuses the canonical proposal and claims the full-generation flow", async () => {
     const tenderId = await _createTestTender();
+    const detailedSource =
+      "The supplier must submit a complete technical proposal, delivery plan, " +
+      "staffing approach, implementation schedule, risk register, pricing breakdown, " +
+      "quality assurance method, data protection controls, accessibility statement, " +
+      "and evidence of relevant experience. The proposal must also explain reporting, " +
+      "governance, stakeholder engagement, acceptance criteria, and transition support.";
+    await db
+      .update(tendersTable)
+      .set({ description: detailedSource, rawText: detailedSource })
+      .where(eq(tendersTable.id, tenderId));
     const [proposal] = await db.insert(proposalsTable).values({
       clientName: "Test Agency",
       industry: "General",

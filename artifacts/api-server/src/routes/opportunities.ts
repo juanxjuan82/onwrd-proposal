@@ -39,6 +39,7 @@ import {
   MAX_REQUIREMENTS,
   MAX_REQ_CHARS,
   ANALYSIS_TIMEOUT_MS,
+  MIN_EXTRACTION_SOURCE_CHARS,
   getFirstIncompleteStep,
   type AnalysisActiveStatus,
   type AnalysisStep,
@@ -1727,11 +1728,15 @@ async function runFullGenerationBackground(
       { proposalId, code, phase: activePhase, reason: message.slice(0, 200) },
       "Full proposal generation failed",
     );
+    const generationError =
+      code === "no_requirements_extracted"
+        ? "No extractable requirements were found in the source. Import or paste the full tender/RFP document, then generate again."
+        : `Generation failed during ${activePhase} (${code}). Retry to start again.`;
     await failOwnedProposalGeneration({
       proposalId,
       tenderId,
       generationAttemptId,
-      generationError: `Generation failed during ${activePhase} (${code}). Retry to start again.`,
+      generationError,
     });
   };
 
@@ -1814,6 +1819,38 @@ router.post("/opportunities/:id/run-full-generation", async (req, res) => {
 
   const [tender] = await db.select().from(tendersTable).where(eq(tendersTable.id, id));
   if (!tender) { res.status(404).json({ error: "Opportunity not found" }); return; }
+
+  const [existingRequirementCount] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(tenderRequirementsTable)
+    .where(eq(tenderRequirementsTable.tenderId, id));
+  const extractionSource = (tender.rawText || tender.description || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (
+    (existingRequirementCount?.count ?? 0) === 0 &&
+    extractionSource.length < MIN_EXTRACTION_SOURCE_CHARS
+  ) {
+    const error =
+      `This opportunity contains only a short summary (${extractionSource.length} characters), ` +
+      "not enough tender detail to extract requirements. Import or paste the full tender/RFP document before generating.";
+    await db
+      .update(proposalsTable)
+      .set({
+        generationStatus: "failed",
+        generationError: error,
+        generationAttemptId: null,
+        status: "draft",
+        updatedAt: new Date(),
+      })
+      .where(eq(proposalsTable.tenderId, id));
+    res.status(422).json({
+      error,
+      code: "source_text_too_short",
+      sourceTextLength: extractionSource.length,
+    });
+    return;
+  }
 
   const initBriefText = `TENDER OPPORTUNITY — ${tender.title}
 
