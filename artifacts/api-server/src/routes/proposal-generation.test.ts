@@ -25,6 +25,7 @@ const sectionsSrc      = readFileSync(path.join(routesDir, "sections.ts"), "utf8
 const authSrc          = readFileSync(path.join(routesDir, "auth.ts"), "utf8");
 const appSrc           = readFileSync(path.join(apiSrcDir, "app.ts"), "utf8");
 const indexSrc         = readFileSync(path.join(apiSrcDir, "index.ts"), "utf8");
+const proposalsSrc     = readFileSync(path.join(routesDir, "proposals.ts"), "utf8");
 const detailSrc        = readFileSync(path.join(frontendDir, "proposal-detail.tsx"), "utf8");
 const workspaceSrc     = readFileSync(path.join(frontendDir, "proposals-workspace.tsx"), "utf8");
 
@@ -289,6 +290,35 @@ describe("§15 session DDL — await before accepting connections", () => {
 // ── §16  Frontend — polling and form dirty guard ───────────────────────────────
 
 describe("§16 proposal-detail — polling and form sync", () => {
+  it("supports atomic bulk proposal deletion with validation", () => {
+    assert.ok(
+      proposalsSrc.includes('router.post("/proposals/bulk-delete"'),
+      "proposals router must expose the bulk-delete endpoint",
+    );
+    assert.ok(
+      proposalsSrc.includes("ids must be a non-empty array") &&
+        proposalsSrc.includes("rawIds.length > 100"),
+      "bulk deletion must reject empty, malformed, and oversized selections",
+    );
+    assert.ok(
+      proposalsSrc.includes("db.transaction") &&
+        proposalsSrc.includes("deletedCount"),
+      "bulk deletion must be transactional and return its result",
+    );
+    assert.ok(
+      proposalsSrc.includes("One or more proposals no longer exist"),
+      "bulk deletion must report stale selections without partial deletion",
+    );
+  });
+
+  it("provides multi-select controls and a deliberate confirmation step", () => {
+    assert.ok(workspaceSrc.includes("Select proposals"));
+    assert.ok(workspaceSrc.includes("select-all-proposals"));
+    assert.ok(workspaceSrc.includes("delete-selected-proposals"));
+    assert.ok(workspaceSrc.includes("confirm-delete-selected-proposals"));
+    assert.ok(workspaceSrc.includes("/api/proposals/bulk-delete"));
+  });
+
   it("uses setInterval for continuous polling while isDrafting", () => {
     assert.ok(
       detailSrc.includes("setInterval"),

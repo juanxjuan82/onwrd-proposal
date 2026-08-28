@@ -5,7 +5,7 @@ import pdfParse from "pdf-parse";
 import mammoth from "mammoth";
 import { db } from "@workspace/db";
 import { proposalsTable, intakeDraftsTable, tendersTable } from "@workspace/db";
-import { eq, and, lt, sql } from "drizzle-orm";
+import { eq, and, inArray, lt, sql } from "drizzle-orm";
 import { invokeAI } from "../lib/ai-gateway.js";
 import { applyDeterministicScore } from "../lib/apply-deterministic-score.js";
 import {
@@ -670,6 +670,68 @@ router.delete("/proposals/:id", async (req, res) => {
   } catch (err) {
     req.log.error({ err }, "Error deleting proposal");
     res.status(500).json({ error: "Failed to delete proposal" });
+  }
+});
+
+// Delete several proposal records in one transaction. This intentionally
+// mirrors the single-proposal delete semantics: linked tenders remain available
+// in Discover and can be used to generate a fresh proposal later.
+router.post("/proposals/bulk-delete", async (req, res) => {
+  const rawIds = (req.body as { ids?: unknown } | undefined)?.ids;
+  if (
+    !Array.isArray(rawIds) ||
+    rawIds.length === 0 ||
+    rawIds.length > 100 ||
+    rawIds.some(
+      (id) =>
+        typeof id !== "number" ||
+        !Number.isInteger(id) ||
+        id <= 0,
+    )
+  ) {
+    res.status(400).json({
+      error: "ids must be a non-empty array of up to 100 positive integers",
+    });
+    return;
+  }
+
+  const ids = [...new Set(rawIds as number[])];
+  try {
+    const deletedIds = await db.transaction(async (tx) => {
+      const existing = await tx
+        .select({ id: proposalsTable.id })
+        .from(proposalsTable)
+        .where(inArray(proposalsTable.id, ids));
+
+      if (existing.length !== ids.length) {
+        const existingIds = new Set(existing.map((proposal) => proposal.id));
+        const missingIds = ids.filter((id) => !existingIds.has(id));
+        const error = new Error("Some proposals were not found") as Error & {
+          missingIds: number[];
+        };
+        error.missingIds = missingIds;
+        throw error;
+      }
+
+      const deleted = await tx
+        .delete(proposalsTable)
+        .where(inArray(proposalsTable.id, ids))
+        .returning({ id: proposalsTable.id });
+      return deleted.map((proposal) => proposal.id);
+    });
+
+    res.json({ deletedIds, deletedCount: deletedIds.length });
+  } catch (err) {
+    const missingIds = (err as { missingIds?: number[] }).missingIds;
+    if (missingIds) {
+      res.status(404).json({
+        error: "One or more proposals no longer exist",
+        missingIds,
+      });
+      return;
+    }
+    req.log.error({ err }, "Error bulk deleting proposals");
+    res.status(500).json({ error: "Failed to delete proposals" });
   }
 });
 

@@ -4,9 +4,20 @@ import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   Loader2, Globe, Upload, Clock, ExternalLink, Sparkles,
-  RotateCcw, Share2, FileText, AlertCircle, ChevronRight,
+  RotateCcw, Share2, FileText, AlertCircle, ChevronRight, ListChecks, Trash2,
 } from "lucide-react";
 import { format } from "date-fns";
 
@@ -261,6 +272,9 @@ function WorkspaceCard({
   onShare,
   sharingId,
   highlighted,
+  selectionMode,
+  selected,
+  onToggleSelected,
 }: {
   item: WorkspaceItem;
   onGenerate: (id: number) => void;
@@ -269,12 +283,19 @@ function WorkspaceCard({
   onShare: (proposalId: number) => void;
   sharingId: number | null;
   highlighted: boolean;
+  selectionMode: boolean;
+  selected: boolean;
+  onToggleSelected: () => void;
 }) {
   const [, setLocation] = useLocation();
   const generating = generatingId === item.id;
   const sharing = sharingId === (item.proposal?.id ?? -1);
 
   const handleCardClick = () => {
+    if (selectionMode) {
+      onToggleSelected();
+      return;
+    }
     if (item.proposal?.id) {
       setLocation(`/proposals/${item.proposal.id}`);
     }
@@ -286,6 +307,15 @@ function WorkspaceCard({
       onClick={item.proposal?.id ? handleCardClick : undefined}
     >
       <div className="flex items-center gap-4 px-5 py-4">
+        {selectionMode && item.proposal?.id && (
+          <Checkbox
+            checked={selected}
+            onCheckedChange={onToggleSelected}
+            onClick={(event) => event.stopPropagation()}
+            aria-label={`Select proposal for ${item.title}`}
+            data-testid={`proposal-select-${item.proposal.id}`}
+          />
+        )}
         {/* Info */}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1.5 flex-wrap">
@@ -340,6 +370,12 @@ export default function ProposalsWorkspace() {
   const [sharingId, setSharingId] = useState<number | null>(null);
   const [driveFolder, setDriveFolder] = useState<string | null>(null);
   const [highlightedId, setHighlightedId] = useState<number | null>(null);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedProposalIds, setSelectedProposalIds] = useState<Set<number>>(
+    new Set(),
+  );
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const search = useSearch();
 
   // Derive highlighted opportunity from ?opportunity= URL param
@@ -438,11 +474,129 @@ export default function ProposalsWorkspace() {
     }
   };
 
+  const proposalItems = items.filter((item) => item.proposal?.id);
+  const allProposalsSelected =
+    proposalItems.length > 0 &&
+    proposalItems.every((item) => selectedProposalIds.has(item.proposal!.id));
+
+  const toggleProposalSelection = (proposalId: number) => {
+    setSelectedProposalIds((current) => {
+      const next = new Set(current);
+      if (next.has(proposalId)) next.delete(proposalId);
+      else next.add(proposalId);
+      return next;
+    });
+  };
+
+  const toggleSelectAllProposals = () => {
+    if (allProposalsSelected) {
+      setSelectedProposalIds(new Set());
+      return;
+    }
+    setSelectedProposalIds(
+      new Set(proposalItems.map((item) => item.proposal!.id)),
+    );
+  };
+
+  const exitSelectionMode = () => {
+    setSelectionMode(false);
+    setSelectedProposalIds(new Set());
+  };
+
+  const handleBulkDelete = async () => {
+    const ids = [...selectedProposalIds];
+    if (ids.length === 0) return;
+    setBulkDeleting(true);
+    try {
+      const r = await fetch(`${BASE}/api/proposals/bulk-delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      const body = await r.json().catch(() => ({})) as {
+        deletedCount?: number;
+        error?: string;
+      };
+      if (!r.ok) {
+        toast({
+          title: "Delete failed",
+          description: body.error ?? "Could not delete the selected proposals.",
+          variant: "destructive",
+        });
+        return;
+      }
+      exitSelectionMode();
+      setBulkDeleteOpen(false);
+      await fetchWorkspace();
+      toast({
+        title: "Proposals deleted",
+        description: `${body.deletedCount ?? ids.length} proposal${(body.deletedCount ?? ids.length) === 1 ? "" : "s"} deleted.`,
+      });
+    } catch (err) {
+      toast({
+        title: "Delete failed",
+        description: (err as Error).message,
+        variant: "destructive",
+      });
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
   return (
     <div className="p-8 max-w-6xl mx-auto">
       <div className="mb-6">
-        <h1 className="text-3xl font-bold text-white mb-1 tracking-tight">Proposals</h1>
-        <p className="text-muted-foreground text-sm">Generate, review, and share proposals for your opportunities.</p>
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold text-white mb-1 tracking-tight">Proposals</h1>
+            <p className="text-muted-foreground text-sm">Generate, review, and share proposals for your opportunities.</p>
+          </div>
+          {!loading && proposalItems.length > 0 && (
+            <div className="flex items-center gap-2">
+              {selectionMode ? (
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={toggleSelectAllProposals}
+                    data-testid="select-all-proposals"
+                  >
+                    <ListChecks className="w-3.5 h-3.5 mr-1.5" />
+                    {allProposalsSelected ? "Clear all" : "Select all"}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={exitSelectionMode}
+                    data-testid="cancel-proposal-selection"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    disabled={selectedProposalIds.size === 0}
+                    onClick={() => setBulkDeleteOpen(true)}
+                    data-testid="delete-selected-proposals"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 mr-1.5" />
+                    Delete{selectedProposalIds.size > 0 ? ` (${selectedProposalIds.size})` : ""}
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setSelectionMode(true)}
+                  data-testid="select-proposals"
+                >
+                  <ListChecks className="w-3.5 h-3.5 mr-1.5" />
+                  Select proposals
+                </Button>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {loading ? (
@@ -479,10 +633,43 @@ export default function ProposalsWorkspace() {
               onShare={handleShare}
               sharingId={sharingId}
               highlighted={item.id === highlightedId}
+              selectionMode={selectionMode}
+              selected={item.proposal?.id ? selectedProposalIds.has(item.proposal.id) : false}
+              onToggleSelected={() => {
+                if (item.proposal?.id) toggleProposalSelection(item.proposal.id);
+              }}
             />
           ))}
         </div>
       )}
+
+      <AlertDialog open={bulkDeleteOpen} onOpenChange={setBulkDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete {selectedProposalIds.size} selected proposal{selectedProposalIds.size === 1 ? "" : "s"}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes the selected proposal records and their generated sections. Linked opportunities will remain available so you can create new proposals from them.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={bulkDeleting}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(event) => {
+                event.preventDefault();
+                void handleBulkDelete();
+              }}
+              disabled={bulkDeleting}
+              data-testid="confirm-delete-selected-proposals"
+            >
+              {bulkDeleting ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5 mr-1.5" />}
+              {bulkDeleting ? "Deleting…" : "Delete permanently"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
