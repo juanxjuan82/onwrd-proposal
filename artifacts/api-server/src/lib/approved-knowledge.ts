@@ -19,6 +19,10 @@ export interface ApprovedKnowledgeDoc {
   title: string;
   content: string;
   docType: string;
+  sourceUrl?: string | null;
+  tags?: string | string[];
+  /** Present on DB results; optional for backwards-compatible pure fixtures. */
+  isApproved?: boolean;
 }
 
 /** Fetch ONLY isApproved=true knowledge documents. */
@@ -29,6 +33,9 @@ export async function getApprovedKnowledge(): Promise<ApprovedKnowledgeDoc[]> {
       title: knowledgeDocumentsTable.title,
       content: knowledgeDocumentsTable.content,
       docType: knowledgeDocumentsTable.docType,
+      sourceUrl: knowledgeDocumentsTable.sourceUrl,
+      tags: knowledgeDocumentsTable.tags,
+      isApproved: knowledgeDocumentsTable.isApproved,
     })
     .from(knowledgeDocumentsTable)
     .where(eq(knowledgeDocumentsTable.isApproved, true));
@@ -41,7 +48,10 @@ const CASE_STUDY_CONTENT_CHARS = 1500;
  * content excerpts for case-study documents. When the approved set is
  * empty, instructs the model to emit the [NEEDS ONWRD INPUT] placeholder.
  */
-export function buildKnowledgeBlock(docs: ApprovedKnowledgeDoc[]): string {
+export function buildKnowledgeBlock(
+  docs: ApprovedKnowledgeDoc[],
+  excerptKnowledgeIds?: ReadonlySet<number>,
+): string {
   if (docs.length === 0) {
     return `ONWRD APPROVED CREDENTIALS ALLOWLIST: EMPTY
 
@@ -58,7 +68,12 @@ There are NO approved ONWRD case studies or credentials available.
   const caseStudyBlock = caseStudies
     .map(
       (d, i) =>
-        `${i + 1}. [Knowledge ID: ${d.id}] "${d.title}"\n${d.content.slice(0, CASE_STUDY_CONTENT_CHARS)}`,
+        `${i + 1}. [Knowledge ID: ${d.id}] "${d.title}"` +
+        (
+          !excerptKnowledgeIds || excerptKnowledgeIds.has(d.id)
+            ? `\n${d.content.slice(0, CASE_STUDY_CONTENT_CHARS)}`
+            : ""
+        ),
     )
     .join("\n\n");
 

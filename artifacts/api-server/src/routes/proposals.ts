@@ -9,8 +9,6 @@ import { eq, and, inArray, lt, sql } from "drizzle-orm";
 import { invokeAI } from "../lib/ai-gateway.js";
 import { applyDeterministicScore } from "../lib/apply-deterministic-score.js";
 import {
-  getApprovedKnowledge,
-  buildKnowledgeBlock,
   getCaseStudyTitles,
   scanDocumentCredentials,
 } from "../lib/approved-knowledge.js";
@@ -824,8 +822,6 @@ router.post("/proposals/parse-brief", async (req, res) => {
   const now = new Date();
 
   try {
-    const approvedDocs = await getApprovedKnowledge();
-    const knowledgeBlock = buildKnowledgeBlock(approvedDocs);
     const { content } = await invokeAI({
       feature: "proposal_generation",
       messages: [
@@ -843,13 +839,11 @@ RULES:
 - The Deliverables Register (section 6) must list at least 6 deliverables with purpose, owner, format, and review notes.
 - The Investment Table must include estimated hour ranges and realistic USD figures scaled to the scope.
 - Risks and Mitigation must include at least 4 risks.
-- Case Studies section may cite ONLY the approved case studies on the allowlist below, by their exact titles — do NOT invent client names, projects, or outcomes. If none is relevant, write [NEEDS ONWRD INPUT: relevant case study].
+- Case Studies must not name any past client, project, or outcome. Always write [NEEDS ONWRD INPUT: relevant case study]. This legacy path has no extracted requirement records, so it is not authorized to retrieve reusable evidence.
 - Dates to use: Today = ${formatDate(now)} | Proposal due = ${formatDate(addDays(now, 10))} | Info due from client = ${formatDate(addDays(now, 7))} | Kickoff = infer from brief or use ${formatDate(addDays(now, 21))} | Midpoint = infer | Launch = infer.
 - Never promise guarantees, refunds, free work, unlimited revisions, or specific success rates.
 
 ${UNTRUSTED_CONTENT_POLICY}
-
-${knowledgeBlock}
 
 TEMPLATE TO POPULATE:
 
@@ -889,6 +883,20 @@ Return your response as JSON with exactly these fields:
         industry: "General",
         proposalContent: content,
       };
+    }
+
+    const unverifiedCredentials = scanDocumentCredentials(
+      result.proposalContent,
+      [],
+      [result.clientName],
+    );
+    if (unverifiedCredentials.length > 0) {
+      res.status(422).json({
+        error: "Generated proposal included unsupported credentials. Please retry.",
+        code: "UNVERIFIED_CREDENTIALS",
+        unverifiedCredentials,
+      });
+      return;
     }
 
     res.json(result);

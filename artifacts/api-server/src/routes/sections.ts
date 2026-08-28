@@ -4,6 +4,7 @@ import { db } from "@workspace/db";
 import {
   proposalSectionsTable,
   proposalRequirementCoverageTable,
+  proposalGenerationRunsTable,
   proposalReviewEventsTable,
   proposalsTable,
   tenderRequirementsTable,
@@ -21,13 +22,54 @@ import { tendersTable } from "@workspace/db";
  */
 async function computeUnverifiedForProposal(
   sections: Array<{ sectionKey: string; content: string | null }>,
-  proposal: { clientName: string | null; tenderId: number | null },
+  proposal: { id: number; clientName: string | null; tenderId: number | null },
 ): Promise<string[]> {
   const caseStudies = sections.find((s) => s.sectionKey === "case_studies");
   if (!caseStudies?.content) return [];
-  // Only case-study documents count as citable client credentials.
-  const approvedTitles = (await getApprovedKnowledge())
-    .filter((d) => d.docType === "case_study")
+  const coverageRows = await db
+    .select({ evidenceReferences: proposalRequirementCoverageTable.evidenceReferences })
+    .from(proposalRequirementCoverageTable)
+    .where(eq(proposalRequirementCoverageTable.proposalId, proposal.id));
+  const matchedKnowledgeIds = new Set(
+    coverageRows
+      .flatMap((row) => parseEvidenceReferences(row.evidenceReferences))
+      .filter(
+        (reference) =>
+          reference.type === "knowledge" &&
+          typeof reference.knowledgeDocumentId === "number",
+      )
+      .map((reference) => reference.knowledgeDocumentId as number),
+  );
+  const [latestGenerationRun] = await db
+    .select({ retrievedKnowledgeIds: proposalGenerationRunsTable.retrievedKnowledgeIds })
+    .from(proposalGenerationRunsTable)
+    .where(eq(proposalGenerationRunsTable.proposalId, proposal.id))
+    .orderBy(sql`${proposalGenerationRunsTable.id} DESC`)
+    .limit(1);
+  if (coverageRows.length === 0 && latestGenerationRun) {
+    try {
+      const runIds = JSON.parse(
+        latestGenerationRun.retrievedKnowledgeIds ?? "[]",
+      ) as unknown;
+      if (Array.isArray(runIds)) {
+        for (const id of runIds) {
+          if (typeof id === "number") matchedKnowledgeIds.add(id);
+        }
+      }
+    } catch {
+      // Malformed historical audit data authorizes no additional credentials.
+    }
+  }
+  // Structured proposals may cite only live-approved case studies that were
+  // deterministically matched and persisted as requirement evidence. Legacy
+  // sectioned proposals without a generation run retain manual-edit support.
+  const approvedCaseStudies = (await getApprovedKnowledge())
+    .filter((document) => document.docType === "case_study");
+  const approvedTitles = approvedCaseStudies
+    .filter(
+      (document) =>
+        !latestGenerationRun || matchedKnowledgeIds.has(document.id),
+    )
     .map((d) => d.title);
   const extraAllowed: string[] = [];
   if (proposal.clientName) extraAllowed.push(proposal.clientName);
@@ -108,6 +150,15 @@ type EvidenceReference = {
   title: string;
   sourceUrl?: string | null;
   excerpt: string;
+  knowledgeMatch?: {
+    status: "matched" | "partial" | "unmatched";
+    score: number;
+    method: string;
+  };
+  matchStatus?: "matched" | "partial";
+  matchScore?: number;
+  matchMethod?: string;
+  matchedTerms?: string[];
 };
 
 function parseEvidenceReferences(value: string): EvidenceReference[] {
@@ -360,6 +411,23 @@ router.get("/proposals/:id/compliance", async (req, res) => {
             (!!source.knowledgeDocumentId &&
               approvedKnowledgeIds.has(source.knowledgeDocumentId)),
         );
+        const knowledgeSources = evidence.filter(
+          (source) => source.type === "knowledge",
+        );
+        const storedMatch = evidence.find(
+          (source) => source.type === "tender",
+        )?.knowledgeMatch;
+        const knowledgeMatch = storedMatch
+          ? {
+              ...storedMatch,
+              status:
+                knowledgeSources.length === 0 && storedMatch.status !== "unmatched"
+                  ? "unmatched"
+                  : storedMatch.status,
+              score: knowledgeSources.length === 0 ? 0 : storedMatch.score,
+              sourceCount: knowledgeSources.length,
+            }
+          : null;
         return {
           id: row.id,
           requirementId: row.requirementId,
@@ -377,6 +445,7 @@ router.get("/proposals/:id/compliance", async (req, res) => {
                   title: row.sectionTitle,
                 }
               : null,
+          knowledgeMatch,
           evidence,
         };
       }),
@@ -426,6 +495,7 @@ router.put("/proposals/:id/sections/:sectionId", async (req, res) => {
   // ── Immutability guard ─────────────────────────────────────────────────
   const [proposal] = await db
     .select({
+        id:           proposalsTable.id,
       syncStatus:   proposalsTable.syncStatus,
       googleFileId: proposalsTable.googleFileId,
       googleDocUrl: proposalsTable.googleDocUrl,

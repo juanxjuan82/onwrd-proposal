@@ -22,7 +22,8 @@ import {
   computeInjectionWarning,
   scanBannedPhrases,
 } from "../lib/prompt-safety.js";
-import { getApprovedKnowledge, buildKnowledgeBlock } from "../lib/approved-knowledge.js";
+import { getApprovedKnowledge } from "../lib/approved-knowledge.js";
+import { matchRequirementsToKnowledge } from "../lib/deterministic-knowledge-matching.js";
 import { applyDeterministicScore } from "../lib/apply-deterministic-score.js";
 import {
   SECTION_DEFINITIONS,
@@ -285,7 +286,6 @@ async function runGenerateStrategy(
 
   let raw: string;
   try {
-    const knowledgeBlock = buildKnowledgeBlock(await getApprovedKnowledge());
     const stratResult = await invokeAI({
       feature: "strategy_generation",
       messages: [
@@ -296,13 +296,12 @@ async function runGenerateStrategy(
 Return JSON with:
 - positioning: string (1-2 sentences: how ONWRD should position itself for this specific opportunity — what unique angle to take)
 - winThemes: string[] (exactly 3-4 specific themes that should run throughout the proposal, e.g. "Local Caribbean expertise", "Measurable community impact")
-- recommendedCaseStudies: string[] (2-3 approved case-study titles from the allowlist below that are most relevant to cite — exact titles only; return [] if none is relevant)
 - risks: string[] (2-4 specific risks the proposal must proactively address)
 - messagingGuidance: string (1-2 sentences on tone, emphasis, and what the evaluators likely care about most)
 
 ${UNTRUSTED_CONTENT_POLICY}
 
-${knowledgeBlock}`,
+Do not select, recommend, or name case studies or past clients. Reusable evidence is chosen later by deterministic requirement matching.`,
         },
         {
           role: "user",
@@ -342,7 +341,6 @@ ${bidScore ? `Bid Score: ${bidScore.fitScore}/100 (${bidScore.fitLevel})\nScorin
   const data = JSON.parse(raw) as {
     positioning?: string;
     winThemes?: string[];
-    recommendedCaseStudies?: string[];
     risks?: string[];
     messagingGuidance?: string;
   };
@@ -360,7 +358,9 @@ ${bidScore ? `Bid Score: ${bidScore.fitScore}/100 (${bidScore.fitLevel})\nScorin
         tenderId,
         positioning:            data.positioning            ?? "",
         winThemes:              JSON.stringify(data.winThemes              ?? []),
-        recommendedCaseStudies: JSON.stringify(data.recommendedCaseStudies ?? []),
+        // Retained for backwards-compatible response/schema shape only.
+        // Evidence selection is exclusively deterministic during drafting.
+        recommendedCaseStudies: JSON.stringify([]),
         risks:                  JSON.stringify(data.risks                  ?? []),
         messagingGuidance:      data.messagingGuidance      ?? "",
       })
@@ -810,7 +810,17 @@ router.get("/opportunities/:id", async (req, res) => {
       .orderBy(desc(proposalStrategiesTable.createdAt))
       .limit(1);
 
-    res.json({ ...tender, requirements, bidScore: bidScore ?? null, strategy: strategy ?? null });
+    const capabilityMatches = matchRequirementsToKnowledge(
+      requirements,
+      await getApprovedKnowledge(),
+    );
+    res.json({
+      ...tender,
+      requirements,
+      bidScore: bidScore ?? null,
+      strategy: strategy ?? null,
+      capabilityMatches,
+    });
   } catch (err) {
     req.log.error({ err }, "Error fetching opportunity");
     res.status(500).json({ error: "Failed to fetch opportunity" });
@@ -1442,9 +1452,7 @@ ${tender.description}
 
 ${requirements.length > 0 ? `\nEXTRACTED REQUIREMENTS:\n${requirements.map((r, i) => `${i + 1}. [${r.category}${r.isMandatory ? ", MANDATORY" : ""}] ${r.requirementText}`).join("\n")}` : ""}`;
 
-  const strategyContext = strategy
-    ? `\nPROPOSAL STRATEGY BRIEF:\nPositioning: ${strategy.positioning}\nWin Themes: ${JSON.parse(strategy.winThemes ?? "[]").join(", ")}\nRecommended Case Studies: ${JSON.parse(strategy.recommendedCaseStudies ?? "[]").join(", ")}\nMessaging Guidance: ${strategy.messagingGuidance}\nRisks to Address: ${JSON.parse(strategy.risks ?? "[]").join(", ")}`
-    : "";
+  const strategyContext = buildStrategyContext(strategy);
 
   // ── Resolve canonical proposal ────────────────────────────────────────────
   // A tender has at most one proposal (unique constraint on tender_id).
