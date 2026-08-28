@@ -3,13 +3,27 @@ import { runCrawler, seedDefaultSources, seedDefaultSearchProfiles } from "./ind
 import { Resend } from "resend";
 import { db } from "@workspace/db";
 import { discoveredTendersTable, tenderDigestSettingsTable, intakeDraftsTable } from "@workspace/db";
-import { eq, and, lt, desc } from "drizzle-orm";
+import { eq, and, inArray, isNotNull, lt, desc } from "drizzle-orm";
+import {
+  DEFAULT_DIGEST_RECIPIENTS,
+  parseDigestRecipients,
+  shouldUpgradeLegacyRecipients,
+} from "../lib/digest-settings.js";
+import { filterActionableDigestTenders } from "../lib/digest-eligibility.js";
 
 async function getDigestRecipients(): Promise<{ emails: string[]; enabled: boolean }> {
   try {
     const [settings] = await db.select().from(tenderDigestSettingsTable).limit(1);
     if (settings) {
-      return { emails: JSON.parse(settings.emails), enabled: settings.enabled };
+      const emails = parseDigestRecipients(settings.emails);
+      if (shouldUpgradeLegacyRecipients(emails)) {
+        await db
+          .update(tenderDigestSettingsTable)
+          .set({ emails: JSON.stringify(DEFAULT_DIGEST_RECIPIENTS), updatedAt: new Date() })
+          .where(eq(tenderDigestSettingsTable.id, settings.id));
+        return { emails: [...DEFAULT_DIGEST_RECIPIENTS], enabled: settings.enabled };
+      }
+      return { emails, enabled: settings.enabled };
     }
   } catch {
     // fallback to env var
@@ -45,13 +59,18 @@ export async function sendDigestEmail(_newCount: number): Promise<void> {
     const allTenders = await db
       .select()
       .from(discoveredTendersTable)
-      .where(eq(discoveredTendersTable.status, "new"))
+      .where(and(
+        eq(discoveredTendersTable.status, "new"),
+        isNotNull(discoveredTendersTable.opportunityId),
+        inArray(discoveredTendersTable.recommendation, ["PURSUE", "CONSIDER"]),
+      ))
       .orderBy(desc(discoveredTendersTable.fitScore));
+    const actionableTenders = filterActionableDigestTenders(allTenders);
 
-    const pursue = allTenders.filter((t) => t.recommendation === "PURSUE");
-    const consider = allTenders.filter((t) => t.recommendation === "CONSIDER");
+    const pursue = actionableTenders.filter((t) => t.recommendation === "PURSUE");
+    const consider = actionableTenders.filter((t) => t.recommendation === "CONSIDER");
 
-    if (allTenders.length === 0) {
+    if (actionableTenders.length === 0) {
       console.log("[digest email] No opportunities to report — skipping send.");
       return;
     }
@@ -70,7 +89,7 @@ export async function sendDigestEmail(_newCount: number): Promise<void> {
     const isBahamasEntry = (t: (typeof allTenders)[number]) =>
       (t.country ?? "").toLowerCase().includes("bahamas");
     const bahamasCount   = [...pursue, ...consider].filter(isBahamasEntry).length;
-    const bahamasTracked = allTenders.filter(isBahamasEntry).length;
+     const bahamasTracked = actionableTenders.filter(isBahamasEntry).length;
 
     const appBase  = process.env.APP_URL
       ?? (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}/proposal-generator` : "");

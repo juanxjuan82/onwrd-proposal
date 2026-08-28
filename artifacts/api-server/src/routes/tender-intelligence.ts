@@ -7,10 +7,18 @@ import {
   tenderSearchProfilesTable,
   tenderDigestSettingsTable,
 } from "@workspace/db";
-import { eq, desc, and, gte } from "drizzle-orm";
+import { eq, desc, and, gte, inArray, isNotNull } from "drizzle-orm";
 import { runCrawler, rescoreWithKeywords, backfillPromotions, isCrawlRunning } from "../crawlers/index.js";
 import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
 import { normalizeSourceApprovedDomains } from "../crawlers/crawl4ai-client.js";
+import {
+  DEFAULT_DIGEST_RECIPIENTS,
+  parseDigestRecipients,
+  shouldUpgradeLegacyRecipients,
+  validateDigestRecipients,
+} from "../lib/digest-settings.js";
+import { filterActionableDigestTenders } from "../lib/digest-eligibility.js";
+import { evaluateCrawlerEligibility } from "../lib/crawler-eligibility.js";
 
 const router = Router();
 
@@ -186,6 +194,33 @@ router.post("/discovered-tenders/:id/promote", async (req, res) => {
   const id = Number(req.params.id);
   if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
   try {
+    const [discovery] = await db
+      .select({
+        title: discoveredTendersTable.title,
+        description: discoveredTendersTable.description,
+        recommendation: discoveredTendersTable.recommendation,
+        deadline: discoveredTendersTable.deadline,
+      })
+      .from(discoveredTendersTable)
+      .where(eq(discoveredTendersTable.id, id));
+    if (!discovery) {
+      res.status(404).json({ error: "Discovered tender not found" });
+      return;
+    }
+    const eligibility = evaluateCrawlerEligibility({
+      title: discovery.title,
+      description: discovery.description,
+      recommendation: discovery.recommendation ?? "SKIP",
+      deadline: discovery.deadline,
+    });
+    if (!eligibility.eligible) {
+      res.status(422).json({
+        error: "This discovery is not eligible for an actionable opportunity",
+        code: "ineligible_discovery",
+        reasons: eligibility.rejectionReasons,
+      });
+      return;
+    }
     const result = await promoteDiscoveredTender(id);
     res.json(result);
   } catch (err) {
@@ -243,9 +278,20 @@ router.delete("/tender-search-profiles/:id", async (req, res) => {
 // ── Digest Settings ────────────────────────────────────────────────────────
 async function getOrCreateDigestSettings() {
   const [existing] = await db.select().from(tenderDigestSettingsTable).limit(1);
-  if (existing) return existing;
+  if (existing) {
+    const emails = parseDigestRecipients(existing.emails);
+    if (shouldUpgradeLegacyRecipients(emails)) {
+      const [updated] = await db
+        .update(tenderDigestSettingsTable)
+        .set({ emails: JSON.stringify(DEFAULT_DIGEST_RECIPIENTS), updatedAt: new Date() })
+        .where(eq(tenderDigestSettingsTable.id, existing.id))
+        .returning();
+      return updated;
+    }
+    return existing;
+  }
   const [created] = await db.insert(tenderDigestSettingsTable).values({
-    emails: JSON.stringify(["j.aymes@onwrdadvisors.com"]),
+    emails: JSON.stringify(DEFAULT_DIGEST_RECIPIENTS),
     enabled: true,
   }).returning();
   return created;
@@ -253,7 +299,7 @@ async function getOrCreateDigestSettings() {
 
 router.get("/tender-digest-settings", async (_req, res) => {
   const settings = await getOrCreateDigestSettings();
-  res.json({ ...settings, emails: JSON.parse(settings.emails) });
+  res.json({ ...settings, emails: parseDigestRecipients(settings.emails) });
 });
 
 router.post("/tender-digest-settings/test", async (req, res) => {
@@ -263,7 +309,7 @@ router.post("/tender-digest-settings/test", async (req, res) => {
     return;
   }
   const settings = await getOrCreateDigestSettings();
-  const emails: string[] = JSON.parse(settings.emails);
+  const emails = parseDigestRecipients(settings.emails);
   if (emails.length === 0) {
     res.status(400).json({ error: "No recipients configured. Add at least one email address first." });
     return;
@@ -273,11 +319,16 @@ router.post("/tender-digest-settings/test", async (req, res) => {
     const allTenders = await db
       .select()
       .from(discoveredTendersTable)
-      .where(eq(discoveredTendersTable.status, "new"))
+      .where(and(
+        eq(discoveredTendersTable.status, "new"),
+        isNotNull(discoveredTendersTable.opportunityId),
+        inArray(discoveredTendersTable.recommendation, ["PURSUE", "CONSIDER"]),
+      ))
       .orderBy(desc(discoveredTendersTable.fitScore));
+    const actionableTenders = filterActionableDigestTenders(allTenders);
 
-    const pursue = allTenders.filter((t) => t.recommendation === "PURSUE");
-    const consider = allTenders.filter((t) => t.recommendation === "CONSIDER");
+    const pursue = actionableTenders.filter((t) => t.recommendation === "PURSUE");
+    const consider = actionableTenders.filter((t) => t.recommendation === "CONSIDER");
 
     // Sort: Bahamas first, then by fitScore desc
     const sortBahamasFirst = (list: typeof allTenders) =>
@@ -294,7 +345,7 @@ router.post("/tender-digest-settings/test", async (req, res) => {
     const isBahamasEntry = (t: (typeof allTenders)[number]) =>
       (t.country ?? "").toLowerCase().includes("bahamas");
     const bahamasCount = [...pursue, ...consider].filter(isBahamasEntry).length;
-    const bahamasTracked = allTenders.filter(isBahamasEntry).length;
+    const bahamasTracked = actionableTenders.filter(isBahamasEntry).length;
 
     const { Resend } = await import("resend");
     const resend = new Resend(apiKey);
@@ -439,7 +490,17 @@ router.put("/tender-digest-settings", async (req, res) => {
   const { emails, enabled } = req.body as { emails?: string[]; enabled?: boolean };
   const settings = await getOrCreateDigestSettings();
   const updates: Record<string, unknown> = { updatedAt: new Date() };
-  if (Array.isArray(emails)) updates.emails = JSON.stringify(emails.map((e: string) => e.trim()).filter(Boolean));
+  if (emails !== undefined) {
+    const validation = validateDigestRecipients(emails);
+    if (validation.invalid.length > 0) {
+      res.status(400).json({
+        error: "One or more recipient email addresses are invalid",
+        invalid: validation.invalid,
+      });
+      return;
+    }
+    updates.emails = JSON.stringify(validation.emails);
+  }
   if (enabled !== undefined) updates.enabled = enabled;
   const [updated] = await db
     .update(tenderDigestSettingsTable)

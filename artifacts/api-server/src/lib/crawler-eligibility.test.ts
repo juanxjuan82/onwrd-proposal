@@ -1,6 +1,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { evaluateCrawlerEligibility } from "./crawler-eligibility.js";
+import { filterActionableDigestTenders } from "./digest-eligibility.js";
 
 // ── Reusable fixture helpers ──────────────────────────────────────────────────
 
@@ -410,5 +411,36 @@ describe("evaluateCrawlerEligibility — no positive signals", () => {
     assert.equal(r.positiveSignals.length, 0);
     assert.equal(r.eligible, false);
     assert.ok(r.rejectionReasons.some((x) => x.includes("No explicit ONWRD")));
+  });
+});
+
+describe("filterActionableDigestTenders", () => {
+  const agencyTender = {
+    opportunityId: 42,
+    title: "Agency RFP: Digital Marketing Campaign",
+    description: REAL_SCOPE,
+    recommendation: PURSUE,
+    deadline: null,
+  };
+
+  test("keeps promoted agency-level marketing opportunities", () => {
+    assert.deepEqual(filterActionableDigestTenders([agencyTender]), [agencyTender]);
+  });
+
+  test("excludes raw-only discoveries even when they score as pursue", () => {
+    assert.deepEqual(
+      filterActionableDigestTenders([{ ...agencyTender, opportunityId: null }]),
+      [],
+    );
+  });
+
+  test("excludes promoted individual hires from legacy data", () => {
+    assert.deepEqual(
+      filterActionableDigestTenders([{
+        ...agencyTender,
+        title: "Individual Consultant — Communications Strategy",
+      }]),
+      [],
+    );
   });
 });
