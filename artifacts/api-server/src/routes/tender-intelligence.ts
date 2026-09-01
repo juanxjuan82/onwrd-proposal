@@ -289,6 +289,33 @@ router.get("/crawler-runs", async (req, res) => {
 });
 
 // ── Discovered Tenders ─────────────────────────────────────────────────────
+router.get("/discovered-tenders/overview", async (_req, res) => {
+  const [lastCrawl] = await db
+    .select({
+      id: crawlerRunsTable.id,
+      startedAt: crawlerRunsTable.startedAt,
+      completedAt: crawlerRunsTable.completedAt,
+      status: crawlerRunsTable.status,
+      itemsFound: crawlerRunsTable.itemsFound,
+      itemsNew: crawlerRunsTable.itemsNew,
+      errorMessage: crawlerRunsTable.errorMessage,
+    })
+    .from(crawlerRunsTable)
+    .orderBy(desc(crawlerRunsTable.startedAt))
+    .limit(1);
+
+  const [latestTender] = await db
+    .select({ createdAt: discoveredTendersTable.createdAt })
+    .from(discoveredTendersTable)
+    .orderBy(desc(discoveredTendersTable.createdAt))
+    .limit(1);
+
+  res.json({
+    lastCrawl: lastCrawl ?? null,
+    latestTenderAddedAt: latestTender?.createdAt ?? null,
+  });
+});
+
 router.get("/discovered-tenders", async (req, res) => {
   const status = req.query.status as string | undefined;
   const minScore = req.query.minScore ? Number(req.query.minScore) : undefined;
