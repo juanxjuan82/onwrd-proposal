@@ -47,6 +47,19 @@ const flagFor = (country: string | null) => {
   return "🌍 ";
 };
 
+export function getDigestAppBase(): string {
+  const configuredUrl = process.env.APP_URL?.trim().replace(/\/+$/, "");
+  const isDevelopmentUrl = configuredUrl
+    ? /(^|:\/\/)[^/]*\.replit\.dev(?:\/|$)/i.test(configuredUrl) ||
+      /(^|:\/\/)localhost(?::\d+)?(?:\/|$)/i.test(configuredUrl)
+    : false;
+  if (configuredUrl && !isDevelopmentUrl) return configuredUrl;
+  if (process.env.NODE_ENV === "production") return "";
+  return process.env.REPLIT_DEV_DOMAIN
+    ? `https://${process.env.REPLIT_DEV_DOMAIN}/proposal-generator`
+    : "";
+}
+
 export async function sendDigestEmail(_newCount: number): Promise<void> {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) return;
@@ -91,8 +104,7 @@ export async function sendDigestEmail(_newCount: number): Promise<void> {
     const bahamasCount   = [...pursue, ...consider].filter(isBahamasEntry).length;
      const bahamasTracked = actionableTenders.filter(isBahamasEntry).length;
 
-    const appBase  = process.env.APP_URL
-      ?? (process.env.REPLIT_DEV_DOMAIN ? `https://${process.env.REPLIT_DEV_DOMAIN}/proposal-generator` : "");
+    const appBase = getDigestAppBase();
     const inboxUrl = `${appBase}/inbox`;
 
     const rows = (list: typeof allTenders) =>

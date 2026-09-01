@@ -64,4 +64,14 @@ describe("digest delivery boundaries", () => {
     assert.match(routeSource, /evaluateCrawlerEligibility\(\{/);
     assert.match(routeSource, /code:\s*"ineligible_discovery"/);
   });
+
+  it("never falls back to a development URL for production digest links", async () => {
+    const schedulerSource = await readFile(
+      new URL("../crawlers/scheduler.ts", import.meta.url),
+      "utf8",
+    );
+    assert.match(schedulerSource, /if \(process\.env\.NODE_ENV === "production"\) return ""/);
+    assert.match(schedulerSource, /replit\\.dev/);
+    assert.match(schedulerSource, /getDigestAppBase\(\)/);
+  });
 });

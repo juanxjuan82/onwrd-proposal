@@ -71,6 +71,7 @@ PROPOSAL_NOTIFY_EMAIL = "j.aymes@onwrdadvisors.com"
 
 [userenv.production]
 GOOGLE_OAUTH_CALLBACK_URL = "https://proposals.onwrdadvisors.com/api/auth/google/callback"
+APP_URL = "https://proposals.onwrdadvisors.com"
 
 [[ports]]
 localPort = 8080
