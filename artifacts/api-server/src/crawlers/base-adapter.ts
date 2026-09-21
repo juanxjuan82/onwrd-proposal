@@ -236,7 +236,7 @@ export async function fetchTenderDetailWithOptionalBrowser(
             message: `Direct detail fetch returned ${content.length} genuine content characters.`,
             method: "direct",
           });
-          return { content: content.slice(0, 1_200), metadata: {}, method: "direct" };
+           return { content: content.slice(0, 4_000), metadata: {}, method: "direct" };
         }
       }
       recordDiagnostic(context, {
@@ -274,7 +274,7 @@ export async function fetchTenderDetailWithOptionalBrowser(
     return undefined;
   }
   return {
-    content: rendered.content.slice(0, 1_200),
+    content: rendered.content.slice(0, 4_000),
     metadata: rendered.metadata,
     method: "crawl4ai",
   };

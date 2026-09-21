@@ -83,6 +83,7 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
              rawData: {
                sourcePage: pageUrl,
                extractionMethod: detail ? `${detail.method}_detail` : page.method,
+               ...(detail ? {} : { needsEnrichment: true }),
                ...(detail ? { renderedMetadata: detail.metadata } : {}),
              },
           });
@@ -115,6 +116,7 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
              rawData: {
                sourcePage: pageUrl,
                extractionMethod: detail ? `${detail.method}_detail` : page.method,
+             ...(detail ? {} : { needsEnrichment: true }),
                ...(detail ? { renderedMetadata: detail.metadata } : {}),
              },
           });
@@ -132,9 +134,10 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
             if (!isRelevantBahamasTitle(title) || seen.has(title.toLowerCase().slice(0, 60))) continue;
             seen.add(title.toLowerCase().slice(0, 60));
             const detail = await fetchTenderDetailWithOptionalBrowser(link.url, title, context);
-            // A rendered listing alone is not detail-specific tender scope.
-            if (!detail) continue;
-            const description = detail.content;
+            // Retain the discovered listing even when detail enrichment fails.
+            // The explicit flag lets downstream consumers retry enrichment.
+            const description = detail?.content ??
+              `Bahamas government procurement notice: ${title}`;
             results.push({
               externalId: `bah-${Buffer.from((link.url + title).slice(0, 50)).toString("base64").slice(0, 16)}`,
               title,
@@ -146,8 +149,8 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
               sector: mapCategory(title),
               rawData: {
                 sourcePage: pageUrl,
-                extractionMethod: `${detail.method}_detail`,
-                renderedMetadata: detail.metadata,
+                extractionMethod: detail ? `${detail.method}_detail` : "rendered_listing",
+                ...(detail ? { renderedMetadata: detail.metadata } : { needsEnrichment: true }),
               },
             });
             if (results.length >= 30) break;

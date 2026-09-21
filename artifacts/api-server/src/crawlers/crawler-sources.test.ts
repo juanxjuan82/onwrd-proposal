@@ -28,6 +28,27 @@ async function withMockFetch<T>(mockFn: MockFetchFn, fn: () => Promise<T>): Prom
   }
 }
 
+describe("base adapter detail quality", () => {
+  it("preserves richer genuine detail text within a bounded limit", async () => {
+    const { fetchTenderDetailWithOptionalBrowser } = await import("./base-adapter.js");
+    const scope = "Detailed procurement scope covering communications, outreach, delivery, and reporting. ".repeat(100);
+    const result = await withMockFetch(
+      async () => new Response(`<html><title>Long notice</title><main>${scope}</main></html>`, {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      }),
+      () => fetchTenderDetailWithOptionalBrowser(
+        "https://example.org/detail",
+        "Long notice",
+        { approvedDomains: ["example.org"] },
+      ),
+    );
+    assert.ok(result);
+    assert.ok(result.content.length > 1_200, "detail should be richer than legacy 1,200-character cap");
+    assert.ok(result.content.length <= 4_000, "detail must remain bounded");
+  });
+});
+
 const all403: MockFetchFn = async () => new Response("Forbidden", { status: 403 });
 const all404: MockFetchFn = async () => new Response("Not Found", { status: 404 });
 const allFail: MockFetchFn = async () => { throw new TypeError("fetch failed — connection refused"); };
@@ -170,6 +191,21 @@ describe("UNGM adapter", () => {
       `Description after removing title must be >60 chars to pass eligibility gate; got ${withoutTitle.length} chars: "${withoutTitle.slice(0, 100)}"`,
     );
   });
+
+  it("retains a listing and marks it when detail enrichment fails", async () => {
+    const mockHtml: MockFetchFn = async (url) => {
+      if (url.includes("view_notice.cfm")) return new Response("Unavailable", { status: 503 });
+      return new Response(`<table><tr><td>
+        <a href="view_notice.cfm?notice_id=99002">Caribbean Research Consultant</a>
+        <span>Barbados procurement services and stakeholder research scope</span>
+      </td></tr></table>`, { status: 200, headers: { "content-type": "text/html" } });
+    };
+    const { UNGMAdapter } = await import("./ungm.js");
+    const results = await withMockFetch(mockHtml, () => new UNGMAdapter().fetchOpportunities());
+    assert.equal(results.length, 1);
+    assert.equal(results[0].rawData?.needsEnrichment, true);
+    assert.match(results[0].description, /Barbados procurement services/);
+  });
 });
 
 describe("Bahamas Gov adapter", () => {
@@ -237,6 +273,24 @@ describe("CARICOM adapter", () => {
       withoutTitle.length > 60,
       `Description after removing title must be >60 chars to pass eligibility gate; got ${withoutTitle.length} chars: "${withoutTitle.slice(0, 100)}"`,
     );
+  });
+
+  it("retains a discovered tender when its detail page is unavailable", async () => {
+    const padding = " ".repeat(600);
+    const mockHtml: MockFetchFn = async (url) => {
+      if (url.includes("/procurement/partial")) return new Response("Unavailable", { status: 503 });
+      if (url === "https://caricom.org/procurement-notices") {
+        return new Response(`<article><a href="/procurement/partial">Regional communications tender</a>
+          CARICOM Secretariat seeks proposals for public awareness and communications services. ${padding}</article>`,
+          { status: 200, headers: { "content-type": "text/html" } });
+      }
+      return new Response("No notices", { status: 200, headers: { "content-type": "text/html" } });
+    };
+    const { CARICOMAdapter } = await import("./caricom.js");
+    const results = await withMockFetch(mockHtml, () => new CARICOMAdapter().fetchOpportunities());
+    assert.equal(results.length, 1);
+    assert.equal(results[0].rawData?.needsEnrichment, true);
+    assert.match(results[0].description, /public awareness and communications/);
   });
 });
 

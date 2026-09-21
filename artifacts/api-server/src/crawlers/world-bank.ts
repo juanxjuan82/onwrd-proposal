@@ -106,7 +106,15 @@ export class WorldBankAdapter implements TenderSourceAdapter {
         seen.add(id);
 
         const countryName = String(n.project_ctry_name ?? "");
-        const rawDesc = String(n.bid_description ?? n.notice_text ?? n.project_name ?? "").slice(0, 600);
+        // Keep the API's genuine scope/notice text (rather than a short project
+        // name synthesis), while bounding storage and downstream processing.
+        const rawDesc = [
+          n.bid_description,
+          n.notice_text,
+          n.project_name,
+          n.notice_type ? `Notice type: ${n.notice_type}` : "",
+          countryName ? `Country: ${countryName}` : "",
+        ].filter(Boolean).map(String).join(" ").replace(/\s+/g, " ").trim().slice(0, 4_000);
         const projectId = String(n.project_id ?? "");
         const noticeId = String(n.id ?? "");
 

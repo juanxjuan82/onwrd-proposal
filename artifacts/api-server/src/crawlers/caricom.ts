@@ -83,6 +83,7 @@ export class CARICOMAdapter implements TenderSourceAdapter {
                sourcePage: url,
                adapterContext: "CARICOM Secretariat regional procurement and public communications.",
                extractionMethod: detail ? `${detail.method}_detail` : page.method,
+               ...(detail ? {} : { needsEnrichment: true }),
                ...(detail ? { renderedMetadata: detail.metadata } : {}),
              },
           });
@@ -102,9 +103,10 @@ export class CARICOMAdapter implements TenderSourceAdapter {
              if (seen.has(key)) continue;
              seen.add(key);
              const detail = await fetchTenderDetailWithOptionalBrowser(link.url, rawTitle, context);
-             // Never turn generic rendered listing text into tender scope.
-             if (!detail) continue;
-             const description = detail.content;
+             // Preserve discovery when detail enrichment is unavailable. The
+             // listing title remains useful, and the flag makes retry explicit.
+             const description = detail?.content ??
+               `CARICOM Secretariat procurement notice: ${rawTitle}`;
              results.push({
                externalId: `caricom-${Buffer.from(rawTitle.slice(0, 40)).toString("base64").slice(0, 16)}`,
                title: rawTitle,
@@ -117,8 +119,8 @@ export class CARICOMAdapter implements TenderSourceAdapter {
                rawData: {
                  sourcePage: url,
                  adapterContext: "CARICOM Secretariat regional procurement and public communications.",
-                 extractionMethod: `${detail.method}_detail`,
-                 renderedMetadata: detail.metadata,
+                extractionMethod: detail ? `${detail.method}_detail` : "rendered_listing",
+                ...(detail ? { renderedMetadata: detail.metadata } : { needsEnrichment: true }),
                },
              });
              if (results.length >= 15) break;

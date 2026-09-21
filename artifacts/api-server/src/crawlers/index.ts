@@ -29,6 +29,8 @@ import {
 } from "./crawl4ai-client.js";
 import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
 import { evaluateCrawlerEligibility } from "../lib/crawler-eligibility.js";
+import { crawlerContentFingerprint, normalizeCrawlerUrl } from "./dedup.js";
+import { tenderSearchProfilesTable } from "@workspace/db";
 
 function getAdapter(adapterType: string): TenderSourceAdapter | null {
   switch (adapterType) {
@@ -68,6 +70,49 @@ export interface SourceAdapterDefinition {
   supportsBrowser: boolean;
   recommended: boolean;
   blockedReason?: string;
+}
+
+interface CrawlerSearchProfile {
+  keywords: string[];
+  excludedKeywords: string[];
+}
+
+function readProfileTerms(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim().toLowerCase()).filter(Boolean)
+      : [];
+  } catch {
+    // A malformed profile must not make a crawl fail or broaden eligibility.
+    return [];
+  }
+}
+
+export function profileMatchesOpportunity(
+  opp: TenderOpportunity,
+  profiles: CrawlerSearchProfile[],
+): { matched: boolean; excluded: string[]; matchedKeywords: string[] } {
+  const corpus = [opp.title, opp.description, opp.organization, opp.country ?? "", opp.sector ?? ""]
+    .join(" ").toLowerCase();
+  const anyKeywords = profiles.some((profile) => profile.keywords.length > 0);
+  const matches = profiles.map((profile) => ({
+    hasKeywords: profile.keywords.length > 0,
+    keywords: profile.keywords.filter((term) => corpus.includes(term)),
+    excluded: profile.excludedKeywords.filter((term) => corpus.includes(term)),
+  }));
+  const matchedKeywords = [...new Set(matches.flatMap((match) => match.keywords))];
+  // Profiles are alternatives (OR), and an exclusion only applies to the
+  // profile whose keywords matched it. An excluded match can therefore still
+  // be accepted by another profile.
+  const matched = matches.some((match) =>
+    ((!anyKeywords && !match.hasKeywords && match.excluded.length === 0 &&
+      profiles.some((profile) => profile.excludedKeywords.length > 0)) ||
+      match.keywords.length > 0) &&
+    match.excluded.length === 0);
+  const excluded = [...new Set(matches.flatMap((match) => match.excluded))];
+  return { matched, excluded, matchedKeywords };
 }
 
 // This is the only catalog exposed to source administration. Keeping it next
@@ -447,6 +492,16 @@ export async function backfillPromotions(): Promise<{ evaluated: number; promote
 // ── Rescore all existing items with keyword engine ──────────────────────────
 export async function rescoreWithKeywords(): Promise<number> {
   const items = await db.select().from(discoveredTendersTable);
+  const persistedProfiles = (await db.select({
+    keywords: tenderSearchProfilesTable.keywords,
+    excludedKeywords: tenderSearchProfilesTable.excludedKeywords,
+  }).from(tenderSearchProfilesTable).where(eq(tenderSearchProfilesTable.active, true)))
+    .map((profile) => ({
+      keywords: readProfileTerms(profile.keywords),
+      excludedKeywords: readProfileTerms(profile.excludedKeywords),
+    }))
+    .filter((profile) => profile.keywords.length > 0 || profile.excludedKeywords.length > 0);
+  const hasProfileKeywords = persistedProfiles.some((profile) => profile.keywords.length > 0);
 
   let count = 0;
   for (const item of items) {
@@ -461,6 +516,17 @@ export async function rescoreWithKeywords(): Promise<number> {
       deadline: item.deadline ? new Date(item.deadline) : undefined,
     };
     const result = keywordScore(opp);
+    const profileMatch = profileMatchesOpportunity(opp, persistedProfiles);
+    if (persistedProfiles.length > 0 &&
+        !profileMatch.matched && (hasProfileKeywords || profileMatch.excluded.length > 0)) {
+      result.fitScore = 0;
+      result.recommendation = "SKIP";
+      result.confidence = "LOW";
+      result.bahamasAdvantageScore = 0;
+      result.reasoning = profileMatch.excluded.length > 0
+        ? `Excluded by search profile keyword: ${profileMatch.excluded[0]} (deterministic profile gate)`
+        : "No active tender search profile keyword matched (deterministic profile gate)";
+    }
     await db.update(discoveredTendersTable).set({
       fitScore: result.fitScore,
       recommendation: result.recommendation,
@@ -477,14 +543,18 @@ export async function rescoreWithKeywords(): Promise<number> {
 }
 
 // ── Main crawl runner ────────────────────────────────────────────────────────
-export async function runCrawler(sourceId?: number): Promise<{
+export interface RunCrawlerResult {
   total: number;
   newItems: number;
   sources: number;
   aiCallCount: number;
   aiFallbackCount: number;
   quotaErrorHit: boolean;
-}> {
+  successfulSources: number[];
+  failedSources: number[];
+}
+
+export async function runCrawler(sourceId?: number): Promise<RunCrawlerResult> {
   // DB-backed overlap prevention — atomic across restarts and instances
   const acquired = await acquireCrawlLock();
   if (!acquired) {
@@ -505,6 +575,28 @@ export async function runCrawler(sourceId?: number): Promise<{
       const definition = getSourceAdapterDefinition(source.adapterType);
       return Boolean(definition && !definition.blockedReason);
     });
+    const persistedProfiles = (await db.select({
+      keywords: tenderSearchProfilesTable.keywords,
+      excludedKeywords: tenderSearchProfilesTable.excludedKeywords,
+    }).from(tenderSearchProfilesTable).where(eq(tenderSearchProfilesTable.active, true)))
+      .map((profile) => ({
+        keywords: readProfileTerms(profile.keywords),
+        excludedKeywords: readProfileTerms(profile.excludedKeywords),
+      }))
+      .filter((profile) => profile.keywords.length > 0 || profile.excludedKeywords.length > 0);
+    const existingDiscoveries = await db.select({
+      id: discoveredTendersTable.id,
+      sourceId: discoveredTendersTable.sourceId,
+      externalId: discoveredTendersTable.externalId,
+      title: discoveredTendersTable.title,
+      organization: discoveredTendersTable.organization,
+      url: discoveredTendersTable.url,
+      deadline: discoveredTendersTable.deadline,
+      description: discoveredTendersTable.description,
+      rawData: discoveredTendersTable.rawData,
+    }).from(discoveredTendersTable);
+    const successfulSources: number[] = [];
+    const failedSources: number[] = [];
 
     let totalFound = 0;
     let totalNew = 0;
@@ -556,36 +648,69 @@ export async function runCrawler(sourceId?: number): Promise<{
         let newCount = 0;
 
         for (const opp of opportunities) {
-          // Deduplicate by externalId
-          if (opp.externalId) {
-            const existing = await db.select({ id: discoveredTendersTable.id })
-              .from(discoveredTendersTable)
-              .where(eq(discoveredTendersTable.externalId, opp.externalId));
-            if (existing.length > 0) continue;
-          }
-
-          // Deduplicate by URL
-          if (opp.url) {
-            const existingByUrl = await db.select({ id: discoveredTendersTable.id })
-              .from(discoveredTendersTable)
-              .where(eq(discoveredTendersTable.url, opp.url));
-            if (existingByUrl.length > 0) continue;
+          const canonicalUrl = opp.url ? normalizeCrawlerUrl(opp.url) : null;
+          const fingerprint = crawlerContentFingerprint({
+            sourceId: source.id,
+            externalId: opp.externalId,
+            title: opp.title,
+            organization: opp.organization,
+            description: opp.description,
+            url: canonicalUrl,
+            deadline: opp.deadline,
+          });
+          const existing = existingDiscoveries.find((item) =>
+            crawlerContentFingerprint(item) === fingerprint ||
+            (canonicalUrl && normalizeCrawlerUrl(item.url ?? "") === canonicalUrl) ||
+            (opp.externalId && item.externalId === opp.externalId));
+          if (existing) {
+            const existingRaw = (existing.rawData && typeof existing.rawData === "object")
+              ? existing.rawData as Record<string, unknown> : {};
+            const needsEnrichment = existingRaw.needsEnrichment === true;
+            const richer = opp.description.trim().length > existing.description.trim().length;
+            if (needsEnrichment && richer) {
+              const refreshedRaw = { ...existingRaw, ...(opp.rawData ?? {}), needsEnrichment: false, crawlerFingerprint: fingerprint };
+              await db.update(discoveredTendersTable).set({
+                title: opp.title,
+                organization: opp.organization,
+                url: canonicalUrl ?? existing.url,
+                description: opp.description,
+                rawData: refreshedRaw,
+                updatedAt: new Date(),
+              }).where(eq(discoveredTendersTable.id, existing.id));
+              existing.description = opp.description;
+              existing.rawData = refreshedRaw;
+            }
+            continue;
           }
 
           const result = keywordScore(opp);
-
+          const profileMatch = profileMatchesOpportunity(opp, persistedProfiles);
+          // No active profiles preserves the historical safe default. Once an
+          // administrator saves profiles, they become a deterministic relevance
+          // gate; exclusions always win over keyword matches.
+          const hasProfileKeywords = persistedProfiles.some((profile) => profile.keywords.length > 0);
+          if (persistedProfiles.length > 0 &&
+              !profileMatch.matched && (hasProfileKeywords || profileMatch.excluded.length > 0)) {
+            result.fitScore = 0;
+            result.recommendation = "SKIP";
+            result.confidence = "LOW";
+            result.bahamasAdvantageScore = 0;
+            result.reasoning = profileMatch.excluded.length > 0
+              ? `Excluded by search profile keyword: ${profileMatch.excluded[0]} (deterministic profile gate)`
+              : "No active tender search profile keyword matched (deterministic profile gate)";
+          }
           const [discovery] = await db.insert(discoveredTendersTable).values({
             sourceId:             source.id,
             externalId:           opp.externalId ?? null,
             title:                opp.title,
             organization:         opp.organization,
-            url:                  opp.url ?? null,
+            url:                  canonicalUrl,
             deadline:             opp.deadline ?? null,
             description:          opp.description,
             country:              opp.country ?? null,
             sector:               opp.sector ?? null,
             valueAmount:          opp.valueAmount ?? null,
-            rawData:              opp.rawData ?? null,
+            rawData:              { ...(opp.rawData ?? {}), crawlerFingerprint: fingerprint },
             status:               "new",
             fitScore:             result.fitScore,
             recommendation:       result.recommendation,
@@ -595,6 +720,12 @@ export async function runCrawler(sourceId?: number): Promise<{
             bahamasAdvantageScore: result.bahamasAdvantageScore,
             confidence:           result.confidence,
           }).returning({ id: discoveredTendersTable.id });
+          existingDiscoveries.push({
+            id: discovery.id, sourceId: source.id, externalId: opp.externalId ?? null,
+            title: opp.title, organization: opp.organization, url: canonicalUrl,
+            deadline: opp.deadline ?? null, description: opp.description,
+            rawData: { ...(opp.rawData ?? {}), crawlerFingerprint: fingerprint },
+          });
 
           // Promote only eligible discoveries to canonical Opportunities.
           // SKIP, boilerplate, title-only, and hard-negative-dominated records
@@ -647,8 +778,10 @@ export async function runCrawler(sourceId?: number): Promise<{
           eq(tenderSourcesTable.id, source.id),
           eq(tenderSourcesTable.configurationVersion, source.configurationVersion),
         ));
+        successfulSources.push(source.id);
 
       } catch (err) {
+        failedSources.push(source.id);
         const failureCode = crawl4aiErrorCode(err);
         diagnostics.push({
           code: failureCode,
@@ -686,6 +819,8 @@ export async function runCrawler(sourceId?: number): Promise<{
       aiCallCount:    0,
       aiFallbackCount: 0,
       quotaErrorHit:  false,
+      successfulSources,
+      failedSources,
     };
   } finally {
     await releaseCrawlLock();

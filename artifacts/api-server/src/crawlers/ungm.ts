@@ -1,4 +1,7 @@
-import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
+import {
+  TenderSourceAdapter, TenderOpportunity, AdapterFetchContext,
+  fetchTenderDetailWithOptionalBrowser, safeFetch, stripHtml,
+} from "./base-adapter.js";
 
 // UNDP Procurement Notices adapter.
 // Uses procurement-notices.undp.org which has server-rendered HTML listings
@@ -7,7 +10,7 @@ import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./
 export class UNGMAdapter implements TenderSourceAdapter {
   adapterType = "ungm";
 
-  async fetchOpportunities(): Promise<TenderOpportunity[]> {
+  async fetchOpportunities(context?: AdapterFetchContext): Promise<TenderOpportunity[]> {
     const results: TenderOpportunity[] = [];
 
     const r = await safeFetch("https://procurement-notices.undp.org/", {
@@ -40,21 +43,21 @@ export class UNGMAdapter implements TenderSourceAdapter {
         seen.add(noticeId);
 
         // Extract surrounding row context for a real description.
-        // The UNDP listing is a table; the ~600 chars around the link include
+        // The UNDP listing is a table; a bounded wider window around the link includes
         // other columns: country, procurement type, closing date, agency, etc.
         // Stripping HTML from that window produces a description that has
         // genuine content rather than a template stub.
         const linkPos = html.indexOf(`notice_id=${noticeId}`);
         let description = `UNDP procurement notice: ${rawTitle}`;
         if (linkPos > 0) {
-          const windowStart = Math.max(0, linkPos - 300);
-          const windowEnd = Math.min(html.length, linkPos + 500);
-          const contextText = stripHtml(html.slice(windowStart, windowEnd), 600)
+          const windowStart = Math.max(0, linkPos - 500);
+          const windowEnd = Math.min(html.length, linkPos + 1_000);
+          const contextText = stripHtml(html.slice(windowStart, windowEnd), 1_000)
             .replace(/\s+/g, " ")
             .trim();
           // Only use the context if it adds real content beyond repeating the title
-          if (contextText.length > rawTitle.length + 80) {
-            description = contextText.slice(0, 500);
+          if (contextText.length > rawTitle.length + 40) {
+            description = contextText.slice(0, 1_000);
           }
         }
 
@@ -70,14 +73,21 @@ export class UNGMAdapter implements TenderSourceAdapter {
           corpus.includes("belize")    ? "Belize" :
           "International";
 
+        const url = `https://procurement-notices.undp.org/${path}`;
+        const detail = await fetchTenderDetailWithOptionalBrowser(url, rawTitle, context);
         results.push({
           externalId: `undp-${noticeId}`,
           title: rawTitle,
           organization: "UNDP",
-          url: `https://procurement-notices.undp.org/${path}`,
-          description,
+          url,
+          description: detail?.content ?? description,
           country,
           sector: "United Nations",
+          rawData: {
+            listingContext: description,
+            extractionMethod: detail ? `${detail.method}_detail` : "listing_context",
+            ...(detail ? { renderedMetadata: detail.metadata } : { needsEnrichment: true }),
+          },
         });
 
         if (results.length >= 30) break;

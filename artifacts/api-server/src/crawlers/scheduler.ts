@@ -1,4 +1,3 @@
-import cron from "node-cron";
 import { runCrawler, seedDefaultSources, seedDefaultSearchProfiles } from "./index.js";
 import { Resend } from "resend";
 import { db } from "@workspace/db";
@@ -10,6 +9,24 @@ import {
   shouldUpgradeLegacyRecipients,
 } from "../lib/digest-settings.js";
 import { filterActionableDigestTenders } from "../lib/digest-eligibility.js";
+
+export type DigestSendResult =
+  | { status: "sent"; recipientCount: number; actionableCount: number }
+  | { status: "skipped"; reason: "missing_api_key" | "disabled" | "no_recipients" | "no_actionable_records" };
+
+export type ScheduledCrawlResult = Awaited<ReturnType<typeof runCrawler>> & {
+  successfulSources: string[];
+  failedSources: string[];
+};
+
+export function escapeHtml(value: unknown): string {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
 
 async function getDigestRecipients(): Promise<{ emails: string[]; enabled: boolean }> {
   try {
@@ -60,12 +77,13 @@ export function getDigestAppBase(): string {
     : "";
 }
 
-export async function sendDigestEmail(_newCount: number): Promise<void> {
+export async function sendDigestEmail(_newCount: number): Promise<DigestSendResult> {
   const apiKey = process.env.RESEND_API_KEY;
-  if (!apiKey) return;
+  if (!apiKey) return { status: "skipped", reason: "missing_api_key" };
 
   const { emails, enabled } = await getDigestRecipients();
-  if (!enabled || emails.length === 0) return;
+  if (!enabled) return { status: "skipped", reason: "disabled" };
+  if (emails.length === 0) return { status: "skipped", reason: "no_recipients" };
 
   try {
     // All current actionable opportunities — not limited to last 24 h
@@ -85,7 +103,7 @@ export async function sendDigestEmail(_newCount: number): Promise<void> {
 
     if (actionableTenders.length === 0) {
       console.log("[digest email] No opportunities to report — skipping send.");
-      return;
+      return { status: "skipped", reason: "no_actionable_records" };
     }
 
     const sortBahamasFirst = (list: typeof allTenders) =>
@@ -123,14 +141,14 @@ export async function sendDigestEmail(_newCount: number): Promise<void> {
           : "";
         return `<tr style="${rowBg}">
             <td style="padding:10px 8px;border-bottom:1px solid #1f1f1f">
-              ${flagFor(t.country)}<strong style="color:${titleColor}">${t.title}</strong>
+              ${flagFor(t.country)}<strong style="color:${titleColor}">${escapeHtml(t.title)}</strong>
               ${isBahamas ? '<span style="background:#14532d;color:#4ade80;font-size:10px;padding:1px 6px;border-radius:999px;margin-left:6px">Bahamas</span>' : ""}
             </td>
-            <td style="padding:10px 8px;border-bottom:1px solid #1f1f1f;color:#aaa;font-size:13px">${t.organization ?? "–"}</td>
+            <td style="padding:10px 8px;border-bottom:1px solid #1f1f1f;color:#aaa;font-size:13px">${escapeHtml(t.organization ?? "–")}</td>
             <td style="padding:10px 8px;border-bottom:1px solid #1f1f1f;text-align:center">
-              <span style="background:#1e3a1e;color:#4ade80;padding:2px 8px;border-radius:999px;font-size:13px;font-weight:600">${t.fitScore ?? "–"}</span>
+              <span style="background:#1e3a1e;color:#4ade80;padding:2px 8px;border-radius:999px;font-size:13px;font-weight:600">${escapeHtml(t.fitScore ?? "–")}</span>
             </td>
-            <td style="padding:10px 8px;border-bottom:1px solid #1f1f1f;color:#aaa;font-size:13px">${deadlineStr}${urgency}</td>
+            <td style="padding:10px 8px;border-bottom:1px solid #1f1f1f;color:#aaa;font-size:13px">${escapeHtml(deadlineStr)}${urgency}</td>
           </tr>`;
       }).join("");
 
@@ -146,7 +164,7 @@ export async function sendDigestEmail(_newCount: number): Promise<void> {
 
   <div style="padding:32px">
     <h2 style="color:#fff;margin:0 0 4px">Tender Intelligence Digest</h2>
-    <p style="color:#666;margin:0 0 24px;font-size:14px">${today}</p>
+     <p style="color:#666;margin:0 0 24px;font-size:14px">${escapeHtml(today)}</p>
 
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:28px">
       <div style="background:#1e3a1e;border:1px solid #166534;border-radius:10px;padding:12px 20px;min-width:110px;text-align:center">
@@ -190,7 +208,7 @@ export async function sendDigestEmail(_newCount: number): Promise<void> {
 
     ${appBase ? `
     <div style="margin-top:8px;margin-bottom:32px;text-align:center">
-      <a href="${inboxUrl}" style="display:inline-block;background:#fff;color:#000;font-weight:600;font-size:14px;padding:12px 28px;border-radius:6px;text-decoration:none">Open Tender Inbox →</a>
+        <a href="${escapeHtml(inboxUrl)}" style="display:inline-block;background:#fff;color:#000;font-weight:600;font-size:14px;padding:12px 28px;border-radius:6px;text-decoration:none">Open Tender Inbox →</a>
     </div>` : ""}
 
     <div style="background:#111;border:1px solid #1f1f1f;border-radius:10px;padding:16px 20px;font-size:13px;color:#666">
@@ -215,54 +233,82 @@ export async function sendDigestEmail(_newCount: number): Promise<void> {
     });
 
     if (error) {
-      console.error("[digest email] Resend error:", error);
+      throw new Error(`Resend error: ${JSON.stringify(error)}`);
     } else {
       console.log(`[digest email] Sent to ${emails.length} recipient(s): ${emails.join(", ")}`);
+      return { status: "sent", recipientCount: emails.length, actionableCount: actionableTenders.length };
     }
   } catch (err) {
     console.error("[digest email] failed:", err);
+    throw err;
   }
 }
 
-export async function startScheduler(): Promise<void> {
+/**
+ * Run the production crawl exactly once. The crawler itself owns the
+ * database-backed overlap lock, so retries/deployments cannot overlap.
+ */
+export async function runScheduledCrawl(): Promise<ScheduledCrawlResult> {
   await seedDefaultSources();
   await seedDefaultSearchProfiles();
+  return await runCrawler() as ScheduledCrawlResult;
+}
 
-  cron.schedule("0 8 * * 1-5", async () => {
-    console.log("[tender-cron] Starting daily crawl…");
+/** Mark intake drafts abandoned after 24 hours. Intended for its own hourly job. */
+export async function abandonExpiredDrafts(): Promise<number> {
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const abandoned = await db
+    .update(intakeDraftsTable)
+    .set({ status: "draft_abandoned", updatedAt: new Date() })
+    .where(and(eq(intakeDraftsTable.status, "draft"), lt(intakeDraftsTable.updatedAt, cutoff)))
+    .returning({ id: intakeDraftsTable.id });
+  return abandoned.length;
+}
+
+/**
+ * Compatibility safety net for deployments created before the worker is
+ * configured. It is deliberately opt-out only through the dedicated-worker
+ * flag, and is never started in development.
+ */
+export function startFallbackScheduler(): void {
+  if (process.env.NODE_ENV !== "production" || process.env.DEDICATED_CRAWLER_WORKER === "true") {
+    return;
+  }
+  const run = async () => {
     try {
-      const result = await runCrawler();
-      console.log(
-        `[tender-cron] Done. ${result.newItems} new. ` +
-        `AI calls: ${result.aiCallCount}, fallbacks: ${result.aiFallbackCount}` +
-        `${result.quotaErrorHit ? " ⚠ quota error — circuit opened" : ""}`
-      );
-      await sendDigestEmail(result.newItems);
-    } catch (err) {
-      if (err instanceof Error && err.message.includes("already in progress")) {
-        console.warn("[tender-cron] Skipped — crawl already running.");
-      } else {
-        console.error("[tender-cron] Crawl failed:", err);
+      const result = await runScheduledCrawl();
+      console.log(JSON.stringify({ event: "fallback_crawler_completed", ...result }));
+      if (result.successfulSources.length === 0) {
+        throw new Error(`No crawler source succeeded; failed=${result.failedSources.join(",") || "unknown"}`);
       }
+      const digest = await sendDigestEmail(result.newItems);
+      console.log(JSON.stringify({ event: "fallback_digest_finished", ...digest }));
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: "fallback_crawler_failed",
+        error: error instanceof Error ? error.message : String(error),
+      }));
     }
-  });
-
-  // Hourly: mark intake drafts as abandoned if not converted within 24 hours
-  cron.schedule("0 * * * *", async () => {
-    try {
-      const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
-      const abandoned = await db
-        .update(intakeDraftsTable)
-        .set({ status: "draft_abandoned", updatedAt: new Date() })
-        .where(and(eq(intakeDraftsTable.status, "draft"), lt(intakeDraftsTable.updatedAt, cutoff)))
-        .returning({ id: intakeDraftsTable.id });
-      if (abandoned.length > 0) {
-        console.log(`[intake-cron] Marked ${abandoned.length} draft(s) as abandoned.`);
-      }
-    } catch (err) {
-      console.error("[intake-cron] Failed to mark abandoned drafts:", err);
-    }
-  });
-
-  console.log("[tender-cron] Scheduler started. Daily crawl at 08:00 weekdays (Mon–Fri). Hourly abandoned-draft sweep active.");
+  };
+  const cleanup = () => abandonExpiredDrafts()
+    .then((count) => console.log(JSON.stringify({ event: "fallback_abandoned_drafts_cleaned", count })))
+    .catch((error) => console.error(JSON.stringify({
+      event: "fallback_abandoned_drafts_failed",
+      error: error instanceof Error ? error.message : String(error),
+    })));
+  // Preserve the old weekday 08:00 crawl and hourly cleanup cadence without
+  // introducing a second scheduler dependency.
+  const now = new Date();
+  const next = new Date(now);
+  next.setHours(8, 0, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  const delay = next.getTime() - now.getTime();
+  setTimeout(() => {
+    if (new Date().getDay() >= 1 && new Date().getDay() <= 5) void run();
+    setInterval(() => {
+      if (new Date().getDay() >= 1 && new Date().getDay() <= 5) void run();
+    }, 24 * 60 * 60 * 1000);
+  }, delay);
+  setInterval(() => void cleanup(), 60 * 60 * 1000);
+  console.warn("[tender-fallback] Dedicated worker is not enabled; in-process production fallback active.");
 }
