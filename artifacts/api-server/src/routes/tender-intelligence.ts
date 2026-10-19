@@ -7,45 +7,223 @@ import {
   tenderSearchProfilesTable,
   tenderDigestSettingsTable,
 } from "@workspace/db";
-import { eq, desc, and, gte } from "drizzle-orm";
-import { runCrawler, rescoreWithKeywords, backfillPromotions, isCrawlRunning } from "../crawlers/index.js";
+import { eq, desc, and, gte, inArray, isNotNull, count, sql } from "drizzle-orm";
+import {
+  runCrawler,
+  rescoreWithKeywords,
+  backfillPromotions,
+  isCrawlRunning,
+  SOURCE_ADAPTER_CATALOG,
+  getSourceAdapterDefinition,
+  getCrawlBlockReason,
+  requiresControlledPilot,
+  validateSourceConfiguration,
+} from "../crawlers/index.js";
 import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
+import {
+  DEFAULT_DIGEST_RECIPIENTS,
+  parseDigestRecipients,
+  shouldUpgradeLegacyRecipients,
+  validateDigestRecipients,
+} from "../lib/digest-settings.js";
+import { filterActionableDigestTenders } from "../lib/digest-eligibility.js";
+import { evaluateCrawlerEligibility } from "../lib/crawler-eligibility.js";
+import { deriveSourceHealth } from "../lib/source-health.js";
 
 const router = Router();
 
 // ── Tender Sources ─────────────────────────────────────────────────────────
 router.get("/tender-sources", async (req, res) => {
   const sources = await db.select().from(tenderSourcesTable).orderBy(tenderSourcesTable.name);
-  res.json(sources);
+  const runs = await db.select().from(crawlerRunsTable).orderBy(desc(crawlerRunsTable.startedAt));
+  const runsBySource = new Map<number, typeof runs>();
+  for (const run of runs) {
+    const sourceRuns = runsBySource.get(run.sourceId) ?? [];
+    if (sourceRuns.length < 10) sourceRuns.push(run);
+    runsBySource.set(run.sourceId, sourceRuns);
+  }
+  res.json(sources.map((source) => {
+    const sourceRuns = runsBySource.get(source.id) ?? [];
+    const definition = getSourceAdapterDefinition(source.adapterType);
+    const health = deriveSourceHealth(source, sourceRuns);
+    return {
+      ...source,
+      ...health,
+      adapterSupported: Boolean(definition),
+      activationBlocked: definition?.blockedReason ?? null,
+    };
+  }));
 });
 
 router.post("/tender-sources", async (req, res) => {
-  const { name, sourceType, url, adapterType } = req.body as {
-    name: string; sourceType: string; url: string; adapterType: string;
+  const { name, sourceType, url, adapterType, browserEnabled, approvedDomains } = req.body as {
+    name: string;
+    sourceType: string;
+    url: string;
+    adapterType: string;
+    browserEnabled?: boolean;
+    approvedDomains?: string[];
   };
   if (!name || !url || !adapterType) {
     res.status(400).json({ error: "name, url, adapterType required" });
     return;
   }
+  const validated = validateSourceConfiguration({ adapterType, url, approvedDomains });
+  if ("error" in validated) {
+    res.status(400).json({ error: validated.error });
+    return;
+  }
   const [created] = await db.insert(tenderSourcesTable).values({
-    name, sourceType: sourceType ?? "other", url, adapterType, active: true,
+    name,
+    sourceType: sourceType ?? validated.definition.sourceType,
+    url,
+    adapterType,
+    // New sources must prove they work before they become operational.
+    active: false,
+    browserEnabled: browserEnabled === true && validated.definition.supportsBrowser,
+    approvedDomains: validated.domains,
   }).returning();
-  res.status(201).json(created);
+  res.status(201).json({ ...created, message: "Source saved inactive. Run a test crawl with usable records before activating it." });
 });
 
 router.patch("/tender-sources/:id", async (req, res) => {
   const id = Number(req.params.id);
+  const [current] = await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.id, id));
+  if (!current) { res.status(404).json({ error: "Not found" }); return; }
+  const body = req.body as Record<string, unknown>;
+  const adapterType = typeof body.adapterType === "string" ? body.adapterType : current.adapterType;
+  const url = typeof body.url === "string" ? body.url : current.url;
+  const approvedDomains = body.approvedDomains !== undefined
+    ? body.approvedDomains
+    : body.url !== undefined || body.adapterType !== undefined
+      ? undefined
+      : current.approvedDomains;
+  const validated = validateSourceConfiguration({ adapterType, url, approvedDomains });
+  if ("error" in validated) {
+    res.status(400).json({ error: validated.error });
+    return;
+  }
   const updates: Record<string, unknown> = { updatedAt: new Date() };
-  if (req.body.active !== undefined) updates.active = req.body.active;
-  if (req.body.name) updates.name = req.body.name;
-  const [updated] = await db.update(tenderSourcesTable).set(updates).where(eq(tenderSourcesTable.id, id)).returning();
-  if (!updated) { res.status(404).json({ error: "Not found" }); return; }
+  const nextBrowserEnabled = body.browserEnabled !== undefined
+    ? body.browserEnabled === true && validated.definition.supportsBrowser
+    : current.browserEnabled;
+  const domainsChanged = body.approvedDomains !== undefined || body.url !== undefined || body.adapterType !== undefined
+    ? JSON.stringify(validated.domains) !== JSON.stringify(current.approvedDomains ?? [])
+    : false;
+  const configChanged =
+    adapterType !== current.adapterType ||
+    url !== current.url ||
+    domainsChanged ||
+    nextBrowserEnabled !== current.browserEnabled;
+  const currentBlockReason = getCrawlBlockReason(current.adapterType);
+  const requestedBlockReason = getCrawlBlockReason(adapterType);
+  if (configChanged && body.active === true) {
+    res.status(422).json({
+      error: "Save configuration changes while inactive, run a successful test crawl with usable records, then activate the source.",
+      code: "configuration_requires_retest",
+    });
+    return;
+  }
+  if (configChanged || validated.definition.blockedReason) {
+    updates.active = false;
+  }
+  if (configChanged) {
+    updates.configurationVersion = sql`${tenderSourcesTable.configurationVersion} + 1`;
+  }
+  if (body.active !== undefined) {
+    if (typeof body.active !== "boolean") {
+      res.status(400).json({ error: "active must be a boolean" });
+      return;
+    }
+    if (body.active && (requestedBlockReason || (adapterType === current.adapterType && currentBlockReason))) {
+      res.status(422).json({
+        error: requestedBlockReason ?? currentBlockReason,
+        code: "activation_blocked",
+      });
+      return;
+    }
+    if (body.active && !current.active) {
+      const [proof] = await db.select({ id: crawlerRunsTable.id })
+        .from(crawlerRunsTable)
+        .where(and(
+          eq(crawlerRunsTable.sourceId, id),
+          eq(crawlerRunsTable.sourceConfigurationVersion, current.configurationVersion),
+          eq(crawlerRunsTable.status, "success"),
+          gte(crawlerRunsTable.itemsNew, 1),
+        ))
+        .orderBy(desc(crawlerRunsTable.completedAt))
+        .limit(1);
+      if (!proof) {
+        if (requiresControlledPilot(adapterType)) {
+          res.status(422).json({
+            error: "Activation requires a successful, versioned, source-specific pilot with at least one usable new record. Run the pilot while inactive for the current configuration version, then try again.",
+            code: "activation_requires_versioned_pilot",
+          });
+          return;
+        }
+        res.status(422).json({
+          error: "Activation requires a successful test crawl that persists at least one usable new record. Run this source while inactive, then try again.",
+          code: "activation_requires_test",
+        });
+        return;
+      }
+    }
+    updates.active = body.active;
+  }
+  if (typeof body.name === "string" && body.name.trim()) updates.name = body.name.trim();
+  if (typeof body.sourceType === "string" && body.sourceType.trim()) updates.sourceType = body.sourceType.trim();
+  if (body.adapterType !== undefined) updates.adapterType = adapterType;
+  if (body.url !== undefined) updates.url = url;
+  if (body.browserEnabled !== undefined) {
+    if (typeof body.browserEnabled !== "boolean") {
+      res.status(400).json({ error: "browserEnabled must be a boolean" });
+      return;
+    }
+    updates.browserEnabled = nextBrowserEnabled;
+  }
+  if (body.approvedDomains !== undefined || body.url !== undefined) updates.approvedDomains = validated.domains;
+  const [updated] = await db
+    .update(tenderSourcesTable)
+    .set(updates)
+    .where(and(
+      eq(tenderSourcesTable.id, id),
+      eq(tenderSourcesTable.configurationVersion, current.configurationVersion),
+    ))
+    .returning();
+  if (!updated) {
+    res.status(409).json({
+      error: "This source changed while your update was being saved. Review the latest configuration and try again.",
+      code: "source_configuration_conflict",
+    });
+    return;
+  }
   res.json(updated);
 });
 
 router.delete("/tender-sources/:id", async (req, res) => {
-  await db.delete(tenderSourcesTable).where(eq(tenderSourcesTable.id, Number(req.params.id)));
+  const id = Number(req.params.id);
+  const [source] = await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.id, id));
+  if (!source) { res.status(404).json({ error: "Not found" }); return; }
+  if (req.body?.confirm !== source.name) {
+    res.status(400).json({ error: `Permanent removal requires confirm to match "${source.name}".` });
+    return;
+  }
+  const [runCount] = await db.select({ value: count() }).from(crawlerRunsTable).where(eq(crawlerRunsTable.sourceId, id));
+  const [tenderCount] = await db.select({ value: count() }).from(discoveredTendersTable).where(eq(discoveredTendersTable.sourceId, id));
+  if (Number(runCount?.value ?? 0) > 0 || Number(tenderCount?.value ?? 0) > 0) {
+    res.status(409).json({
+      error: "This source has crawl history and cannot be permanently removed. Deactivate it instead to preserve historical records.",
+      runs: Number(runCount?.value ?? 0),
+      records: Number(tenderCount?.value ?? 0),
+    });
+    return;
+  }
+  await db.delete(tenderSourcesTable).where(eq(tenderSourcesTable.id, id));
   res.status(204).end();
+});
+
+router.get("/tender-source-adapters", (_req, res) => {
+  res.json(SOURCE_ADAPTER_CATALOG);
 });
 
 // ── Re-score existing items with keyword fallback ──────────────────────────
@@ -82,6 +260,25 @@ router.post("/tender-intelligence/crawl", async (req, res) => {
   }
 
   const sourceId = req.body?.sourceId ? Number(req.body.sourceId) : undefined;
+  if (sourceId) {
+    const [source] = await db
+      .select({ adapterType: tenderSourcesTable.adapterType })
+      .from(tenderSourcesTable)
+      .where(eq(tenderSourcesTable.id, sourceId));
+    if (!source) {
+      res.status(404).json({ error: "Source not found." });
+      return;
+    }
+    const definition = getSourceAdapterDefinition(source.adapterType);
+    if (!definition) {
+      res.status(422).json({ error: "This source uses an unsupported crawler adapter." });
+      return;
+    }
+    if (definition.blockedReason) {
+      res.status(422).json({ error: definition.blockedReason, code: "source_blocked" });
+      return;
+    }
+  }
   res.json({ message: "Crawl started in background" });
 
   void runCrawler(sourceId).then((result) => {
@@ -106,6 +303,33 @@ router.get("/crawler-runs", async (req, res) => {
 });
 
 // ── Discovered Tenders ─────────────────────────────────────────────────────
+router.get("/discovered-tenders/overview", async (_req, res) => {
+  const [lastCrawl] = await db
+    .select({
+      id: crawlerRunsTable.id,
+      startedAt: crawlerRunsTable.startedAt,
+      completedAt: crawlerRunsTable.completedAt,
+      status: crawlerRunsTable.status,
+      itemsFound: crawlerRunsTable.itemsFound,
+      itemsNew: crawlerRunsTable.itemsNew,
+      errorMessage: crawlerRunsTable.errorMessage,
+    })
+    .from(crawlerRunsTable)
+    .orderBy(desc(crawlerRunsTable.startedAt))
+    .limit(1);
+
+  const [latestTender] = await db
+    .select({ createdAt: discoveredTendersTable.createdAt })
+    .from(discoveredTendersTable)
+    .orderBy(desc(discoveredTendersTable.createdAt))
+    .limit(1);
+
+  res.json({
+    lastCrawl: lastCrawl ?? null,
+    latestTenderAddedAt: latestTender?.createdAt ?? null,
+  });
+});
+
 router.get("/discovered-tenders", async (req, res) => {
   const status = req.query.status as string | undefined;
   const minScore = req.query.minScore ? Number(req.query.minScore) : undefined;
@@ -155,6 +379,33 @@ router.post("/discovered-tenders/:id/promote", async (req, res) => {
   const id = Number(req.params.id);
   if (isNaN(id)) { res.status(400).json({ error: "Invalid id" }); return; }
   try {
+    const [discovery] = await db
+      .select({
+        title: discoveredTendersTable.title,
+        description: discoveredTendersTable.description,
+        recommendation: discoveredTendersTable.recommendation,
+        deadline: discoveredTendersTable.deadline,
+      })
+      .from(discoveredTendersTable)
+      .where(eq(discoveredTendersTable.id, id));
+    if (!discovery) {
+      res.status(404).json({ error: "Discovered tender not found" });
+      return;
+    }
+    const eligibility = evaluateCrawlerEligibility({
+      title: discovery.title,
+      description: discovery.description,
+      recommendation: discovery.recommendation ?? "SKIP",
+      deadline: discovery.deadline,
+    });
+    if (!eligibility.eligible) {
+      res.status(422).json({
+        error: "This discovery is not eligible for an actionable opportunity",
+        code: "ineligible_discovery",
+        reasons: eligibility.rejectionReasons,
+      });
+      return;
+    }
     const result = await promoteDiscoveredTender(id);
     res.json(result);
   } catch (err) {
@@ -212,9 +463,20 @@ router.delete("/tender-search-profiles/:id", async (req, res) => {
 // ── Digest Settings ────────────────────────────────────────────────────────
 async function getOrCreateDigestSettings() {
   const [existing] = await db.select().from(tenderDigestSettingsTable).limit(1);
-  if (existing) return existing;
+  if (existing) {
+    const emails = parseDigestRecipients(existing.emails);
+    if (shouldUpgradeLegacyRecipients(emails)) {
+      const [updated] = await db
+        .update(tenderDigestSettingsTable)
+        .set({ emails: JSON.stringify(DEFAULT_DIGEST_RECIPIENTS), updatedAt: new Date() })
+        .where(eq(tenderDigestSettingsTable.id, existing.id))
+        .returning();
+      return updated;
+    }
+    return existing;
+  }
   const [created] = await db.insert(tenderDigestSettingsTable).values({
-    emails: JSON.stringify(["j.aymes@onwrdadvisors.com"]),
+    emails: JSON.stringify(DEFAULT_DIGEST_RECIPIENTS),
     enabled: true,
   }).returning();
   return created;
@@ -222,7 +484,7 @@ async function getOrCreateDigestSettings() {
 
 router.get("/tender-digest-settings", async (_req, res) => {
   const settings = await getOrCreateDigestSettings();
-  res.json({ ...settings, emails: JSON.parse(settings.emails) });
+  res.json({ ...settings, emails: parseDigestRecipients(settings.emails) });
 });
 
 router.post("/tender-digest-settings/test", async (req, res) => {
@@ -232,7 +494,7 @@ router.post("/tender-digest-settings/test", async (req, res) => {
     return;
   }
   const settings = await getOrCreateDigestSettings();
-  const emails: string[] = JSON.parse(settings.emails);
+  const emails = parseDigestRecipients(settings.emails);
   if (emails.length === 0) {
     res.status(400).json({ error: "No recipients configured. Add at least one email address first." });
     return;
@@ -242,11 +504,16 @@ router.post("/tender-digest-settings/test", async (req, res) => {
     const allTenders = await db
       .select()
       .from(discoveredTendersTable)
-      .where(eq(discoveredTendersTable.status, "new"))
+      .where(and(
+        eq(discoveredTendersTable.status, "new"),
+        isNotNull(discoveredTendersTable.opportunityId),
+        inArray(discoveredTendersTable.recommendation, ["PURSUE", "CONSIDER"]),
+      ))
       .orderBy(desc(discoveredTendersTable.fitScore));
+    const actionableTenders = filterActionableDigestTenders(allTenders);
 
-    const pursue = allTenders.filter((t) => t.recommendation === "PURSUE");
-    const consider = allTenders.filter((t) => t.recommendation === "CONSIDER");
+    const pursue = actionableTenders.filter((t) => t.recommendation === "PURSUE");
+    const consider = actionableTenders.filter((t) => t.recommendation === "CONSIDER");
 
     // Sort: Bahamas first, then by fitScore desc
     const sortBahamasFirst = (list: typeof allTenders) =>
@@ -263,7 +530,7 @@ router.post("/tender-digest-settings/test", async (req, res) => {
     const isBahamasEntry = (t: (typeof allTenders)[number]) =>
       (t.country ?? "").toLowerCase().includes("bahamas");
     const bahamasCount = [...pursue, ...consider].filter(isBahamasEntry).length;
-    const bahamasTracked = allTenders.filter(isBahamasEntry).length;
+    const bahamasTracked = actionableTenders.filter(isBahamasEntry).length;
 
     const { Resend } = await import("resend");
     const resend = new Resend(apiKey);
@@ -408,7 +675,17 @@ router.put("/tender-digest-settings", async (req, res) => {
   const { emails, enabled } = req.body as { emails?: string[]; enabled?: boolean };
   const settings = await getOrCreateDigestSettings();
   const updates: Record<string, unknown> = { updatedAt: new Date() };
-  if (Array.isArray(emails)) updates.emails = JSON.stringify(emails.map((e: string) => e.trim()).filter(Boolean));
+  if (emails !== undefined) {
+    const validation = validateDigestRecipients(emails);
+    if (validation.invalid.length > 0) {
+      res.status(400).json({
+        error: "One or more recipient email addresses are invalid",
+        invalid: validation.invalid,
+      });
+      return;
+    }
+    updates.emails = JSON.stringify(validation.emails);
+  }
   if (enabled !== undefined) updates.enabled = enabled;
   const [updated] = await db
     .update(tenderDigestSettingsTable)

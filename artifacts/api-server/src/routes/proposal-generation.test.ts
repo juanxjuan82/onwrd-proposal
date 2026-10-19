@@ -479,28 +479,38 @@ describe("§B-1 concurrent generate-proposal → one AI invocation", () => {
     const tenderId = await _createTestTender();
     let aiCallCount = 0;
     let resolveAi!: () => void;
+    let releaseAi!: () => void;
     const aiCalled = new Promise<void>((resolve) => { resolveAi = resolve; });
+    const aiRelease = new Promise<void>((resolve) => { releaseAi = resolve; });
     __setInvokeAISpy(async () => {
       aiCallCount++;
       resolveAi();
+      await aiRelease;
       return { content: JSON.stringify({ sections: [] }), model: "test", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
     });
     const send = () => fetch(`${_baseUrl}/api/opportunities/${tenderId}/generate-proposal`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
     });
     try {
-      const [r1, r2] = await Promise.all([send(), send()]);
+      const firstResponsePromise = send();
+      await Promise.race([
+        aiCalled,
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error("AI spy not called within 5 s")), 5000)),
+      ]);
+      const r2 = await send();
+      releaseAi();
+      const r1 = await firstResponsePromise;
       const statuses = [r1.status, r2.status].sort((a, b) => a - b);
       assert.deepStrictEqual(statuses, [200, 409], "One request must get 200 and the other 409");
       const rejected = [r1, r2].find((r) => r.status === 409)!;
       const body = await rejected.json() as { code?: string };
       assert.equal(body.code, "generation_in_progress", "409 must carry code: generation_in_progress");
-      await Promise.race([
-        aiCalled,
-        new Promise<void>((_, reject) => setTimeout(() => reject(new Error("AI spy not called within 5 s")), 5000)),
-      ]);
       assert.equal(aiCallCount, 1, "AI must be invoked exactly once across both requests");
-    } finally { __setInvokeAISpy(null); await _cleanupTestTender(tenderId); }
+    } finally {
+      releaseAi();
+      __setInvokeAISpy(null);
+      await _cleanupTestTender(tenderId);
+    }
   });
 
   it("both requests resolve the same canonical Proposal id", async () => {
