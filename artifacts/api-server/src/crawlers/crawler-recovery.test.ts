@@ -143,13 +143,16 @@ describe("crawler recovery safety", () => {
     assert.doesNotMatch(linked, /description:|deadline:|recommendation:|status:|opportunityId:/);
   });
 
-  it("keeps robots-blocked and controlled-pilot sources inactive without their own proof", () => {
+  it("keeps blocked and pilot-gated sources inactive without their own proof", () => {
     const crawler = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
     const routes = readFileSync(new URL("../routes/tender-intelligence.ts", import.meta.url), "utf8");
+    const caricom = readFileSync(new URL("./caricom.ts", import.meta.url), "utf8");
     assert.match(crawler, /CONTROLLED_CRAWL_ADAPTERS\s*=\s*\["ungm",\s*"cdb",\s*"caricom"\]/);
+    assert.match(crawler, /inArray\(tenderSourcesTable\.adapterType,\s*\["cdb",\s*"caricom"\]\)/);
     assert.match(crawler, /\.set\(\{\s*active:\s*false/);
     assert.match(crawler, /UNDP procurement notices are blocked because robots\.txt/);
-    assert.match(crawler, /CARICOM procurement paths are blocked because robots\.txt/);
+    assert.match(caricom, /robotsPathAllowed\(robots\.text/);
+    assert.match(caricom, /CARICOM robots\.txt disallows the procurement-notices listing path/);
     assert.match(routes, /getCrawlBlockReason\(current\.adapterType\)/);
     assert.match(routes, /activation_requires_versioned_pilot/);
     assert.match(routes, /versioned, source-specific pilot/);

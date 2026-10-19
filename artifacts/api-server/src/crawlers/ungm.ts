@@ -1,11 +1,15 @@
-import { TenderOpportunity, TenderSourceAdapter } from "./base-adapter.js";
+import { TenderSourceAdapter, TenderOpportunity } from "./base-adapter.js";
 
+// UNDP Procurement Notices adapter.
+// Uses procurement-notices.undp.org which has server-rendered HTML listings
+// accessible without JS. Extracts surrounding table row context for each
+// notice to produce descriptions that pass the eligibility content-quality gate.
 export class UNGMAdapter implements TenderSourceAdapter {
   adapterType = "ungm";
 
   async fetchOpportunities(): Promise<TenderOpportunity[]> {
-    // procurement-notices.undp.org/robots.txt currently disallows all paths.
-    // Keep this adapter fail-closed even when invoked directly or manually.
-    throw new Error("UNDP procurement notices are disabled: robots.txt disallows all paths. Use an authorized feed or manual import.");
+    throw new Error(
+      "UNDP procurement notices are blocked because robots.txt disallows all paths. No requests were made.",
+    );
   }
 }

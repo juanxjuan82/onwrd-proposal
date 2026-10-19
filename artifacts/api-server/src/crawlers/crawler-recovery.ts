@@ -24,8 +24,12 @@ const CRAWLER_EVIDENCE_KEYS = [
   "descriptionStatus",
   "documentStatus",
   "documentExtraction",
+  "documentUrls",
   "needsEnrichment",
+  "crawlerFingerprint",
   "crawlerManagedSnapshot",
+  "adapterContext",
+  "renderedMetadata",
 ] as const;
 
 export function isIncompleteDiscovery(existing: ExistingDiscovery): boolean {
