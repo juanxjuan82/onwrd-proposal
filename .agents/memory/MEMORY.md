@@ -33,3 +33,5 @@
 - [Compliance traceability lifecycle](compliance-traceability-lifecycle.md) — requirement coverage is atomic, edit-invalidated, live-evidence-checked, and only fresh documented overrides can waive issues
 - [Deterministic knowledge evidence](deterministic-knowledge-evidence.md) — requirements alone select approved evidence; AI writes prose but never chooses sources
 - [Source activation proof](source-activation-proof.md) — activation evidence must be configuration-versioned and committed with compare-and-set semantics
+- [PDF extraction test seam](pdf-extraction-tests.md) — inject fetch and PDF parsing in unit tests; validate the real parser with an approved live document
+- [PR1 acceptance bar](crawler-pr1-acceptance.md) — require real notice and attachment content persisted to the database before moving to qualification work
