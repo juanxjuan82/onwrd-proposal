@@ -8,7 +8,14 @@ import {
   tenderDigestSettingsTable,
 } from "@workspace/db";
 import { eq, desc, and, gte } from "drizzle-orm";
-import { runCrawler, rescoreWithKeywords, backfillPromotions, isCrawlRunning } from "../crawlers/index.js";
+import {
+  getCrawlBlockReason,
+  isCrawlRunning,
+  requiresControlledPilot,
+  runCrawler,
+  rescoreWithKeywords,
+  backfillPromotions,
+} from "../crawlers/index.js";
 import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
 
 const router = Router();
@@ -28,14 +35,41 @@ router.post("/tender-sources", async (req, res) => {
     return;
   }
   const [created] = await db.insert(tenderSourcesTable).values({
-    name, sourceType: sourceType ?? "other", url, adapterType, active: true,
+    name,
+    sourceType: sourceType ?? "other",
+    url,
+    adapterType,
+    active: !requiresControlledPilot(adapterType) && !getCrawlBlockReason(adapterType),
   }).returning();
-  res.status(201).json(created);
+  res.status(201).json({
+    ...created,
+    message: created.active ? undefined : "Source saved inactive; complete its controlled access and test-crawl requirements before activation.",
+  });
 });
 
 router.patch("/tender-sources/:id", async (req, res) => {
   const id = Number(req.params.id);
+  const [current] = await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.id, id));
+  if (!current) { res.status(404).json({ error: "Not found" }); return; }
+  if (req.body.active === true) {
+    const blockedReason = getCrawlBlockReason(current.adapterType);
+    if (blockedReason) {
+      res.status(422).json({ error: blockedReason, code: "source_blocked" });
+      return;
+    }
+    if (requiresControlledPilot(current.adapterType)) {
+      res.status(422).json({
+        error: "This source remains inactive until a versioned, source-specific pilot is recorded by the controlled activation flow.",
+        code: "activation_requires_versioned_pilot",
+      });
+      return;
+    }
+  }
   const updates: Record<string, unknown> = { updatedAt: new Date() };
+  if (req.body.active !== undefined && typeof req.body.active !== "boolean") {
+    res.status(400).json({ error: "active must be a boolean" });
+    return;
+  }
   if (req.body.active !== undefined) updates.active = req.body.active;
   if (req.body.name) updates.name = req.body.name;
   const [updated] = await db.update(tenderSourcesTable).set(updates).where(eq(tenderSourcesTable.id, id)).returning();
