@@ -21,6 +21,7 @@ import {
   type TenderSourceAdapter,
   type TenderOpportunity,
   hasGenuineDetailContent,
+  mergeDocumentEvidence,
 } from "./base-adapter.js";
 import {
   Crawl4AIError,
@@ -665,8 +666,21 @@ export async function runCrawler(sourceId?: number): Promise<RunCrawlerResult> {
             (canonicalUrl && normalizeCrawlerUrl(item.url ?? "") === canonicalUrl) ||
             (opp.externalId && item.externalId === opp.externalId));
           if (existing) {
-            const existingRaw = (existing.rawData && typeof existing.rawData === "object")
+            let existingRaw = (existing.rawData && typeof existing.rawData === "object")
               ? existing.rawData as Record<string, unknown> : {};
+            if (existing.opportunityId) {
+              const evidenceOnlyRaw = mergeDocumentEvidence(existingRaw, opp.rawData);
+              if (evidenceOnlyRaw) {
+                // Preserve human-edited canonical fields; only attach source
+                // evidence to the discovery record linked to that opportunity.
+                await db.update(discoveredTendersTable).set({
+                  rawData: evidenceOnlyRaw,
+                  updatedAt: new Date(),
+                }).where(eq(discoveredTendersTable.id, existing.id));
+                existingRaw = evidenceOnlyRaw;
+                existing.rawData = evidenceOnlyRaw;
+              }
+            }
             const needsEnrichment = existingRaw.needsEnrichment === true;
             const existingDescription = existing.description ?? "";
             const richer = opp.description.trim().length > existingDescription.trim().length

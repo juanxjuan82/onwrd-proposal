@@ -129,6 +129,59 @@ export interface TenderDocumentMetadata {
   format: "pdf" | "docx";
   status: "extracted" | "scanned_or_textless" | "fetch_failed" | "malformed";
   characters: number;
+  extractedText?: string;
+}
+
+export function prioritizeDocumentContent(
+  pageContent: string,
+  documents: readonly TenderDocumentMetadata[],
+  maxLength = 4_000,
+): string {
+  const documentText = documents
+    .filter((document) => document.status === "extracted" && document.extractedText)
+    .map((document) => `[Document: ${document.url}]\n${document.extractedText}`)
+    .join("\n\n")
+    .slice(0, Math.min(2_400, Math.max(0, maxLength - 1_000)));
+  const pageBudget = Math.max(0, maxLength - documentText.length - (documentText ? 2 : 0));
+  return `${pageContent.slice(0, pageBudget)}${documentText ? `\n\n${documentText}` : ""}`.slice(0, maxLength);
+}
+
+export function mergeDocumentEvidence(
+  existingRaw: Record<string, unknown>,
+  incomingRaw: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  const existingDocs = Array.isArray(existingRaw.documentExtraction)
+    ? existingRaw.documentExtraction.filter((item): item is Record<string, unknown> =>
+        Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    : [];
+  const incomingDocs = Array.isArray(incomingRaw?.documentExtraction)
+    ? incomingRaw.documentExtraction.filter((item): item is Record<string, unknown> =>
+        Boolean(item && typeof item === "object" && !Array.isArray(item)))
+    : [];
+  const hasNewText = incomingDocs.some((incoming) =>
+    incoming.status === "extracted" &&
+    typeof incoming.extractedText === "string" &&
+    incoming.extractedText.length > 0 &&
+    !existingDocs.some((existing) =>
+      existing.url === incoming.url && existing.extractedText === incoming.extractedText));
+  if (!hasNewText) return undefined;
+
+  const byUrl = new Map<string, Record<string, unknown>>();
+  for (const document of existingDocs) {
+    if (typeof document.url === "string") byUrl.set(document.url, document);
+  }
+  for (const document of incomingDocs) {
+    if (typeof document.url !== "string") continue;
+    const previous = byUrl.get(document.url);
+    const previousText = previous?.extractedText;
+    byUrl.set(
+      document.url,
+      typeof previousText === "string" && typeof document.extractedText !== "string"
+        ? { ...document, ...previous }
+        : { ...previous, ...document },
+    );
+  }
+  return { ...existingRaw, documentExtraction: [...byUrl.values()] };
 }
 
 /**
@@ -271,12 +324,18 @@ export async function fetchTenderDetailWithOptionalBrowser(
         );
         const documentText = documents
           .filter((document) => document.status === "extracted" && document.text)
-          .map((document) => `\n\n[Document: ${document.url}]\n${document.text}`)
+          .map((document) => document.text)
           .join("");
-        const combinedContent = `${content}${documentText}`.slice(0, 12_000);
         const documentMetadata: TenderDocumentMetadata[] = documents.map(
-          ({ url: documentUrl, format, status, characters }) => ({ url: documentUrl, format, status, characters }),
+          ({ url: documentUrl, format, status, characters, text }) => ({
+            url: documentUrl,
+            format,
+            status,
+            characters,
+            ...(text ? { extractedText: text.slice(0, 4_000) } : {}),
+          }),
         );
+        const combinedContent = prioritizeDocumentContent(content, documentMetadata);
         if (hasGenuineDetailContent(combinedContent, title)) {
           recordDiagnostic(context, {
             code: "direct_success",

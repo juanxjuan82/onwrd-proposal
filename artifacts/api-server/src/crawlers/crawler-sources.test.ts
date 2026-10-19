@@ -41,6 +41,16 @@ describe("base adapter detail quality", () => {
     assert.doesNotMatch(update, /\borganization:\s*opp\.organization/);
   });
 
+  it("stores new attachment evidence on linked discoveries without rewriting canonical fields", () => {
+    const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    const guard = source.indexOf("if (existing.opportunityId)");
+    assert.notEqual(guard, -1);
+    const update = source.slice(guard, source.indexOf("const needsEnrichment", guard));
+    assert.match(update, /mergeDocumentEvidence/);
+    assert.match(update, /rawData:\s*evidenceOnlyRaw/);
+    assert.doesNotMatch(update, /description:|deadline:|recommendation:|status:|opportunityId:/);
+  });
+
   it("extracts PDF scope, deduplicates links, and records document provenance", async () => {
     const { extractProcurementDocuments } = await import("./base-adapter.js");
     const html = `<article><a href="/files/terms-of-reference.pdf">Terms of Reference</a><a href="/files/terms-of-reference.pdf">Download TOR</a></article>`;
@@ -54,6 +64,52 @@ describe("base adapter detail quality", () => {
     assert.equal(documents.length, 1);
     assert.equal(documents[0].status, "extracted");
     assert.match(documents[0].text ?? "", /stakeholder interviews/);
+  });
+
+  it("reserves database-bound detail space for extracted TOR text", async () => {
+    const { prioritizeDocumentContent, mergeDocumentEvidence } = await import("./base-adapter.js");
+    const extractedText = "TOR SCOPE: stakeholder interviews, final reporting, deliverable milestones.";
+    const content = prioritizeDocumentContent(
+      "Page content ".repeat(500),
+      [{
+        url: "https://example.org/files/terms-of-reference.pdf",
+        format: "pdf",
+        status: "extracted",
+        characters: extractedText.length,
+        extractedText,
+      }],
+    );
+    assert.ok(content.length <= 4_000);
+    assert.match(content, /TOR SCOPE: stakeholder interviews/);
+
+    const merged = mergeDocumentEvidence(
+      {
+        humanReviewMarker: "keep",
+        documentExtraction: [{
+          url: "https://example.org/files/terms-of-reference.pdf",
+          status: "fetch_failed",
+        }],
+      },
+      {
+        documentExtraction: [{
+          url: "https://example.org/files/terms-of-reference.pdf",
+          status: "extracted",
+          extractedText,
+          characters: extractedText.length,
+          format: "pdf",
+        }],
+      },
+    );
+    assert.equal(merged?.humanReviewMarker, "keep");
+    assert.equal(
+      (merged?.documentExtraction as Array<{ extractedText?: string }>)[0].extractedText,
+      extractedText,
+    );
+    assert.equal(mergeDocumentEvidence(merged!, { documentExtraction: [{
+      url: "https://example.org/files/terms-of-reference.pdf",
+      status: "extracted",
+      extractedText,
+    }] }), undefined, "same extracted text is idempotent");
   });
 
   it("reports missing and malformed PDFs without inventing content or invoking OCR", async () => {
