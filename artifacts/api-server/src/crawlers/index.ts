@@ -20,6 +20,7 @@ import {
   type CrawlDiagnostic,
   type TenderSourceAdapter,
   type TenderOpportunity,
+  hasGenuineDetailContent,
 } from "./base-adapter.js";
 import {
   Crawl4AIError,
@@ -120,11 +121,11 @@ export function profileMatchesOpportunity(
 // arbitrary URL or an adapter that the crawler cannot actually run.
 export const SOURCE_ADAPTER_CATALOG: readonly SourceAdapterDefinition[] = [
   { adapterType: "world_bank", label: "World Bank Procurement", sourceType: "development_bank", allowedHosts: ["worldbank.org"], supportsBrowser: false, recommended: true },
-  { adapterType: "ungm", label: "UNGM / UNDP Procurement", sourceType: "un", allowedHosts: ["undp.org"], supportsBrowser: false, recommended: true },
+  { adapterType: "ungm", label: "UNGM / UNDP Procurement", sourceType: "un", allowedHosts: ["undp.org"], supportsBrowser: false, recommended: false, blockedReason: "UNDP procurement-notices.undp.org currently disallows all crawling in robots.txt. Reactivate only after an authorized feed or permission is confirmed." },
   { adapterType: "bahamas_gov", label: "Bahamas Government Procurement", sourceType: "government", allowedHosts: ["bahamas.gov.bs"], supportsBrowser: true, recommended: true },
   { adapterType: "caricom", label: "CARICOM Secretariat", sourceType: "regional", allowedHosts: ["caricom.org"], supportsBrowser: true, recommended: true },
   { adapterType: "idb", label: "Inter-American Development Bank", sourceType: "development_bank", allowedHosts: ["iadb.org"], supportsBrowser: false, recommended: false, blockedReason: "The current IDB web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
-  { adapterType: "cdb", label: "Caribbean Development Bank", sourceType: "development_bank", allowedHosts: ["caribank.org"], supportsBrowser: false, recommended: false, blockedReason: "The current CDB web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
+  { adapterType: "cdb", label: "Caribbean Development Bank", sourceType: "development_bank", allowedHosts: ["caribank.org"], supportsBrowser: false, recommended: false },
   { adapterType: "cto", label: "Caribbean Tourism Organization", sourceType: "regional", allowedHosts: ["caribtourism.com"], supportsBrowser: false, recommended: false, blockedReason: "The current CTO web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
   { adapterType: "eu_caribbean", label: "EU Caribbean Development Fund", sourceType: "development_fund", allowedHosts: ["cariforum.org"], supportsBrowser: false, recommended: false, blockedReason: "The current EU Caribbean web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
 ] as const;
@@ -588,6 +589,7 @@ export async function runCrawler(sourceId?: number): Promise<RunCrawlerResult> {
       id: discoveredTendersTable.id,
       sourceId: discoveredTendersTable.sourceId,
       externalId: discoveredTendersTable.externalId,
+      opportunityId: discoveredTendersTable.opportunityId,
       title: discoveredTendersTable.title,
       organization: discoveredTendersTable.organization,
       url: discoveredTendersTable.url,
@@ -666,19 +668,70 @@ export async function runCrawler(sourceId?: number): Promise<RunCrawlerResult> {
             const existingRaw = (existing.rawData && typeof existing.rawData === "object")
               ? existing.rawData as Record<string, unknown> : {};
             const needsEnrichment = existingRaw.needsEnrichment === true;
-            const richer = opp.description.trim().length > existing.description.trim().length;
-            if (needsEnrichment && richer) {
-              const refreshedRaw = { ...existingRaw, ...(opp.rawData ?? {}), needsEnrichment: false, crawlerFingerprint: fingerprint };
+            const existingDescription = existing.description ?? "";
+            const richer = opp.description.trim().length > existingDescription.trim().length
+              && hasGenuineDetailContent(opp.description, opp.title);
+            const existingWasIncomplete = needsEnrichment
+              || !hasGenuineDetailContent(existingDescription, existing.title);
+            // Never refresh a discovery already linked to a canonical opportunity:
+            // that record may have been edited by a human after promotion.
+            if (existingWasIncomplete && richer && !existing.opportunityId) {
+              const refreshedScore = keywordScore(opp);
+              const refreshedProfileMatch = profileMatchesOpportunity(opp, persistedProfiles);
+              const hasProfileKeywords = persistedProfiles.some((profile) => profile.keywords.length > 0);
+              if (persistedProfiles.length > 0 &&
+                  !refreshedProfileMatch.matched &&
+                  (hasProfileKeywords || refreshedProfileMatch.excluded.length > 0)) {
+                refreshedScore.fitScore = 0;
+                refreshedScore.recommendation = "SKIP";
+                refreshedScore.confidence = "LOW";
+                refreshedScore.bahamasAdvantageScore = 0;
+                refreshedScore.reasoning = refreshedProfileMatch.excluded.length > 0
+                  ? `Excluded by search profile keyword: ${refreshedProfileMatch.excluded[0]} (deterministic profile gate)`
+                  : "No active tender search profile keyword matched (deterministic profile gate)";
+              }
+
+              const refreshedRaw: Record<string, unknown> = {
+                ...existingRaw,
+                ...(opp.rawData ?? {}),
+                crawlerFingerprint: fingerprint,
+              };
+              if (opp.rawData?.needsEnrichment === true) refreshedRaw.needsEnrichment = true;
+              else delete refreshedRaw.needsEnrichment;
+              const refreshedDeadline = opp.deadline ?? existing.deadline;
               await db.update(discoveredTendersTable).set({
-                title: opp.title,
-                organization: opp.organization,
-                url: canonicalUrl ?? existing.url,
                 description: opp.description,
                 rawData: refreshedRaw,
+                deadline: refreshedDeadline,
+                fitScore: refreshedScore.fitScore,
+                recommendation: refreshedScore.recommendation,
+                scoringReasoning: refreshedScore.reasoning,
+                geographyScore: refreshedScore.geographyScore,
+                geoRegion: refreshedScore.geoRegion,
+                bahamasAdvantageScore: refreshedScore.bahamasAdvantageScore,
+                confidence: refreshedScore.confidence,
                 updatedAt: new Date(),
               }).where(eq(discoveredTendersTable.id, existing.id));
               existing.description = opp.description;
               existing.rawData = refreshedRaw;
+              existing.deadline = refreshedDeadline;
+
+              const eligibility = evaluateCrawlerEligibility({
+                title: opp.title,
+                description: opp.description,
+                recommendation: refreshedScore.recommendation,
+                deadline: refreshedDeadline ?? undefined,
+              });
+              if (eligibility.eligible) {
+                try {
+                  const destination = eligibility.destination === "reviewing" ? "reviewing" : "new";
+                  const promoted = await promoteDiscoveredTender(existing.id, destination);
+                  existing.opportunityId = promoted.opportunityId;
+                } catch (error) {
+                  const message = error instanceof Error ? error.message : String(error);
+                  console.warn(`[crawler] refreshed promotion id=${existing.id} failed: ${message.slice(0, 80)}`);
+                }
+              }
             }
             continue;
           }
@@ -723,7 +776,7 @@ export async function runCrawler(sourceId?: number): Promise<RunCrawlerResult> {
           existingDiscoveries.push({
             id: discovery.id, sourceId: source.id, externalId: opp.externalId ?? null,
             title: opp.title, organization: opp.organization, url: canonicalUrl,
-            deadline: opp.deadline ?? null, description: opp.description,
+            deadline: opp.deadline ?? null, description: opp.description, opportunityId: null,
             rawData: { ...(opp.rawData ?? {}), crawlerFingerprint: fingerprint },
           });
 
@@ -832,7 +885,7 @@ export async function runCrawler(sourceId?: number): Promise<RunCrawlerResult> {
 // These adapters are blocked from Replit's environment (403/404/timeout).
 // We always force them inactive so existing deployments are retroactively
 // deactivated without needing a separate migration step.
-const PERMANENTLY_BLOCKED_ADAPTERS = ["idb", "cdb", "cto", "eu_caribbean"] as const;
+const PERMANENTLY_BLOCKED_ADAPTERS = ["idb", "ungm", "cto", "eu_caribbean"] as const;
 
 function getApprovedDomains(source: {
   url: string;
@@ -899,7 +952,7 @@ export async function seedDefaultSources(): Promise<void> {
   // Adapters are preserved in code; flip active=true once API-based replacements exist.
   const defaults = [
     { name: "World Bank Procurement",           sourceType: "development_bank",  url: "https://search.worldbank.org/api/v2/procnotices",              adapterType: "world_bank",   active: true  },
-    { name: "UNDP Procurement Notices",         sourceType: "un",                url: "https://procurement-notices.undp.org/",                        adapterType: "ungm",         active: true  },
+    { name: "UNDP Procurement Notices",         sourceType: "un",                url: "https://procurement-notices.undp.org/",                        adapterType: "ungm",         active: false },
     { name: "Inter-American Development Bank",  sourceType: "development_bank",  url: "https://www.iadb.org/en/projects/all",                         adapterType: "idb",          active: false },
     { name: "Caribbean Development Bank",       sourceType: "development_bank",  url: "https://www.caribank.org/",                                    adapterType: "cdb",          active: false },
       { name: "Bahamas Government Procurement",   sourceType: "government",        url: "https://www.bahamas.gov.bs/wps/portal/public/gov/government/news", adapterType: "bahamas_gov", active: true, browserEnabled: true, approvedDomains: ["bahamas.gov.bs"] },

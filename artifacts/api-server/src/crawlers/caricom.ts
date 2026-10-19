@@ -6,6 +6,7 @@ import {
   extractDeadline,
   fetchHtmlWithOptionalBrowser,
   fetchTenderDetailWithOptionalBrowser,
+  resolveNoticeUrl,
   stripHtml,
 } from "./base-adapter.js";
 
@@ -48,7 +49,8 @@ export class CARICOMAdapter implements TenderSourceAdapter {
            if (seen.has(key)) continue;
            seen.add(key);
 
-          const fullUrl = href.startsWith("http") ? href : `https://caricom.org${href}`;
+           const fullUrl = resolveNoticeUrl(href, url, context?.approvedDomains);
+           if (!fullUrl) continue;
 
           // Extract surrounding page context around this link for a real description.
           // The ~600 chars around the href in the HTML typically includes the
@@ -102,7 +104,9 @@ export class CARICOMAdapter implements TenderSourceAdapter {
              const key = rawTitle.toLowerCase().slice(0, 100);
              if (seen.has(key)) continue;
              seen.add(key);
-             const detail = await fetchTenderDetailWithOptionalBrowser(link.url, rawTitle, context);
+              const noticeUrl = resolveNoticeUrl(link.url, url, context?.approvedDomains);
+              if (!noticeUrl) continue;
+              const detail = await fetchTenderDetailWithOptionalBrowser(noticeUrl, rawTitle, context);
              // Preserve discovery when detail enrichment is unavailable. The
              // listing title remains useful, and the flag makes retry explicit.
              const description = detail?.content ??
@@ -111,7 +115,7 @@ export class CARICOMAdapter implements TenderSourceAdapter {
                externalId: `caricom-${Buffer.from(rawTitle.slice(0, 40)).toString("base64").slice(0, 16)}`,
                title: rawTitle,
                organization: "CARICOM Secretariat",
-               url: link.url,
+                url: noticeUrl,
                deadline: extractDeadline([description, detail?.metadata.deadline ?? ""].join(" ")),
                description,
                country: "Caribbean",

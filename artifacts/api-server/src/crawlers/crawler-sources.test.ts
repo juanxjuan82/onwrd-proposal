@@ -29,6 +29,23 @@ async function withMockFetch<T>(mockFn: MockFetchFn, fn: () => Promise<T>): Prom
 }
 
 describe("base adapter detail quality", () => {
+  it("resolves relative links and rejects off-domain or unsafe notice URLs", async () => {
+    const { resolveNoticeUrl } = await import("./base-adapter.js");
+    assert.equal(
+      resolveNoticeUrl(
+        "../notice/123?x=1&amp;y=2",
+        "https://caricom.org/procurement-notices/2026/",
+        ["caricom.org"],
+      ),
+      "https://caricom.org/procurement-notices/notice/123?x=1&y=2",
+    );
+    assert.equal(
+      resolveNoticeUrl("https://external.example/notice", "https://caricom.org/", ["caricom.org"]),
+      null,
+    );
+    assert.equal(resolveNoticeUrl("javascript:alert(1)", "https://caricom.org/"), null);
+  });
+
   it("preserves richer genuine detail text within a bounded limit", async () => {
     const { fetchTenderDetailWithOptionalBrowser } = await import("./base-adapter.js");
     const scope = "Detailed procurement scope covering communications, outreach, delivery, and reporting. ".repeat(100);
@@ -105,6 +122,29 @@ describe("CDB adapter", () => {
     const adapter = new CDBAdapter();
     const results = await withMockFetch(emptyHtmlPage, () => adapter.fetchOpportunities());
     assert.deepEqual(results, []);
+  });
+
+  it("extracts a CDB notice detail and deadline from the procurement listing", async () => {
+    const mockFetch: MockFetchFn = async (url) => {
+      if (url.includes("/procurement-notices/consultancy-example")) {
+        return new Response(
+          "<article><h1>Consultancy Example</h1><p>Qualified consultants are invited to assess " +
+          "the regional programme, prepare a delivery plan, conduct stakeholder interviews, and " +
+          "submit recommendations and final reports. Deadline: October 23, 2026.</p></article>",
+          { status: 200, headers: { "content-type": "text/html" } },
+        );
+      }
+      return new Response(
+        `<a href="/work-with-us/procurement/procurement-notices">Procurement Notices</a><table><tbody><tr><td><a href="/work-with-us/procurement/procurement-notices/consultancy-example">Consultancy Example</a></td><td>Consultancy</td><td>October 23, 2026</td></tr></tbody></table>${" ".repeat(600)}`,
+        { status: 200, headers: { "content-type": "text/html" } },
+      );
+    };
+    const { CDBAdapter } = await import("./cdb.js");
+    const results = await withMockFetch(mockFetch, () => new CDBAdapter().fetchOpportunities());
+    assert.equal(results.length, 1);
+    assert.match(results[0].description, /stakeholder interviews/);
+    assert.equal(results[0].deadline?.toISOString().slice(0, 10), "2026-10-23");
+    assert.equal(results[0].rawData?.needsEnrichment, undefined);
   });
 });
 

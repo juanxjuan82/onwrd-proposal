@@ -1,0 +1,104 @@
+## Task: PR3 — Procurement Crawler Reliability and Observability
+
+**Repository:** `juanxjuan82/onwrd-proposal`
+
+**Prerequisites:** PR1 and PR2 have passed review and been merged.
+
+### Objective
+
+Make procurement discovery measurable, diagnosable and resilient, so ONWRD can distinguish a shortage of relevant opportunities from a failing crawler, broken extraction, overly restrictive qualification or duplicate records.
+
+### Requirements
+
+**1. Implement source-level telemetry.**
+
+For each crawl and source, record:
+
+- Fetch attempts and HTTP outcomes
+- Notices discovered
+- New versus previously known notices
+- Notices successfully enriched
+- Notices missing substantive descriptions or documents
+- Extraction failures
+- Expired notices
+- Qualified, rejected and human-review counts
+- Canonical opportunity promotions
+- AI qualification calls and fallbacks
+- Crawl execution duration
+
+Preserve meaningful error messages without storing secrets or sensitive authentication data.
+
+**2. Improve source health reporting.**
+
+Distinguish:
+
+- Healthy source with zero new notices
+- Empty source requiring verification
+- Source blocked or inaccessible
+- Source markup or extraction failure
+- Source returning repetitive or stale notices
+- Source producing unusually low-quality records
+
+A crawl that returns zero useful records must not automatically be interpreted as successful discovery.
+
+**3. Add a source health dashboard.**
+
+Extend the existing sources/settings interface rather than introducing an unrelated monitoring application.
+
+Show source status, last successful retrieval, extraction success rate, qualification yield and recent failure reasons.
+
+Include a simple way to identify which sources deserve engineering attention.
+
+**4. Implement regression and quality testing.**
+
+Create representative fixtures for:
+
+- Relevant communications consultancies
+- Relevant strategic advisory opportunities
+- Irrelevant goods procurement
+- Infrastructure and construction contracts
+- Missing or partial TOR documents
+- Duplicates and updated notices
+- Expired notices
+- Ambiguous regional eligibility
+- Opportunities previously rejected incorrectly
+
+Measure precision and recall against a manually labeled reference dataset.
+
+**5. Introduce quality regression safeguards.**
+
+Alert or visibly flag when:
+
+- A previously productive source begins returning zero records
+- Substantive extraction rates deteriorate
+- Qualification rates change abnormally
+- Source fetches repeatedly fail
+- AI qualification is unavailable and fallback is active
+
+Choose sensible, configurable thresholds using observed baseline performance. Do not invent historical baselines.
+
+**6. Protect production operation.**
+
+- Preserve database compatibility and existing data.
+- Use additive migrations where possible.
+- Keep crawling idempotent and concurrency-safe.
+- Avoid uncontrolled retries or excessive source requests.
+- Do not auto-delete historical opportunities.
+- Keep automatic proposal generation under existing user controls.
+
+### Acceptance criteria
+
+- A failed source can be identified without manually inspecting server logs.
+- Empty but healthy sources are distinguished from broken ones.
+- Source-level performance is measurable over time.
+- Regressions in discovery and qualification can be detected through tests.
+- No duplicate opportunities are created after repeated crawls.
+- Existing proposal workflows remain unaffected.
+
+### Delivery
+
+Open a separate **draft PR3** with the implementation, tests, dashboard changes and monitoring documentation.
+
+Include a concise baseline report showing what the monitoring system currently observes.
+
+Run typecheck and tests, request code review, and do not merge or deploy without authorization.

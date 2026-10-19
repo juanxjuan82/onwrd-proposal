@@ -1,0 +1,97 @@
+## Task: PR2 — Evidence-Grounded Opportunity Qualification
+
+**Repository:** `juanxjuan82/onwrd-proposal`
+
+**Prerequisite:** PR #2 has passed review and been merged.
+
+### Objective
+
+Improve the qualification of procurement opportunities against ONWRD Advisors' actual capabilities, without increasing irrelevant recommendations or unnecessary AI expenditure.
+
+Build on the existing scoring, eligibility and search-profile architecture. Do not replace functioning modules without justification.
+
+### Requirements
+
+**1. Separate evidence completeness from opportunity relevance.**
+
+Implement explicit classifications for:
+
+- `needs_enrichment` — insufficient source evidence
+- `qualified` — relevant, with sufficient supporting evidence
+- `not_qualified` — demonstrably irrelevant or ineligible
+- `needs_human_review` — uncertain fit or eligibility
+
+Do not permanently reject an opportunity because the crawler has not retrieved its complete scope.
+
+Preserve compatibility with existing database states and proposal workflows.
+
+**2. Improve ONWRD capability matching.**
+
+Evaluate opportunities across:
+
+- Strategic communications and public relations
+- Branding and creative campaigns
+- Digital marketing and content
+- Tourism and destination marketing
+- Stakeholder and community engagement
+- Research, public awareness and development communications
+- Strategic advisory and consulting
+- Digital transformation, web platforms and automation
+
+Use the existing ONWRD knowledge base and credentials where available. Do not infer qualifications that the company cannot substantiate.
+
+**3. Introduce bounded AI qualification.**
+
+Preserve inexpensive deterministic filtering for obvious exclusions, followed by semantic evaluation of plausible opportunities with sufficient source evidence.
+
+Implement:
+
+- Configurable AI evaluation budget
+- Existing quota and circuit-breaker integration
+- Deterministic fallback
+- Structured machine-readable output
+- Model and prompt version tracking
+- No fabricated eligibility claims
+- Evidence citations or supporting excerpts
+
+**4. Produce actionable bid/no-bid assessments.**
+
+For each qualified opportunity, return:
+
+- Fit score and explanation
+- Relevant ONWRD credentials
+- Eligibility and mandatory requirements
+- Missing qualifications
+- Potential partnership requirements
+- Geography and delivery constraints
+- Submission deadline and preparation feasibility
+- Bid recommendation with confidence level
+
+A high relevance score must never override a confirmed hard eligibility failure.
+
+**5. Make search profiles functional.**
+
+Audit the existing `tender_search_profiles` configuration.
+
+Ensure enabled profiles influence qualification as intended, or clearly document and correct any disconnected functionality.
+
+**6. Preserve human decisions.**
+
+Previously reviewed, rejected or accepted opportunities must not have their human decisions overwritten by automated rescoring.
+
+### Acceptance criteria
+
+- Relevant opportunities with unfamiliar terminology are correctly recognized.
+- Generic procurement notices are not automatically promoted.
+- Incomplete records are flagged for enrichment, not misclassified as irrelevant.
+- AI results are grounded in actual procurement documentation.
+- Scoring is reproducible and auditable.
+- AI usage remains bounded.
+- Existing proposal-generation workflows continue working.
+- Regression tests cover false positives, false negatives, uncertain cases and eligibility failures.
+
+### Delivery
+
+Open a separate **draft PR2** with implementation details, tests and representative before/after qualification results.
+
+Run typecheck and relevant tests, request code review, and do not merge or deploy without authorization.

@@ -63,6 +63,23 @@ export async function safeFetch(url: string, opts?: RequestInit): Promise<Respon
   });
 }
 
+/** Resolve a notice link relative to its listing page, constrained to approved hosts. */
+export function resolveNoticeUrl(
+  href: string,
+  origin: string,
+  approvedDomains?: readonly string[],
+): string | null {
+  try {
+    const base = new URL(origin);
+    const resolved = new URL(href.replace(/&amp;/g, "&"), base);
+    if (resolved.protocol !== "https:" && resolved.protocol !== "http:") return null;
+    if (!isApprovedUrl(resolved.toString(), approvedDomains ?? [base.hostname])) return null;
+    return resolved.toString();
+  } catch {
+    return null;
+  }
+}
+
 export function stripHtml(html: string, maxLen = 800): string {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -311,7 +328,7 @@ function recordDiagnostic(context: AdapterFetchContext | undefined, diagnostic: 
   context?.diagnostics?.push(diagnostic);
 }
 
-function hasGenuineDetailContent(content: string, title: string): boolean {
+export function hasGenuineDetailContent(content: string, title: string): boolean {
   const safeTitle = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const withoutTitle = content.replace(new RegExp(safeTitle, "gi"), "").trim();
   return content.length >= 120 && withoutTitle.length >= 60;

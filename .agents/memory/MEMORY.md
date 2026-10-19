@@ -26,7 +26,7 @@
 
 - [Google Workspace auth + deny-by-default guard](replit-auth-setup.md) — company-domain Google login, session migration guard, and explicit public-route policy
 - [World Bank adapter deadline bug](world-bank-deadline.md) — submission_deadline_date is the bid deadline; submission_date is notice publication date. fq country filter silently ignored — use q text search for targeting.
-- [Blocked crawler sources](blocked-crawler-sources.md) — IDB/CDB/CTO/EU Caribbean (ids 3,4,6,8) deactivated; TED Europa also WAF-blocked; Caribbean gov portals all timeout from Replit.
+- [Crawler source availability](blocked-crawler-sources.md) — CDB's public notices path now returns 200; UNDP procurement robots.txt disallows all paths (checked Oct 19, 2026).
 - [Credential scanner heuristics](credential-scanner.md) — invented-client gate: punctuation-aware extraction, service-phrase filter, case_study-only allowlist, one-directional matching
 - [Generation recovery fencing](generation-recovery-fencing.md) — stale-job recovery requires attempt ownership; fence every write and reconcile proposal/tender terminal state atomically
 - [Browser crawler boundary](browser-crawler-boundary.md) — browser enrichment is opt-in, domain-pinned, bounded, version-attested, direct-first, detail-specific, and zero-AI
