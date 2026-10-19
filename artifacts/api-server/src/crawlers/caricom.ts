@@ -1,4 +1,4 @@
-import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
+import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml, fetchNoticeDetail, resolveNoticeUrl } from "./base-adapter.js";
 
 // CARICOM Secretariat — monitors regional communications, public awareness,
 // stakeholder engagement and policy communications across the Caribbean Community.
@@ -9,7 +9,7 @@ export class CARICOMAdapter implements TenderSourceAdapter {
     const results: TenderOpportunity[] = [];
 
     const urls = [
-      "https://caricom.org/procurement-notices",
+      "https://caricom.org/procurement-notices/",
       "https://caricom.org/procurement",
       "https://caricom.org/tenders",
       "https://caricom.org/news-and-media",
@@ -40,7 +40,9 @@ export class CARICOMAdapter implements TenderSourceAdapter {
           if (seen.has(rawTitle)) continue;
           seen.add(rawTitle);
 
-          const fullUrl = href.startsWith("http") ? href : `https://caricom.org${href}`;
+          const fullUrl = resolveNoticeUrl(href, url);
+          if (!fullUrl) continue;
+          const detail = await fetchNoticeDetail(fullUrl);
 
           results.push({
             externalId: `caricom-${Buffer.from(rawTitle.slice(0, 40)).toString("base64").slice(0, 16)}`,
@@ -48,7 +50,7 @@ export class CARICOMAdapter implements TenderSourceAdapter {
             organization: "CARICOM Secretariat",
             url: fullUrl,
             // Real scope from page fetch only — no synthetic marketing assumption
-            description: `CARICOM Secretariat procurement notice: ${rawTitle}`,
+            description: detail ?? `CARICOM Secretariat procurement notice: ${rawTitle}`,
             country: "Caribbean",
             sector: "Government & Public Communications",
             rawData: {
