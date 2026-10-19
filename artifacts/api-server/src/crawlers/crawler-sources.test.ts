@@ -13,6 +13,7 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 // ── Mock fetch helper ─────────────────────────────────────────────────────────
 
@@ -29,6 +30,74 @@ async function withMockFetch<T>(mockFn: MockFetchFn, fn: () => Promise<T>): Prom
 }
 
 describe("base adapter detail quality", () => {
+  it("refreshes only incomplete unpromoted discoveries and recomputes profile scores", () => {
+    const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    const guard = source.indexOf("if (existingWasIncomplete && richer && !existing.opportunityId)");
+    assert.notEqual(guard, -1, "canonical opportunities must not be overwritten by crawler refreshes");
+    const update = source.slice(guard, source.indexOf("const eligibility", guard));
+    assert.match(update, /profileMatchesOpportunity/);
+    assert.match(update, /fitScore: refreshedScore\.fitScore/);
+    assert.doesNotMatch(update, /\btitle:\s*opp\.title/);
+    assert.doesNotMatch(update, /\borganization:\s*opp\.organization/);
+  });
+
+  it("extracts PDF scope, deduplicates links, and records document provenance", async () => {
+    const { extractProcurementDocuments } = await import("./base-adapter.js");
+    const html = `<article><a href="/files/terms-of-reference.pdf">Terms of Reference</a><a href="/files/terms-of-reference.pdf">Download TOR</a></article>`;
+    const documents = await extractProcurementDocuments(
+      html,
+      "https://example.org/notice",
+      ["example.org"],
+      async () => ({ response: new Response(null, { status: 200 }), bytes: Buffer.from("fixture PDF") }),
+      async () => "Detailed terms of reference include stakeholder interviews, final reporting, and deliverable milestones.",
+    );
+    assert.equal(documents.length, 1);
+    assert.equal(documents[0].status, "extracted");
+    assert.match(documents[0].text ?? "", /stakeholder interviews/);
+  });
+
+  it("reports missing and malformed PDFs without inventing content or invoking OCR", async () => {
+    const { extractProcurementDocuments } = await import("./base-adapter.js");
+    const html = `<article><a href="/files/terms-of-reference.pdf">Terms of Reference</a></article>`;
+    const missing = await extractProcurementDocuments(
+      html,
+      "https://example.org/notice",
+      ["example.org"],
+      async () => ({ response: new Response("missing", { status: 404 }), bytes: Buffer.alloc(0) }),
+    );
+    assert.equal(missing[0].status, "fetch_failed");
+    const malformed = await extractProcurementDocuments(
+      html,
+      "https://example.org/notice",
+      ["example.org"],
+      async () => ({ response: new Response(null, { status: 200 }), bytes: Buffer.from("not a PDF") }),
+      async () => { throw new Error("malformed PDF"); },
+    );
+    assert.equal(malformed[0].status, "malformed");
+    assert.equal(malformed[0].text, undefined);
+  });
+
+  it("marks a valid PDF with no text layer for manual/OCR review instead of OCRing it", async () => {
+    const { extractProcurementDocuments } = await import("./base-adapter.js");
+    const documents = await extractProcurementDocuments(
+      `<article><a href="/files/terms-of-reference.pdf">Terms of Reference</a></article>`,
+      "https://example.org/notice",
+      ["example.org"],
+      async () => ({ response: new Response(null, { status: 200 }), bytes: Buffer.from("image-only PDF fixture") }),
+      async () => "",
+    );
+    assert.equal(documents[0].status, "scanned_or_textless", JSON.stringify(documents[0]));
+    assert.equal(documents[0].text, undefined);
+  });
+
+  it("leaves HTML-only notices unchanged when no procurement attachment exists", async () => {
+    const { extractProcurementDocuments } = await import("./base-adapter.js");
+    assert.deepEqual(
+      await extractProcurementDocuments("<article><p>Notice scope is in HTML.</p></article>", "https://example.org/notice", ["example.org"]),
+      [],
+    );
+  });
+
   it("resolves relative links and rejects off-domain or unsafe notice URLs", async () => {
     const { resolveNoticeUrl } = await import("./base-adapter.js");
     assert.equal(

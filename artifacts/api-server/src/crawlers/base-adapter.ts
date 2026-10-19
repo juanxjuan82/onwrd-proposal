@@ -3,6 +3,16 @@ import type {
   Crawl4AIError,
   RenderedPageResult,
 } from "./crawl4ai-client.js";
+import pdfParse from "pdf-parse/lib/pdf-parse.js";
+import * as mammoth from "mammoth";
+
+let pdfParseQueue: Promise<unknown> = Promise.resolve();
+
+function parsePdfSerially(buffer: Buffer) {
+  const result = pdfParseQueue.then(() => pdfParse(buffer));
+  pdfParseQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
 
 export interface TenderOpportunity {
   externalId?: string;
@@ -111,6 +121,14 @@ export interface TenderDetailResult {
   content: string;
   metadata: RenderedPageResult["metadata"];
   method: "direct" | "crawl4ai";
+  documents?: TenderDocumentMetadata[];
+}
+
+export interface TenderDocumentMetadata {
+  url: string;
+  format: "pdf" | "docx";
+  status: "extracted" | "scanned_or_textless" | "fetch_failed" | "malformed";
+  characters: number;
 }
 
 /**
@@ -245,15 +263,41 @@ export async function fetchTenderDetailWithOptionalBrowser(
       const contentType = response.headers.get("content-type") ?? "";
       if (!contentType || /html|text/i.test(contentType)) {
         const html = direct.text;
-        const content = stripHtml(html, 12_000);
-        if (hasGenuineDetailContent(content, title)) {
+        const content = extractMainContent(html);
+        const documents = await extractProcurementDocuments(
+          html,
+          url,
+          context?.approvedDomains ?? [new URL(url).hostname],
+        );
+        const documentText = documents
+          .filter((document) => document.status === "extracted" && document.text)
+          .map((document) => `\n\n[Document: ${document.url}]\n${document.text}`)
+          .join("");
+        const combinedContent = `${content}${documentText}`.slice(0, 12_000);
+        const documentMetadata: TenderDocumentMetadata[] = documents.map(
+          ({ url: documentUrl, format, status, characters }) => ({ url: documentUrl, format, status, characters }),
+        );
+        if (hasGenuineDetailContent(combinedContent, title)) {
           recordDiagnostic(context, {
             code: "direct_success",
             url,
-            message: `Direct detail fetch returned ${content.length} genuine content characters.`,
+            message: `Direct detail and document fetch returned ${combinedContent.length} genuine content characters.`,
             method: "direct",
           });
-           return { content: content.slice(0, 4_000), metadata: {}, method: "direct" };
+          return {
+            content: combinedContent.slice(0, 4_000),
+            metadata: {},
+            method: "direct",
+            documents: documentMetadata,
+          };
+        }
+        if (documentMetadata.length) {
+          recordDiagnostic(context, {
+            code: "direct_unusable",
+            url,
+            message: `Document extraction completed with statuses: ${documentMetadata.map((d) => d.status).join(", ")}.`,
+            method: "direct",
+          });
         }
       }
       recordDiagnostic(context, {
@@ -295,6 +339,81 @@ export async function fetchTenderDetailWithOptionalBrowser(
     metadata: rendered.metadata,
     method: "crawl4ai",
   };
+}
+
+function extractMainContent(html: string): string {
+  const region = html.match(/<article\b[\s\S]*?<\/article>/i)?.[0]
+    ?? html.match(/<main\b[\s\S]*?<\/main>/i)?.[0]
+    ?? html;
+  return stripHtml(region, 12_000);
+}
+
+type TenderDocumentStatus = "extracted" | "scanned_or_textless" | "fetch_failed" | "malformed";
+type TenderDocument = TenderDocumentMetadata & {
+  text?: string;
+};
+
+export async function extractProcurementDocuments(
+  html: string,
+  pageUrl: string,
+  approvedDomains: readonly string[],
+  fetchBytes: typeof fetchApprovedBytes = fetchApprovedBytes,
+  parsePdfText: (buffer: Buffer) => Promise<string> = async (buffer) =>
+    (await parsePdfSerially(buffer)).text ?? "",
+): Promise<TenderDocument[]> {
+  const region = html.match(/<article\b[\s\S]*?<\/article>/i)?.[0]
+    ?? html.match(/<main\b[\s\S]*?<\/main>/i)?.[0]
+    ?? html;
+  const links: Array<{ href: string; label: string }> = [];
+  const anchorPattern = /<a\b[^>]*href=(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = anchorPattern.exec(region)) && links.length < 3) {
+    const href = match[2].replace(/&amp;/g, "&");
+    const label = stripHtml(match[3], 300);
+    if (!/\.(?:pdf|docx)(?:[?#]|$)/i.test(href)) continue;
+    if (/\b(?:blank|template|application form)\b/i.test(`${href} ${label}`)) continue;
+    if (!/(procurement|tender|rfp|tor|terms|reference|proposal|eoi|expression|consult|scope|notice)/i.test(`${href} ${label}`)) continue;
+    const safeUrl = resolveNoticeUrl(href, pageUrl, approvedDomains);
+    if (safeUrl && !links.some((link) => link.href === safeUrl)) links.push({ href: safeUrl, label });
+  }
+
+  const results: TenderDocument[] = [];
+  for (const link of links) {
+    const format = /\.docx(?:[?#]|$)/i.test(link.href) ? "docx" : "pdf";
+    let response: Response;
+    let bytes: Buffer;
+    try {
+      ({ response, bytes } = await fetchBytes(link.href, approvedDomains, 8_000_000));
+    } catch {
+      results.push({ url: link.href, format, status: "fetch_failed", characters: 0 });
+      continue;
+    }
+    if (!response.ok) {
+      results.push({ url: link.href, format, status: "fetch_failed", characters: 0 });
+      continue;
+    }
+    try {
+      let text = "";
+      if (format === "pdf") {
+        text = await parsePdfText(bytes);
+      } else {
+        const parsed = await mammoth.extractRawText({ buffer: bytes });
+        text = parsed.value ?? "";
+      }
+      text = text.replace(/\s+/g, " ").trim().slice(0, 12_000);
+      const substantiveCharacters = (text.match(/[A-Za-z0-9]/g) ?? []).length;
+      results.push({
+        url: link.href,
+        format,
+        status: substantiveCharacters >= 80 ? "extracted" : "scanned_or_textless",
+        characters: text.length,
+        ...(substantiveCharacters >= 80 ? { text } : {}),
+      });
+    } catch {
+      results.push({ url: link.href, format, status: "malformed", characters: 0 });
+    }
+  }
+  return results;
 }
 
 function recordCrawl4AIFailure(
@@ -404,6 +523,62 @@ export async function fetchApprovedText(
         throw new Error(`Redirect target is outside approved domains: ${nextUrl}`);
       }
       currentUrl = nextUrl;
+    }
+    throw new Error(`Too many redirects fetching ${url}.`);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export async function fetchApprovedBytes(
+  url: string,
+  approvedDomains: readonly string[],
+  maxBytes: number,
+): Promise<{ response: Response; bytes: Buffer }> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 20_000);
+  let currentUrl = url;
+  try {
+    for (let redirectCount = 0; redirectCount <= 3; redirectCount++) {
+      if (!isApprovedUrl(currentUrl, approvedDomains)) {
+        throw new Error(`URL is outside approved domains: ${currentUrl}`);
+      }
+      const response = await safeFetch(currentUrl, { redirect: "manual", signal: controller.signal });
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get("location");
+        if (!location) throw new Error(`Redirect from ${currentUrl} did not include a location.`);
+        const nextUrl = new URL(location, currentUrl).toString();
+        if (!isApprovedUrl(nextUrl, approvedDomains)) {
+          throw new Error(`Redirect target is outside approved domains: ${nextUrl}`);
+        }
+        currentUrl = nextUrl;
+        continue;
+      }
+      const declaredLength = Number(response.headers.get("content-length") ?? 0);
+      if (declaredLength > maxBytes) throw new Error(`Document exceeds ${maxBytes} bytes.`);
+      if (!response.body) {
+        const bytes = Buffer.from(await response.arrayBuffer());
+        if (bytes.length > maxBytes) throw new Error(`Document exceeds ${maxBytes} bytes.`);
+        return { response, bytes };
+      }
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          total += value.byteLength;
+          if (total > maxBytes) {
+            await reader.cancel();
+            throw new Error(`Document exceeds ${maxBytes} bytes.`);
+          }
+          chunks.push(value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+      return { response, bytes: Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))) };
     }
     throw new Error(`Too many redirects fetching ${url}.`);
   } finally {

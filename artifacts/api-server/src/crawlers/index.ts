@@ -121,7 +121,7 @@ export function profileMatchesOpportunity(
 // arbitrary URL or an adapter that the crawler cannot actually run.
 export const SOURCE_ADAPTER_CATALOG: readonly SourceAdapterDefinition[] = [
   { adapterType: "world_bank", label: "World Bank Procurement", sourceType: "development_bank", allowedHosts: ["worldbank.org"], supportsBrowser: false, recommended: true },
-  { adapterType: "ungm", label: "UNGM / UNDP Procurement", sourceType: "un", allowedHosts: ["undp.org"], supportsBrowser: false, recommended: false, blockedReason: "UNDP procurement-notices.undp.org currently disallows all crawling in robots.txt. Reactivate only after an authorized feed or permission is confirmed." },
+  { adapterType: "ungm", label: "UNGM / UNDP Procurement", sourceType: "un", allowedHosts: ["undp.org"], supportsBrowser: false, recommended: false, blockedReason: "UNDP procurement-notices.undp.org disallows crawling all paths. Use only an authorized official feed/API, opt-in notifications, or user-provided manual imports; do not crawl without permission." },
   { adapterType: "bahamas_gov", label: "Bahamas Government Procurement", sourceType: "government", allowedHosts: ["bahamas.gov.bs"], supportsBrowser: true, recommended: true },
   { adapterType: "caricom", label: "CARICOM Secretariat", sourceType: "regional", allowedHosts: ["caricom.org"], supportsBrowser: true, recommended: true },
   { adapterType: "idb", label: "Inter-American Development Bank", sourceType: "development_bank", allowedHosts: ["iadb.org"], supportsBrowser: false, recommended: false, blockedReason: "The current IDB web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },

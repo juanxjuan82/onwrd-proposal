@@ -85,6 +85,7 @@ export class CARICOMAdapter implements TenderSourceAdapter {
                sourcePage: url,
                adapterContext: "CARICOM Secretariat regional procurement and public communications.",
                extractionMethod: detail ? `${detail.method}_detail` : page.method,
+                documentExtraction: detail?.documents ?? [],
                ...(detail ? {} : { needsEnrichment: true }),
                ...(detail ? { renderedMetadata: detail.metadata } : {}),
              },
@@ -124,6 +125,7 @@ export class CARICOMAdapter implements TenderSourceAdapter {
                  sourcePage: url,
                  adapterContext: "CARICOM Secretariat regional procurement and public communications.",
                 extractionMethod: detail ? `${detail.method}_detail` : "rendered_listing",
+                 documentExtraction: detail?.documents ?? [],
                 ...(detail ? { renderedMetadata: detail.metadata } : { needsEnrichment: true }),
                },
              });

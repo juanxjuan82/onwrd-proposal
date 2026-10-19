@@ -91,6 +91,7 @@ export class CDBAdapter implements TenderSourceAdapter {
               sourcePage: url,
               listingContext,
               extractionMethod: detail ? `${detail.method}_detail` : "listing_context",
+              documentExtraction: detail?.documents ?? [],
               ...(detail ? { renderedMetadata: detail.metadata } : { needsEnrichment: true }),
             },
           });

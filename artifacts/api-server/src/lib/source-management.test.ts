@@ -11,11 +11,13 @@ describe("source configuration guardrails", () => {
   it("publishes only registered adapters and marks blocked replacements", () => {
     assert.deepEqual(
       SOURCE_ADAPTER_CATALOG.filter((item) => item.recommended).map((item) => item.adapterType),
-      ["world_bank", "ungm", "bahamas_gov", "caricom"],
+      ["world_bank", "bahamas_gov", "caricom"],
     );
-    for (const adapterType of ["idb", "cdb", "cto", "eu_caribbean"]) {
+    for (const adapterType of ["idb", "cto", "eu_caribbean"]) {
       assert.match(getSourceAdapterDefinition(adapterType)?.blockedReason ?? "", /verified|Verify/i);
     }
+    assert.match(getSourceAdapterDefinition("ungm")?.blockedReason ?? "", /robots\.txt|disallows/i);
+    assert.equal(getSourceAdapterDefinition("cdb")?.blockedReason, undefined);
     assert.equal(getSourceAdapterDefinition("ted_europa"), undefined);
   });
 
