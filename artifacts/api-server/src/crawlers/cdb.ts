@@ -1,4 +1,4 @@
-import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
+import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml, fetchNoticeDetail, resolveNoticeUrl } from "./base-adapter.js";
 
 // caribank.org/procurement returns 404. This adapter targets CDB's news/projects
 // page for procurement-adjacent announcements, and falls back to press releases.
@@ -9,6 +9,7 @@ export class CDBAdapter implements TenderSourceAdapter {
     const results: TenderOpportunity[] = [];
 
     const urls = [
+      "https://www.caribank.org/work-with-us/procurement/procurement-notices",
       "https://www.caribank.org/news-and-events",
       "https://www.caribank.org/projects-and-operations",
       "https://www.caribank.org/",
@@ -39,14 +40,16 @@ export class CDBAdapter implements TenderSourceAdapter {
           if (seen.has(rawTitle)) continue;
           seen.add(rawTitle);
 
-          const fullUrl = href.startsWith("http") ? href : `https://www.caribank.org${href}`;
+          const fullUrl = resolveNoticeUrl(href, url);
+          if (!fullUrl) continue;
+          const detail = await fetchNoticeDetail(fullUrl);
 
           results.push({
             externalId: `cdb-${Buffer.from(rawTitle.slice(0, 40)).toString("base64").slice(0, 16)}`,
             title: rawTitle,
             organization: "Caribbean Development Bank",
             url: fullUrl,
-            description: `Caribbean Development Bank announcement: ${rawTitle}`,
+            description: detail ?? `Caribbean Development Bank announcement: ${rawTitle}`,
             country: "Caribbean",
             sector: "Development Finance",
           });
