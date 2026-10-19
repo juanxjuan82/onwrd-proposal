@@ -449,15 +449,56 @@ export async function runCrawler(sourceId?: number): Promise<{
         let newCount = 0;
 
         for (const opp of opportunities) {
-          // Deduplicate by externalId
-          if (opp.externalId) {
-            const existing = await db.select({ id: discoveredTendersTable.id })
-              .from(discoveredTendersTable)
-              .where(eq(discoveredTendersTable.externalId, opp.externalId));
-            if (existing.length > 0) continue;
+          // Refresh incomplete discoveries when the adapter now returns genuine detail.
+          // Never overwrite an already substantive record or a human-edited opportunity.
+          const existingRows = opp.externalId
+            ? await db.select().from(discoveredTendersTable)
+                .where(eq(discoveredTendersTable.externalId, opp.externalId))
+            : opp.url
+            ? await db.select().from(discoveredTendersTable)
+                .where(eq(discoveredTendersTable.url, opp.url))
+            : [];
+          const existing = existingRows[0];
+          if (existing) {
+            const oldDescription = existing.description ?? "";
+            const realNewContent = opp.description.length >= 120
+              && opp.description.replaceAll(opp.title, "").trim().length >= 60;
+            const oldWasIncomplete = oldDescription.length < 120
+              || oldDescription.replaceAll(existing.title, "").trim().length < 60;
+            if (oldWasIncomplete && realNewContent && opp.description.length > oldDescription.length) {
+              const refreshedScore = keywordScore(opp);
+              await db.update(discoveredTendersTable).set({
+                description: opp.description,
+                rawData: opp.rawData ?? existing.rawData,
+                deadline: opp.deadline ?? existing.deadline,
+                fitScore: refreshedScore.fitScore,
+                recommendation: refreshedScore.recommendation,
+                scoringReasoning: refreshedScore.reasoning,
+                geographyScore: refreshedScore.geographyScore,
+                geoRegion: refreshedScore.geoRegion,
+                bahamasAdvantageScore: refreshedScore.bahamasAdvantageScore,
+                confidence: refreshedScore.confidence,
+                updatedAt: new Date(),
+              }).where(eq(discoveredTendersTable.id, existing.id));
+              if (!existing.opportunityId) {
+                const eligibility = evaluateCrawlerEligibility({
+                  title: opp.title, description: opp.description,
+                  recommendation: refreshedScore.recommendation, deadline: opp.deadline,
+                });
+                if (eligibility.eligible) {
+                  try {
+                    await promoteDiscoveredTender(existing.id,
+                      eligibility.destination === "reviewing" ? "reviewing" : "new");
+                  } catch (error) {
+                    console.warn("[crawler] refreshed promotion failed", error);
+                  }
+                }
+              }
+            }
+            continue;
           }
 
-          // Deduplicate by URL
+          // Deduplicate by URL even when an external identifier has changed.
           if (opp.url) {
             const existingByUrl = await db.select({ id: discoveredTendersTable.id })
               .from(discoveredTendersTable)
