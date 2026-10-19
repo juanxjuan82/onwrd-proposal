@@ -1,4 +1,4 @@
-import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
+import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml, fetchNoticeDetail } from "./base-adapter.js";
 
 // Replaces the non-functional UNGM scraper with UNDP Procurement Notices,
 // which has server-rendered HTML and notice listings accessible without JS.
@@ -47,12 +47,14 @@ export class UNGMAdapter implements TenderSourceAdapter {
           titleLower.includes("belize")    ? "Belize" :
           "International";
 
+        const noticeUrl = `https://procurement-notices.undp.org/${path}`;
+        const detail = await fetchNoticeDetail(noticeUrl);
         results.push({
           externalId: `undp-${noticeId}`,
           title: rawTitle,
           organization: "UNDP",
-          url: `https://procurement-notices.undp.org/${path}`,
-          description: `UNDP procurement notice: ${rawTitle}`,
+          url: noticeUrl,
+          description: detail ?? `UNDP procurement notice: ${rawTitle}`,
           country,
           sector: "United Nations",
         });
