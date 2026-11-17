@@ -1,3 +1,4 @@
+import { stableExternalId } from "./dedup.js";
 import {
   TenderSourceAdapter,
   TenderOpportunity,
@@ -72,7 +73,7 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
            const description = detailContent ?? extractListingContext(html, m.index, title, category);
 
           results.push({
-             externalId: `bah-${Buffer.from((fullUrl + title).slice(0, 50)).toString("base64").slice(0, 16)}`,
+             externalId: stableExternalId("bah", fullUrl, title),
             title,
             organization: "Government of The Bahamas",
              url: fullUrl,
@@ -105,7 +106,7 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
            const detailContent = detail?.content;
            const description = detailContent ?? extractListingContext(html, m.index, title, "Government Procurement");
            results.push({
-            externalId: `bah-${Buffer.from(url.slice(-40)).toString("base64").slice(0, 16)}`,
+            externalId: stableExternalId("bah", url),
             title,
             organization: "Government of The Bahamas",
             url,
@@ -139,7 +140,7 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
             const description = detail?.content ??
               `Bahamas government procurement notice: ${title}`;
             results.push({
-              externalId: `bah-${Buffer.from((link.url + title).slice(0, 50)).toString("base64").slice(0, 16)}`,
+              externalId: stableExternalId("bah", link.url, title),
               title,
               organization: "Government of The Bahamas",
               url: link.url,

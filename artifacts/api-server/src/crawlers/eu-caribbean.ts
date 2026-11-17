@@ -1,3 +1,4 @@
+import { stableExternalId } from "./dedup.js";
 import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
 
 // NOTE: As of July 2026, cariforum.org is unreachable (connection timeout)
@@ -67,7 +68,7 @@ export class EUCaribbeanAdapter implements TenderSourceAdapter {
             : `${new URL(url).origin}${href.startsWith("/") ? "" : "/"}${href}`;
 
           results.push({
-            externalId: `eucari-${Buffer.from((rawTitle + href).slice(0, 40)).toString("base64").slice(0, 16)}`,
+            externalId: stableExternalId("eucari", fullUrl, rawTitle),
             title: rawTitle,
             organization: "EU Caribbean Development Fund",
             url: fullUrl,

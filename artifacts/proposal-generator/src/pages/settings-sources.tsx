@@ -41,6 +41,8 @@ interface TenderSource {
   adapterSupported: boolean;
   activationBlocked: string | null;
   lastError: string | null;
+  emptyRunStreak?: number;
+  healthWarning?: string | null;
   recentFailures: Array<{ id: number; at: string; message: string | null }>;
   lastCheckedAt?: string | null;
   lastSuccessAt?: string | null;
@@ -498,6 +500,11 @@ export default function SettingsSources() {
                       {!blocked && s.healthState === "failing" && s.lastError && (
                         <p className="text-orange-300 mt-1 break-words" title={s.lastError}>
                            Latest error: {s.lastError}
+                        </p>
+                      )}
+                      {!blocked && s.healthWarning && (
+                        <p className="text-yellow-300 mt-1 break-words">
+                          {s.healthWarning}
                         </p>
                       )}
                       {s.recentFailures.length > 0 && (

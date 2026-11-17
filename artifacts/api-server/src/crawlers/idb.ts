@@ -1,3 +1,4 @@
+import { stableExternalId } from "./dedup.js";
 import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
 
 // NOTE: As of July 2026, iadb.org returns HTTP 403 for all server-to-server
@@ -55,7 +56,7 @@ export class IDBAdapter implements TenderSourceAdapter {
           const href = linkMatch ? linkMatch[1] : "";
           count++;
           results.push({
-            externalId: `idb-${Buffer.from(title.slice(0, 40)).toString("base64").slice(0, 16)}`,
+            externalId: stableExternalId("idb", href, title),
             title,
             organization: "Inter-American Development Bank",
             url: href

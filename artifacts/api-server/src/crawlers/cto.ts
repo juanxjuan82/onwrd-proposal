@@ -1,3 +1,4 @@
+import { stableExternalId } from "./dedup.js";
 import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
 
 // NOTE: As of July 2026, caribtourism.com is unreachable (connection timeout)
@@ -54,7 +55,7 @@ export class CTOAdapter implements TenderSourceAdapter {
           const fullUrl = href.startsWith("http") ? href : `https://www.caribtourism.com${href}`;
 
           results.push({
-            externalId: `cto-${Buffer.from(rawTitle.slice(0, 40)).toString("base64").slice(0, 16)}`,
+            externalId: stableExternalId("cto", fullUrl, rawTitle),
             title: rawTitle,
             organization: "Caribbean Tourism Organization",
             url: fullUrl,

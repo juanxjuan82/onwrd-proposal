@@ -1,3 +1,4 @@
+import { stableExternalId } from "./dedup.js";
 import {
   TenderSourceAdapter,
   TenderOpportunity,
@@ -128,7 +129,7 @@ export class CDBAdapter implements TenderSourceAdapter {
           : documents.map((document) => document.status).join(",");
 
       results.push({
-        externalId: `cdb-${Buffer.from(noticePath).toString("base64url").slice(0, 32)}`,
+        externalId: stableExternalId("cdb", noticeUrl),
         title: rawTitle,
         organization: "Caribbean Development Bank",
         url: noticeUrl,

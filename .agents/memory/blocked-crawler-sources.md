@@ -26,3 +26,9 @@ Other alternatives previously probed and blocked:
 **Why these constraints matter:** Repeatedly crawling inaccessible sources creates noisy failure records, while crawling paths disallowed by robots.txt violates the source's published access rules. CARICOM's procurement paths are currently permitted, but its source still requires a controlled pilot before activation.
 
 **How to apply:** Recheck robots.txt and the exact public notice path before each source reactivation. Keep CDB and CARICOM disabled until a controlled pilot validates useful extraction; never bypass UNDP's site-wide disallow rule.
+
+As checked on 2026-11-17 (from a different network than Replit):
+- OECS (`www.oecs.int/en/work-with-us/procurements/current-tenders`): robots.txt permits the listing and it returns titles, but every tender document (`.../download`, `.../viewdocument/`) redirects to a login page. Titles only, no scope — not worth an adapter unless an account/feed is arranged.
+- Bahamas e-procurement (`bahamas.bonfirehub.com`): robots.txt is `Disallow: /`. Do not crawl.
+
+**External IDs:** build them with `stableExternalId()` in `crawlers/dedup.ts` (full hash of the notice URL). Never truncate an encoded URL/title — a 16-char base64 slice keeps only 12 characters (`https://www.`), and the crawl loop treats a matching externalId as an existing record, so later notices were dropped as duplicates.

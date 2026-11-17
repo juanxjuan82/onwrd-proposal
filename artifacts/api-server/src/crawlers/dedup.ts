@@ -56,3 +56,22 @@ function normalizeDate(value: Date | string | null | undefined): string {
 function normalizeText(value: string): string {
   return value.toLowerCase().replace(/\s+/g, " ").trim();
 }
+/**
+ * Collision-safe external ID for a crawled notice. Hashes the WHOLE identity
+ * (normally the notice URL), so two notices whose URLs or titles merely start
+ * the same way never share an ID.
+ *
+ * Do not build IDs by truncating an encoded title/URL: a 16-character base64
+ * slice keeps only the first 12 characters (for a URL that is "https://www."),
+ * and the crawl loop treats a matching externalId as an existing record, so
+ * every later notice from that source was silently dropped as a duplicate.
+ */
+export function stableExternalId(prefix: string, ...parts: Array<string | null | undefined>): string {
+  const identity = parts
+    .map((part) => {
+      const value = (part ?? "").trim();
+      return normalizeCrawlerUrl(value) ?? normalizeText(value);
+    })
+    .join("\u001f");
+  return `${prefix}-${createHash("sha256").update(identity).digest("hex").slice(0, 24)}`;
+}

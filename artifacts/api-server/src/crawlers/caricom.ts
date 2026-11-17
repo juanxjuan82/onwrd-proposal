@@ -1,3 +1,4 @@
+import { stableExternalId } from "./dedup.js";
 import {
   AdapterFetchContext,
   TenderOpportunity,
@@ -29,11 +30,10 @@ function makeOpportunity(
   closingDate?: string,
   extractionMethod = "caricom_listing_table",
 ): TenderOpportunity {
-  const path = new URL(noticeUrl).pathname;
   const substantiveListing = hasSubstantiveScope(listingContext, title);
   const description = substantiveListing ? listingContext : "";
   return {
-    externalId: `caricom-${Buffer.from(path).toString("base64url").slice(0, 32)}`,
+    externalId: stableExternalId("caricom", noticeUrl),
     title,
     organization: "CARICOM Secretariat",
     url: noticeUrl,
