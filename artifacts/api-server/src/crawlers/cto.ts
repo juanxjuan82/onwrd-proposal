@@ -1,4 +1,4 @@
-import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
+import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml, stableId, absoluteUrl } from "./base-adapter.js";
 
 // Caribbean Tourism Organization — monitors destination marketing, tourism promotion,
 // branding and comms work across the Caribbean region.
@@ -7,6 +7,8 @@ export class CTOAdapter implements TenderSourceAdapter {
 
   async fetchOpportunities(): Promise<TenderOpportunity[]> {
     const results: TenderOpportunity[] = [];
+    let lastError: Error | undefined;
+    let okPages = 0;
 
     const urls = [
       "https://www.caribtourism.com/procurement",
@@ -23,9 +25,10 @@ export class CTOAdapter implements TenderSourceAdapter {
             Accept: "text/html",
           },
         });
-        if (!r.ok) continue;
+        if (!r.ok) { lastError = new Error(`${url} answered HTTP ${r.status}`); continue; }
         const html = await r.text();
-        if (html.length < 500) continue;
+        if (html.length < 500) { lastError = new Error(`${url} returned an empty page`); continue; }
+        okPages++;
 
         const linkPattern =
           /<a[^>]+href="([^"]*(?:procur|tender|rfp|bid|contract|consult|market|campaign|brand|tourism)[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
@@ -39,10 +42,18 @@ export class CTOAdapter implements TenderSourceAdapter {
           if (seen.has(rawTitle)) continue;
           seen.add(rawTitle);
 
-          const fullUrl = href.startsWith("http") ? href : `https://www.caribtourism.com${href}`;
+          const fullUrl = absoluteUrl(href, url);
+          // Test the link's PATH and text — not the domain. (The old pattern matched
+          // "tourism" inside "caribtourism.com", so every link on the site qualified.)
+          let pathAndText = rawTitle;
+          try { pathAndText = `${new URL(fullUrl).pathname} ${rawTitle}`; } catch { /* keep title */ }
+          if (!/procur|tender|rfp|\bbid|request for|expression of interest|consultan|terms of reference/i.test(pathAndText)) continue;
+          if (seen.has(fullUrl)) continue;
+          seen.add(fullUrl);
+
 
           results.push({
-            externalId: `cto-${Buffer.from(rawTitle.slice(0, 40)).toString("base64").slice(0, 16)}`,
+            externalId: stableId("cto", fullUrl),
             title: rawTitle,
             organization: "Caribbean Tourism Organization",
             url: fullUrl,
@@ -60,9 +71,11 @@ export class CTOAdapter implements TenderSourceAdapter {
         }
 
         if (results.length > 0) break;
-      } catch { /* try next URL */ }
+      } catch (err) { lastError = err instanceof Error ? err : new Error(String(err)); }
     }
 
+    // No listing page could be loaded at all — report it rather than look "empty".
+    if (okPages === 0 && lastError) throw lastError;
     return results;
   }
 }
