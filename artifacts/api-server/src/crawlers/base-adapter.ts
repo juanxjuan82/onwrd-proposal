@@ -54,6 +54,7 @@ export interface AdapterFetchContext {
   crawl4ai?: Crawl4AIClient;
   approvedDomains?: readonly string[];
   diagnostics?: CrawlDiagnostic[];
+  robotsAllows?: (url: string) => Promise<boolean>;
 }
 
 export interface TenderSourceAdapter {
@@ -90,10 +91,56 @@ export function resolveNoticeUrl(
   }
 }
 
+export function robotsPathAllowed(
+  robotsText: string,
+  path: string,
+  userAgent = "onwrd-tenderbot",
+): boolean {
+  const groups: Array<{ agents: string[]; rules: Array<{ allow: boolean; path: string }> }> = [];
+  let agents: string[] = [];
+  let rules: Array<{ allow: boolean; path: string }> = [];
+  let hasRule = false;
+  const saveGroup = () => {
+    if (agents.length) groups.push({ agents, rules });
+    agents = [];
+    rules = [];
+    hasRule = false;
+  };
+  for (const rawLine of robotsText.split(/\r?\n/)) {
+    const line = rawLine.split("#", 1)[0].trim();
+    if (!line) continue;
+    const [rawName, ...rawValue] = line.split(":");
+    const name = rawName.trim().toLowerCase();
+    const value = rawValue.join(":").trim();
+    if (name === "user-agent") {
+      if (hasRule) saveGroup();
+      agents.push(value.toLowerCase());
+      continue;
+    }
+    if ((name === "allow" || name === "disallow") && agents.length && value) {
+      hasRule = true;
+      rules.push({ allow: name === "allow", path: value });
+    }
+  }
+  saveGroup();
+  const specific = groups.filter((group) =>
+    group.agents.some((agent) => agent === userAgent.toLowerCase()));
+  const selectedGroups = specific.length
+    ? specific
+    : groups.filter((group) => group.agents.includes("*"));
+  const applicable = selectedGroups.flatMap((group) => group.rules)
+    .filter((rule) => path.startsWith(rule.path.replace(/\*$/, "")))
+    .sort((a, b) =>
+      b.path.replace(/\*/g, "").length - a.path.replace(/\*/g, "").length ||
+      Number(b.allow) - Number(a.allow));
+  return applicable[0]?.allow ?? true;
+}
+
 export function stripHtml(html: string, maxLen = 800): string {
   return html
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<(?:nav|footer|header|aside|form)\b[^>]*>[\s\S]*?<\/(?:nav|footer|header|aside|form)>/gi, " ")
     .replace(/<[^>]+>/g, " ")
     .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
     .replace(/&nbsp;/g, " ").replace(/&#\d+;/g, " ")
@@ -102,13 +149,69 @@ export function stripHtml(html: string, maxLen = 800): string {
     .slice(0, maxLen);
 }
 
+/** Fetch an actual notice page, not an inferred marketing description. */
+export async function fetchNoticeDetail(url: string): Promise<string | null> {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+    const response = await safeFetch(url, { headers: { Accept: "text/html" } });
+    if (!response.ok || !(response.headers.get("content-type") ?? "").includes("text/html")) return null;
+    const html = await response.text();
+    const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1]
+      ?? html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i)?.[1]
+      ?? html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1]
+      ?? html;
+    const content = stripHtml(main, 12000);
+    return content.length >= 120 ? content : null;
+  } catch {
+    return null;
+  }
+}
+
 export function extractDeadline(text: string): Date | undefined {
   const match = text.match(
-    /(?:deadline|closing date|submission date|submit(?:ted)? by|due date)[^.\n:]*[:\s]+([A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2})/i,
+    /\b(?:submission\s+deadline|deadline|closing\s+date|closing|submit(?:ted)?\s+by|due\s+date)\b[^.\n:]{0,48}[:\s]+(\d{4}[/-]\d{1,2}[/-]\d{1,2}|\d{1,2}[/-]\d{1,2}[/-]\d{4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})/i,
   );
   if (!match) return undefined;
-  const date = new Date(match[1]);
-  return Number.isNaN(date.getTime()) ? undefined : date;
+
+  const value = match[1].trim();
+  let year = 0;
+  let month = 0;
+  let day = 0;
+  let parts: RegExpMatchArray | null;
+  if ((parts = value.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/))) {
+    year = Number(parts[1]);
+    month = Number(parts[2]);
+    day = Number(parts[3]);
+  } else if ((parts = value.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/))) {
+    day = Number(parts[1]);
+    month = Number(parts[2]);
+    year = Number(parts[3]);
+  } else {
+    const monthNames: Record<string, number> = {
+      jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4,
+      may: 5, jun: 6, june: 6, jul: 7, july: 7, aug: 8, august: 8, sep: 9, sept: 9,
+      september: 9, oct: 10, october: 10, nov: 11, november: 11, dec: 12, december: 12,
+    };
+    const monthFirst = value.match(/^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})$/);
+    const dayFirst = value.match(/^(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})$/);
+    if (monthFirst) {
+      month = monthNames[monthFirst[1].toLowerCase()] ?? 0;
+      day = Number(monthFirst[2]);
+      year = Number(monthFirst[3]);
+    } else if (dayFirst) {
+      day = Number(dayFirst[1]);
+      month = monthNames[dayFirst[2].toLowerCase()] ?? 0;
+      year = Number(dayFirst[3]);
+    } else {
+      return undefined;
+    }
+  }
+  if (!Number.isInteger(month) || month < 1 || month > 12) return undefined;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+    ? date
+    : undefined;
 }
 
 export interface HtmlPageResult {
@@ -126,8 +229,8 @@ export interface TenderDetailResult {
 
 export interface TenderDocumentMetadata {
   url: string;
-  format: "pdf" | "docx";
-  status: "extracted" | "scanned_or_textless" | "fetch_failed" | "malformed";
+  format: "pdf" | "docx" | "unsupported";
+  status: "extracted" | "scanned_or_textless" | "fetch_failed" | "malformed" | "unsupported" | "blocked_by_robots";
   characters: number;
   extractedText?: string;
 }
@@ -304,6 +407,27 @@ export async function fetchTenderDetailWithOptionalBrowser(
   title: string,
   context: AdapterFetchContext | undefined,
 ): Promise<TenderDetailResult | undefined> {
+  if (context?.robotsAllows) {
+    try {
+      if (!await context.robotsAllows(url)) {
+        recordDiagnostic(context, {
+          code: "direct_failed",
+          url,
+          message: "robots.txt disallows this detail URL.",
+          method: "direct",
+        });
+        return undefined;
+      }
+    } catch (error) {
+      recordDiagnostic(context, {
+        code: "direct_failed",
+        url,
+        message: `Could not verify robots.txt before detail fetch: ${error instanceof Error ? error.message : String(error)}`,
+        method: "direct",
+      });
+      return undefined;
+    }
+  }
   try {
     const direct = await fetchApprovedText(
       url,
@@ -316,11 +440,14 @@ export async function fetchTenderDetailWithOptionalBrowser(
       const contentType = response.headers.get("content-type") ?? "";
       if (!contentType || /html|text/i.test(contentType)) {
         const html = direct.text;
-        const content = extractMainContent(html);
+        const content = extractNoticeContent(html);
         const documents = await extractProcurementDocuments(
           html,
           url,
           context?.approvedDomains ?? [new URL(url).hostname],
+          undefined,
+          undefined,
+          context?.robotsAllows,
         );
         const documentText = documents
           .filter((document) => document.status === "extracted" && document.text)
@@ -400,7 +527,7 @@ export async function fetchTenderDetailWithOptionalBrowser(
   };
 }
 
-function extractMainContent(html: string): string {
+export function extractNoticeContent(html: string): string {
   const region = html.match(/<article\b[\s\S]*?<\/article>/i)?.[0]
     ?? html.match(/<main\b[\s\S]*?<\/main>/i)?.[0]
     ?? html;
@@ -419,6 +546,7 @@ export async function extractProcurementDocuments(
   fetchBytes: typeof fetchApprovedBytes = fetchApprovedBytes,
   parsePdfText: (buffer: Buffer) => Promise<string> = async (buffer) =>
     (await parsePdfSerially(buffer)).text ?? "",
+  robotsAllows: (url: string) => Promise<boolean> = async () => true,
 ): Promise<TenderDocument[]> {
   const region = html.match(/<article\b[\s\S]*?<\/article>/i)?.[0]
     ?? html.match(/<main\b[\s\S]*?<\/main>/i)?.[0]
@@ -429,7 +557,7 @@ export async function extractProcurementDocuments(
   while ((match = anchorPattern.exec(region)) && links.length < 3) {
     const href = match[2].replace(/&amp;/g, "&");
     const label = stripHtml(match[3], 300);
-    if (!/\.(?:pdf|docx)(?:[?#]|$)/i.test(href)) continue;
+    if (!/\.(?:pdf|docx|doc|rtf|xls|xlsx|ppt|pptx|zip)(?:[?#]|$)/i.test(href)) continue;
     if (/\b(?:blank|template|application form)\b/i.test(`${href} ${label}`)) continue;
     if (!/(procurement|tender|rfp|tor|terms|reference|proposal|eoi|expression|consult|scope|notice)/i.test(`${href} ${label}`)) continue;
     const safeUrl = resolveNoticeUrl(href, pageUrl, approvedDomains);
@@ -438,7 +566,25 @@ export async function extractProcurementDocuments(
 
   const results: TenderDocument[] = [];
   for (const link of links) {
-    const format = /\.docx(?:[?#]|$)/i.test(link.href) ? "docx" : "pdf";
+    const extension = link.href.match(/\.([a-z0-9]+)(?:[?#]|$)/i)?.[1]?.toLowerCase();
+    const format: TenderDocumentMetadata["format"] = extension === "pdf"
+      ? "pdf"
+      : extension === "docx"
+        ? "docx"
+        : "unsupported";
+    if (format === "unsupported") {
+      results.push({ url: link.href, format, status: "unsupported", characters: 0 });
+      continue;
+    }
+    try {
+      if (!await robotsAllows(link.href)) {
+        results.push({ url: link.href, format, status: "blocked_by_robots", characters: 0 });
+        continue;
+      }
+    } catch {
+      results.push({ url: link.href, format, status: "blocked_by_robots", characters: 0 });
+      continue;
+    }
     let response: Response;
     let bytes: Buffer;
     try {
@@ -466,7 +612,7 @@ export async function extractProcurementDocuments(
         format,
         status: substantiveCharacters >= 80 ? "extracted" : "scanned_or_textless",
         characters: text.length,
-        ...(substantiveCharacters >= 80 ? { text } : {}),
+        ...(substantiveCharacters >= 80 ? { text, extractedText: text } : {}),
       });
     } catch {
       results.push({ url: link.href, format, status: "malformed", characters: 0 });
@@ -510,6 +656,22 @@ export function hasGenuineDetailContent(content: string, title: string): boolean
   const safeTitle = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const withoutTitle = content.replace(new RegExp(safeTitle, "gi"), "").trim();
   return content.length >= 120 && withoutTitle.length >= 60;
+}
+
+export function hasSubstantiveScope(content: string, title: string): boolean {
+  const normalized = stripHtml(content, 12_000).replace(/\s+/g, " ").trim();
+  if (!normalized) return false;
+  const safeTitle = title.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const withoutTitle = normalized.replace(new RegExp(safeTitle, "gi"), " ").trim();
+  const meaningful = withoutTitle
+    .replace(/\b(?:home|about us|contact us|privacy policy|terms of use|site map|procurement notices)\b/gi, " ")
+    .replace(/[|•·]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const alphaNumericCount = (meaningful.match(/[A-Za-z0-9]/g) ?? []).length;
+  if (meaningful.length < 80 || alphaNumericCount < 70) return false;
+  if (/^(?:home|about|contact|services|news|procurement|notices|search|menu|\s)+$/i.test(meaningful)) return false;
+  return true;
 }
 
 function isApprovedUrl(value: string, approvedDomains: readonly string[]): boolean {

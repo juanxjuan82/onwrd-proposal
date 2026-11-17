@@ -15,6 +15,8 @@ import {
   isCrawlRunning,
   SOURCE_ADAPTER_CATALOG,
   getSourceAdapterDefinition,
+  getCrawlBlockReason,
+  requiresControlledPilot,
   validateSourceConfiguration,
 } from "../crawlers/index.js";
 import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
@@ -113,6 +115,8 @@ router.patch("/tender-sources/:id", async (req, res) => {
     url !== current.url ||
     domainsChanged ||
     nextBrowserEnabled !== current.browserEnabled;
+  const currentBlockReason = getCrawlBlockReason(current.adapterType);
+  const requestedBlockReason = getCrawlBlockReason(adapterType);
   if (configChanged && body.active === true) {
     res.status(422).json({
       error: "Save configuration changes while inactive, run a successful test crawl with usable records, then activate the source.",
@@ -131,8 +135,11 @@ router.patch("/tender-sources/:id", async (req, res) => {
       res.status(400).json({ error: "active must be a boolean" });
       return;
     }
-    if (body.active && validated.definition.blockedReason) {
-      res.status(422).json({ error: validated.definition.blockedReason, code: "activation_blocked" });
+    if (body.active && (requestedBlockReason || (adapterType === current.adapterType && currentBlockReason))) {
+      res.status(422).json({
+        error: requestedBlockReason ?? currentBlockReason,
+        code: "activation_blocked",
+      });
       return;
     }
     if (body.active && !current.active) {
@@ -147,6 +154,13 @@ router.patch("/tender-sources/:id", async (req, res) => {
         .orderBy(desc(crawlerRunsTable.completedAt))
         .limit(1);
       if (!proof) {
+        if (requiresControlledPilot(adapterType)) {
+          res.status(422).json({
+            error: "Activation requires a successful, versioned, source-specific pilot with at least one usable new record. Run the pilot while inactive for the current configuration version, then try again.",
+            code: "activation_requires_versioned_pilot",
+          });
+          return;
+        }
         res.status(422).json({
           error: "Activation requires a successful test crawl that persists at least one usable new record. Run this source while inactive, then try again.",
           code: "activation_requires_test",

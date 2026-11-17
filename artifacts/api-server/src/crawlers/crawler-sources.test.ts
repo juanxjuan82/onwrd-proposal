@@ -32,7 +32,7 @@ async function withMockFetch<T>(mockFn: MockFetchFn, fn: () => Promise<T>): Prom
 describe("base adapter detail quality", () => {
   it("refreshes only incomplete unpromoted discoveries and recomputes profile scores", () => {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
-    const guard = source.indexOf("if (existingWasIncomplete && richer && !existing.opportunityId)");
+    const guard = source.indexOf("if (canRefreshIncompleteDiscovery(");
     assert.notEqual(guard, -1, "canonical opportunities must not be overwritten by crawler refreshes");
     const update = source.slice(guard, source.indexOf("const eligibility", guard));
     assert.match(update, /profileMatchesOpportunity/);
@@ -43,9 +43,9 @@ describe("base adapter detail quality", () => {
 
   it("stores new attachment evidence on linked discoveries without rewriting canonical fields", () => {
     const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
-    const guard = source.indexOf("if (existing.opportunityId)");
+    const guard = source.indexOf("if (existing.opportunityId !== null)");
     assert.notEqual(guard, -1);
-    const update = source.slice(guard, source.indexOf("const needsEnrichment", guard));
+    const update = source.slice(guard, source.indexOf("if (canRefreshIncompleteDiscovery(", guard));
     assert.match(update, /mergeDocumentEvidence/);
     assert.match(update, /rawData:\s*evidenceOnlyRaw/);
     assert.doesNotMatch(update, /description:|deadline:|recommendation:|status:|opportunityId:/);
@@ -232,7 +232,7 @@ describe("IDB adapter", () => {
 describe("CDB adapter", () => {
   it("throws when all requests return 404", async () => {
     const { CDBAdapter } = await import("./cdb.js");
-    const adapter = new CDBAdapter();
+    const adapter = new CDBAdapter(0);
     await assert.rejects(
       () => withMockFetch(all404, () => adapter.fetchOpportunities()),
       (err: Error) => {
@@ -244,13 +244,24 @@ describe("CDB adapter", () => {
 
   it("returns empty array when page responds but has no procurement links", async () => {
     const { CDBAdapter } = await import("./cdb.js");
-    const adapter = new CDBAdapter();
-    const results = await withMockFetch(emptyHtmlPage, () => adapter.fetchOpportunities());
+    const adapter = new CDBAdapter(0);
+    const results = await withMockFetch(async (url) => url.endsWith("/robots.txt")
+      ? new Response("User-agent: *\nAllow: /", {
+        status: 200,
+        headers: { "content-type": "text/plain" },
+      })
+      : emptyHtmlPage(url), () => adapter.fetchOpportunities());
     assert.deepEqual(results, []);
   });
 
   it("extracts a CDB notice detail and deadline from the procurement listing", async () => {
     const mockFetch: MockFetchFn = async (url) => {
+      if (url.endsWith("/robots.txt")) {
+        return new Response("User-agent: *\nAllow: /", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+      }
       if (url.includes("/procurement-notices/consultancy-example")) {
         return new Response(
           "<article><h1>Consultancy Example</h1><p>Qualified consultants are invited to assess " +
@@ -265,7 +276,7 @@ describe("CDB adapter", () => {
       );
     };
     const { CDBAdapter } = await import("./cdb.js");
-    const results = await withMockFetch(mockFetch, () => new CDBAdapter().fetchOpportunities());
+    const results = await withMockFetch(mockFetch, () => new CDBAdapter(0).fetchOpportunities());
     assert.equal(results.length, 1);
     assert.match(results[0].description, /stakeholder interviews/);
     assert.equal(results[0].deadline?.toISOString().slice(0, 10), "2026-10-23");
@@ -312,64 +323,17 @@ describe("EU Caribbean adapter", () => {
 // ── (2) Active adapters — also throw on total failure ─────────────────────────
 
 describe("UNGM adapter", () => {
-  it("throws when the server returns non-200", async () => {
+  it("refuses all requests while UNDP robots.txt disallows all paths", async () => {
     const { UNGMAdapter } = await import("./ungm.js");
-    const adapter = new UNGMAdapter();
+    let requests = 0;
     await assert.rejects(
-      () => withMockFetch(all403, () => adapter.fetchOpportunities()),
-      /UNGM.*HTTP 403/i,
+      () => withMockFetch(async () => {
+        requests++;
+        return new Response("unexpected request");
+      }, () => new UNGMAdapter().fetchOpportunities()),
+      /robots\.txt disallows all paths/i,
     );
-  });
-
-  it("returns empty array when page HTML has no notice links", async () => {
-    const { UNGMAdapter } = await import("./ungm.js");
-    const adapter = new UNGMAdapter();
-    const results = await withMockFetch(emptyHtmlPage, () => adapter.fetchOpportunities());
-    assert.deepEqual(results, []);
-  });
-
-  it("produces descriptions with enough context to pass eligibility content-quality gate", async () => {
-    // Simulate a UNDP listing page with a table row containing notice link + surrounding columns
-    const mockHtml: MockFetchFn = async () => new Response(
-      `<html><body><table>
-        <tr>
-          <td><a href="view_notice.cfm?notice_id=99001">Caribbean Communications Specialist</a></td>
-          <td>Barbados</td>
-          <td>Individual Consultant — Communications and media services for UNDP Caribbean Country Office</td>
-          <td>2026-09-30</td>
-        </tr>
-      </table></body></html>`,
-      { status: 200, headers: { "content-type": "text/html" } },
-    );
-
-    const { UNGMAdapter } = await import("./ungm.js");
-    const adapter = new UNGMAdapter();
-    const results = await withMockFetch(mockHtml, () => adapter.fetchOpportunities());
-
-    assert.equal(results.length, 1, "Should find 1 notice");
-    const desc = results[0].description;
-    // After stripping the title, remaining description must be >60 chars (eligibility gate)
-    const safeTitle = results[0].title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const withoutTitle = desc.replace(new RegExp(safeTitle, "gi"), "").trim();
-    assert.ok(
-      withoutTitle.length > 60,
-      `Description after removing title must be >60 chars to pass eligibility gate; got ${withoutTitle.length} chars: "${withoutTitle.slice(0, 100)}"`,
-    );
-  });
-
-  it("retains a listing and marks it when detail enrichment fails", async () => {
-    const mockHtml: MockFetchFn = async (url) => {
-      if (url.includes("view_notice.cfm")) return new Response("Unavailable", { status: 503 });
-      return new Response(`<table><tr><td>
-        <a href="view_notice.cfm?notice_id=99002">Caribbean Research Consultant</a>
-        <span>Barbados procurement services and stakeholder research scope</span>
-      </td></tr></table>`, { status: 200, headers: { "content-type": "text/html" } });
-    };
-    const { UNGMAdapter } = await import("./ungm.js");
-    const results = await withMockFetch(mockHtml, () => new UNGMAdapter().fetchOpportunities());
-    assert.equal(results.length, 1);
-    assert.equal(results[0].rawData?.needsEnrichment, true);
-    assert.match(results[0].description, /Barbados procurement services/);
+    assert.equal(requests, 0);
   });
 });
 
@@ -392,70 +356,21 @@ describe("Bahamas Gov adapter", () => {
 });
 
 describe("CARICOM adapter", () => {
-  it("throws when all requests return 404", async () => {
+  it("does not request the listing when robots.txt blocks it", async () => {
+    const requests: string[] = [];
     const { CARICOMAdapter } = await import("./caricom.js");
-    const adapter = new CARICOMAdapter();
     await assert.rejects(
-      () => withMockFetch(all404, () => adapter.fetchOpportunities()),
-      /CARICOM.*all.*request/i,
+      () => withMockFetch(async (url) => {
+        const path = new URL(url).pathname;
+        requests.push(path);
+        return new Response("User-agent: *\nDisallow: /", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+      }, () => new CARICOMAdapter(0).fetchOpportunities()),
+      /robots\.txt disallows the procurement-notices listing path/i,
     );
-  });
-
-  it("returns empty array when page responds but has no procurement links", async () => {
-    const { CARICOMAdapter } = await import("./caricom.js");
-    const adapter = new CARICOMAdapter();
-    const results = await withMockFetch(emptyHtmlPage, () => adapter.fetchOpportunities());
-    assert.deepEqual(results, []);
-  });
-
-  it("produces descriptions with enough context to pass eligibility content-quality gate", async () => {
-    // Simulate a CARICOM page with a procurement link inside a rich context block
-    const mockHtml: MockFetchFn = async () => new Response(
-      `<html><body>
-        <article>
-          <p>CARICOM Secretariat invites proposals from qualified firms to provide
-          communications and public awareness campaign services for the CARICOM
-          Single Market initiative. Ref: CS-2026-042. Deadline: 30 September 2026.
-          <a href="/procurement/communications-campaign-cs2026042">
-            Communications Campaign — CARICOM Single Market
-          </a>
-          Scope includes strategic communications, content creation, social media
-          management, and community engagement across member states.</p>
-        </article>
-      </body></html>`,
-      { status: 200, headers: { "content-type": "text/html" } },
-    );
-
-    const { CARICOMAdapter } = await import("./caricom.js");
-    const adapter = new CARICOMAdapter();
-    const results = await withMockFetch(mockHtml, () => adapter.fetchOpportunities());
-
-    assert.ok(results.length > 0, "Should find at least 1 procurement link");
-    const desc = results[0].description;
-    const safeTitle = results[0].title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const withoutTitle = desc.replace(new RegExp(safeTitle, "gi"), "").trim();
-    assert.ok(
-      withoutTitle.length > 60,
-      `Description after removing title must be >60 chars to pass eligibility gate; got ${withoutTitle.length} chars: "${withoutTitle.slice(0, 100)}"`,
-    );
-  });
-
-  it("retains a discovered tender when its detail page is unavailable", async () => {
-    const padding = " ".repeat(600);
-    const mockHtml: MockFetchFn = async (url) => {
-      if (url.includes("/procurement/partial")) return new Response("Unavailable", { status: 503 });
-      if (url === "https://caricom.org/procurement-notices") {
-        return new Response(`<article><a href="/procurement/partial">Regional communications tender</a>
-          CARICOM Secretariat seeks proposals for public awareness and communications services. ${padding}</article>`,
-          { status: 200, headers: { "content-type": "text/html" } });
-      }
-      return new Response("No notices", { status: 200, headers: { "content-type": "text/html" } });
-    };
-    const { CARICOMAdapter } = await import("./caricom.js");
-    const results = await withMockFetch(mockHtml, () => new CARICOMAdapter().fetchOpportunities());
-    assert.equal(results.length, 1);
-    assert.equal(results[0].rawData?.needsEnrichment, true);
-    assert.match(results[0].description, /public awareness and communications/);
+    assert.deepEqual(requests, ["/robots.txt"]);
   });
 });
 
@@ -486,21 +401,37 @@ describe("seedDefaultSources — deactivation enforcement", () => {
     );
   });
 
-  it("blocked adapter types are seeded with active=false in defaults array", async () => {
+  it("blocked and pilot-gated adapter types are seeded with active=false", async () => {
     const fs = await import("node:fs/promises");
     const source = await fs.readFile(
       new URL("./index.ts", import.meta.url).pathname.replace(/[^/]+$/, "index.ts"),
       "utf-8",
     );
 
-    const blocked = ["idb", "cdb", "cto", "eu_caribbean"];
-    for (const adapter of blocked) {
+    const inactive = ["idb", "cdb", "caricom", "cto", "eu_caribbean"];
+    for (const adapter of inactive) {
       const match = source.match(
         new RegExp(`adapterType:\\s*["']${adapter}["'][^}]+active:\\s*(true|false)`),
       );
       assert.ok(match, `${adapter}: missing adapterType + active flag in seedDefaultSources`);
       assert.equal(match[1], "false", `${adapter}: must be seeded with active=false`);
     }
+  });
+
+  it("requires a current-version successful pilot before keeping CDB or CARICOM active", async () => {
+    const fs = await import("node:fs/promises");
+    const source = await fs.readFile(
+      new URL("./index.ts", import.meta.url).pathname.replace(/[^/]+$/, "index.ts"),
+      "utf-8",
+    );
+    const guardStart = source.indexOf("const activePilotSources");
+    const guardEnd = source.indexOf("const existing = await db.select().from(tenderSourcesTable)", guardStart);
+    assert.ok(guardStart >= 0 && guardEnd > guardStart, "missing controlled-pilot startup guard");
+    const guard = source.slice(guardStart, guardEnd);
+    assert.match(guard, /inArray\(tenderSourcesTable\.adapterType,\s*\["cdb",\s*"caricom"\]\)/);
+    assert.match(guard, /sourceConfigurationVersion/);
+    assert.match(guard, /eq\(crawlerRunsTable\.status,\s*"success"\)/);
+    assert.match(guard, /gte\(crawlerRunsTable\.itemsNew,\s*1\)/);
   });
 });
 

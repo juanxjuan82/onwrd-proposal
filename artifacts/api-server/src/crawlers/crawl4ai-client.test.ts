@@ -10,7 +10,9 @@ import {
   type RenderedPageResult,
 } from "./crawl4ai-client.js";
 import {
+  extractDeadline,
   fetchApprovedText,
+  fetchTenderDetailWithOptionalBrowser,
   readBoundedResponseText,
   type AdapterFetchContext,
 } from "./base-adapter.js";
@@ -275,92 +277,69 @@ describe("approved direct fetching", () => {
 });
 
 describe("HTML adapter browser enrichment", () => {
-  it("discovers JavaScript-rendered CARICOM links, enriches detail, and deduplicates links", async () => {
-    const directHtml = `<html><body><div id="app">Loading procurement notices</div>${" ".repeat(700)}</body></html>`;
+  it("uses Crawl4AI fallback only after the direct detail request fails", async () => {
     const originalFetch = global.fetch;
-    global.fetch = (async (input) => {
-      const url = String(input);
-      if (url.includes("regional-communications-campaign")) {
-        return new Response("Unavailable", { status: 503 });
-      }
-      return new Response(directHtml);
-    }) as typeof fetch;
-    const calls: string[] = [];
+    global.fetch = (async () => new Response("Unavailable", { status: 503 })) as typeof fetch;
+    let calls = 0;
     const fakeClient: Crawl4AIClient = {
       config,
       async render(url) {
-        calls.push(url);
-        if (url.includes("communications-rfp")) {
-          return rendered({
-            requestedUrl: url,
-            finalUrl: url,
-            content: "CARICOM Secretariat invites qualified firms to deliver a regional communications and public awareness campaign. The scope includes strategy, content creation, stakeholder engagement, social media management, measurable deliverables, and reporting. Deadline: September 30, 2026.",
-            metadata: { organization: "CARICOM Secretariat", deadline: "September 30, 2026" },
-          });
-        }
+        calls++;
         return rendered({
           requestedUrl: url,
           finalUrl: url,
-          links: [
-            { url: "https://caricom.org/procurement/communications-rfp", text: "Regional Communications Campaign RFP" },
-            { url: "https://caricom.org/procurement/communications-rfp", text: "Regional Communications Campaign RFP" },
-          ],
+          content: "The selected consultancy firm will design a communications strategy, prepare public information materials, conduct stakeholder interviews, deliver a regional public awareness campaign, and submit a final implementation and impact report.",
         });
       },
     };
-    const context: AdapterFetchContext = {
-      crawl4ai: fakeClient,
-      approvedDomains: ["caricom.org"],
-      diagnostics: [],
-    };
 
     try {
-      const { CARICOMAdapter } = await import("./caricom.js");
-      const results = await new CARICOMAdapter().fetchOpportunities(context);
-      assert.equal(results.length, 1);
-      assert.match(results[0].description, /stakeholder engagement/i);
-      assert.equal(results[0].deadline?.getFullYear(), 2026);
-      assert.equal(results[0].rawData?.extractionMethod, "crawl4ai_detail");
-      assert.equal(calls.filter((url) => url.includes("communications-rfp")).length, 1);
+      const detail = await fetchTenderDetailWithOptionalBrowser(
+        "https://public.example/notice/123",
+        "Regional public awareness campaign",
+        { crawl4ai: fakeClient, approvedDomains: ["public.example"], diagnostics: [] },
+      );
+      assert.equal(detail?.method, "crawl4ai");
+      assert.match(detail?.content ?? "", /stakeholder interviews/i);
+      assert.equal(calls, 1);
     } finally {
       global.fetch = originalFetch;
     }
   });
 
-  it("keeps genuine direct content without invoking browser enrichment", async () => {
-    const directHtml = `<html><body><article>
-      CARICOM invites firms to provide strategic communications, campaign planning,
-      content production, stakeholder engagement, and social media delivery across
-      member states with detailed milestones and reporting requirements.
-      <a href="/procurement/regional-communications-campaign">Regional Communications Campaign RFP</a>
-      Deadline: 30 September 2026.
-    </article>${" ".repeat(600)}</body></html>`;
+  it("keeps genuine direct detail without invoking browser enrichment", async () => {
+    const directHtml = `<html><body><article><p>
+      The selected consultancy will prepare a communications strategy, produce public information
+      content, coordinate stakeholder interviews, deliver the regional campaign, meet detailed
+      milestones, and provide final reporting and measurable outcomes.
+    </p></article></body></html>`;
     const originalFetch = global.fetch;
-    global.fetch = (async (input) => {
-      const url = String(input);
-      if (url.includes("expired-communications-rfp")) {
-        return new Response("Unavailable", { status: 503 });
-      }
-      return new Response(directHtml);
-    }) as typeof fetch;
+    global.fetch = (async () => new Response(directHtml, {
+      headers: { "content-type": "text/html" },
+    })) as typeof fetch;
     const diagnostics: NonNullable<AdapterFetchContext["diagnostics"]> = [];
+    let calls = 0;
     const fakeClient: Crawl4AIClient = {
       config,
       async render(url) {
+        calls++;
         throw new Crawl4AIError("service_unavailable", "service offline", url);
       },
     };
 
     try {
-      const { CARICOMAdapter } = await import("./caricom.js");
-      const results = await new CARICOMAdapter().fetchOpportunities({
+      const detail = await fetchTenderDetailWithOptionalBrowser(
+        "https://public.example/notice/123",
+        "Regional communications campaign",
+        {
         crawl4ai: fakeClient,
-        approvedDomains: ["caricom.org"],
+        approvedDomains: ["public.example"],
         diagnostics,
-      });
-      assert.equal(results.length, 1);
-      assert.match(results[0].description, /detailed milestones/i);
-      assert.equal(results[0].rawData?.extractionMethod, "direct_detail");
+        },
+      );
+      assert.equal(detail?.method, "direct");
+      assert.match(detail?.content ?? "", /detailed\s+milestones/i);
+      assert.equal(calls, 0);
       assert.equal(
         diagnostics.some((item) => item.code === "crawl4ai_service_unavailable"),
         false,
@@ -371,33 +350,24 @@ describe("HTML adapter browser enrichment", () => {
     }
   });
 
-  it("preserves an expired rendered deadline for deterministic scoring to reject", async () => {
+  it("preserves an expired deadline from real detail text", async () => {
     const directHtml = `<html><body><article>
-      <a href="/procurement/expired-communications-rfp">Expired Communications RFP</a>
-      Genuine procurement scope for strategic communications and stakeholder engagement.
-    </article>${" ".repeat(600)}</body></html>`;
+      The selected firm will develop a public communications strategy, coordinate stakeholder
+      interviews, deliver campaign materials, manage community outreach, and report final results.
+      Deadline: January 1, 2020.
+    </article></body></html>`;
     const originalFetch = global.fetch;
-    global.fetch = (async () => new Response(directHtml)) as typeof fetch;
-    const fakeClient: Crawl4AIClient = {
-      config,
-      async render(url) {
-        return rendered({
-          requestedUrl: url,
-          finalUrl: url,
-          content: "Expired CARICOM communications procurement with genuine campaign scope, deliverables, milestones, stakeholder engagement requirements, and deadline: January 1, 2020.",
-          metadata: { deadline: "January 1, 2020" },
-        });
-      },
-    };
+    global.fetch = (async () => new Response(directHtml, {
+      headers: { "content-type": "text/html" },
+    })) as typeof fetch;
 
     try {
-      const { CARICOMAdapter } = await import("./caricom.js");
-      const [result] = await new CARICOMAdapter().fetchOpportunities({
-        crawl4ai: fakeClient,
-        approvedDomains: ["caricom.org"],
-        diagnostics: [],
-      });
-      assert.equal(result.deadline?.getFullYear(), 2020);
+      const detail = await fetchTenderDetailWithOptionalBrowser(
+        "https://public.example/notice/expired",
+        "Regional communications procurement",
+        { approvedDomains: ["public.example"] },
+      );
+      assert.equal(extractDeadline(detail?.content ?? "")?.getFullYear(), 2020);
     } finally {
       global.fetch = originalFetch;
     }

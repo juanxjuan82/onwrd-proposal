@@ -3,6 +3,8 @@ import { describe, it } from "node:test";
 import {
   SOURCE_ADAPTER_CATALOG,
   getSourceAdapterDefinition,
+  getCrawlBlockReason,
+  requiresControlledPilot,
   validateSourceConfiguration,
 } from "../crawlers/index.js";
 import { deriveSourceHealth } from "./source-health.js";
@@ -11,12 +13,16 @@ describe("source configuration guardrails", () => {
   it("publishes only registered adapters and marks blocked replacements", () => {
     assert.deepEqual(
       SOURCE_ADAPTER_CATALOG.filter((item) => item.recommended).map((item) => item.adapterType),
-      ["world_bank", "bahamas_gov", "caricom"],
+      ["world_bank", "bahamas_gov"],
     );
     for (const adapterType of ["idb", "cto", "eu_caribbean"]) {
       assert.match(getSourceAdapterDefinition(adapterType)?.blockedReason ?? "", /verified|Verify/i);
     }
     assert.match(getSourceAdapterDefinition("ungm")?.blockedReason ?? "", /robots\.txt|disallows/i);
+    assert.equal(getSourceAdapterDefinition("caricom")?.blockedReason, undefined);
+    assert.equal(getSourceAdapterDefinition("caricom")?.recommended, false);
+    assert.equal(getCrawlBlockReason("caricom"), null);
+    assert.equal(requiresControlledPilot("caricom"), true);
     assert.equal(getSourceAdapterDefinition("cdb")?.blockedReason, undefined);
     assert.equal(getSourceAdapterDefinition("ted_europa"), undefined);
   });

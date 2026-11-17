@@ -295,6 +295,11 @@ function matchAll(text: string, phrases: string[]): string[] {
   return phrases.filter((p) => phraseMatch(text, p));
 }
 
+function boundedPhraseMatch(text: string, phrase: string): boolean {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, "i").test(text);
+}
+
 function classifyContentQuality(description: string, title: string): ContentQuality {
   const t = description.trim();
 
@@ -348,7 +353,7 @@ export function evaluateCrawlerEligibility(discovery: EligibilityInput): Eligibi
   // Checked against title + first 300 chars of description.
   const individualHireCorpus = `${discovery.title} ${discovery.description.slice(0, 300)}`.toLowerCase();
   const individualHireMatches = INDIVIDUAL_HIRE_PHRASES.filter((p) =>
-    individualHireCorpus.includes(p.toLowerCase()),
+    boundedPhraseMatch(individualHireCorpus, p),
   );
   if (individualHireMatches.length > 0) {
     return {
@@ -393,11 +398,9 @@ export function evaluateCrawlerEligibility(discovery: EligibilityInput): Eligibi
     }
   }
 
-  // 8. Require at least one positive signal only for SKIP-recommended items.
-  //    CONSIDER items (score 40–59) already cleared a keyword relevance test —
-  //    they flow to the "reviewing" bucket without needing an exact phrase match.
-  //    PURSUE items (score 60+) trivially pass this gate too.
-  if (positiveSignals.length === 0 && discovery.recommendation === "SKIP") {
+  // 8. Require explicit scope evidence for every recommendation. A high
+  //    deterministic score cannot make generic language qualify on its own.
+  if (positiveSignals.length === 0) {
     rejectionReasons.push(
       "No explicit ONWRD core service phrases found — generic terms alone do not qualify",
     );
