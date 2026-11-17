@@ -28,6 +28,7 @@ import {
   UploadCloud,
   X,
   ClipboardList,
+  AlertTriangle,
 } from "lucide-react";
 import {
   Form,
@@ -200,6 +201,7 @@ export default function NewProposal() {
     return "blank"; // plain /new → blank mode per spec
   });
   const [pasteText, setPasteText] = useState("");
+  const [importText, setImportText] = useState("");
   const [pasteFile, setPasteFile] = useState<File | null>(null);
   const [pasteFileExtracting, setPasteFileExtracting] = useState(false);
   const [pasteFileError, setPasteFileError] = useState<string | null>(null);
@@ -209,6 +211,7 @@ export default function NewProposal() {
   const [importUrl, setImportUrl] = useState("");
   const [creatingOpportunity, setCreatingOpportunity] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileSelectionRef = useRef(0);
   const checkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [, setLocation] = useLocation();
 
@@ -316,57 +319,42 @@ export default function NewProposal() {
   }, [pasteText, mode]);
 
   const handleFileSelect = async (file: File) => {
+    const selection = ++fileSelectionRef.current;
     setPasteFile(file);
     setPasteFileError(null);
-    if (file.name.match(/\.txt$/i)) {
-      const text = await file.text();
-      setPasteText(text.trim());
-      return;
-    }
+    setImportText("");
     setPasteFileExtracting(true);
     try {
-      const fd = new FormData();
-      fd.append("file", file);
-      const resp = await fetch(`${BASE}/api/proposals/extract-text`, { method: "POST", body: fd });
-      const data = await resp.json() as { text?: string; error?: string };
-      if (!resp.ok) throw new Error(data.error ?? "Extraction failed");
-      setPasteText(data.text ?? "");
+      let text: string;
+      if (file.name.match(/\.txt$/i)) {
+        text = await file.text();
+      } else {
+        const fd = new FormData();
+        fd.append("file", file);
+        const resp = await fetch(`${BASE}/api/proposals/extract-text`, { method: "POST", body: fd });
+        const data = await resp.json() as { text?: string; error?: string };
+        if (!resp.ok) throw new Error(data.error ?? "Extraction failed");
+        text = data.text ?? "";
+      }
+      if (selection !== fileSelectionRef.current) return;
+      const extracted = text.trim();
+      if (!extracted) throw new Error("No readable text was found in this file.");
+      setImportText(extracted);
     } catch (e) {
+      if (selection !== fileSelectionRef.current) return;
       setPasteFileError(e instanceof Error ? e.message : "Could not read file");
       setPasteFile(null);
     } finally {
-      setPasteFileExtracting(false);
+      if (selection === fileSelectionRef.current) {
+        setPasteFileExtracting(false);
+      }
     }
-  };
-
-  const handlePasteSubmit = () => {
-    if (!pasteText.trim()) {
-      setPasteError("Please paste some text or upload a document first.");
-      return;
-    }
-    setPasteError(null);
-    const brief = pasteText.trim();
-    setBriefText(brief);
-    parseBrief.mutate(
-      { data: { briefText: brief } },
-      {
-        onSuccess: (data) => {
-          form.setValue("clientName", data.clientName);
-          form.setValue("industry", data.industry);
-          form.setValue("proposalContent", data.proposalContent);
-          setStep(2);
-        },
-        onError: (error) => {
-          toast({ title: "Generation failed", description: (error as { error?: string }).error ?? "An unexpected error occurred.", variant: "destructive" });
-        },
-      },
-    );
   };
 
   // ── Create a canonical Opportunity from pasted text ──────────────────────
   const handlePasteAsOpportunity = async () => {
     if (!pasteText.trim()) {
-      setPasteError("Please paste some text or upload a document first.");
+      setPasteError("Please paste some text first.");
       return;
     }
     setPasteError(null);
@@ -402,7 +390,7 @@ export default function NewProposal() {
   // ── Create a canonical Opportunity from file or URL import ───────────────
   const handleImportAsOpportunity = async () => {
     const hasUrl  = importUrl.trim().length > 0;
-    const hasFile = pasteText.trim().length > 0 || pasteFile !== null;
+    const hasFile = importText.trim().length > 0;
 
     if (!hasUrl && !hasFile) {
       setPasteError("Please upload a file or enter a URL.");
@@ -410,7 +398,7 @@ export default function NewProposal() {
     }
     setPasteError(null);
 
-    const rawText   = pasteText.trim();
+    const rawText   = importText.trim();
     const sourceType = hasUrl ? "url" : "rfp_upload";
     const sourceUrl  = hasUrl ? importUrl.trim() : undefined;
     const lines      = rawText.split("\n").filter(Boolean);
@@ -546,13 +534,13 @@ export default function NewProposal() {
   const servicesValue = intake.watch("services");
 
   return (
-    <div className="p-8 max-w-4xl mx-auto">
+    <div className="p-4 sm:p-8 max-w-4xl mx-auto">
       {/* Header */}
       <div className="mb-8">
-        <h1 className="text-4xl font-bold text-white mb-2 tracking-tight">
+        <h1 className="text-3xl sm:text-4xl font-bold text-white mb-2 tracking-tight">
           New Proposal
         </h1>
-        <div className="flex items-center gap-4 text-sm font-medium">
+        <div className="flex flex-wrap items-center gap-2 sm:gap-4 text-sm font-medium">
           <span className={step === 1 ? "text-primary" : "text-muted-foreground"}>
             1. Project Brief
           </span>
@@ -623,11 +611,20 @@ export default function NewProposal() {
       {step === 1 && !parseBrief.isPending && (mode === "form" || mode === "paste" || mode === "import") && (
         <>
           {/* Mode toggle */}
-          <div className="flex rounded-lg border border-border overflow-hidden w-fit mb-6">
+          <div className="flex flex-col sm:flex-row rounded-lg border border-border overflow-hidden w-full sm:w-fit mb-6">
             <button
               type="button"
-              onClick={() => setMode("form")}
-              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${
+              onClick={() => {
+                setMode("form");
+                setPasteError(null);
+                setPasteFileError(null);
+                fileSelectionRef.current += 1;
+                setPasteFile(null);
+                setPasteFileExtracting(false);
+                setImportText("");
+                setImportUrl("");
+              }}
+              className={`flex items-center justify-center sm:justify-start gap-2 px-4 py-3 sm:py-2 text-sm font-medium transition-colors border-b sm:border-b-0 sm:border-r border-border last:border-0 ${
                 mode === "form" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-accent"
               }`}
             >
@@ -636,8 +633,17 @@ export default function NewProposal() {
             </button>
             <button
               type="button"
-              onClick={() => setMode("paste")}
-              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${
+              onClick={() => {
+                setMode("paste");
+                setPasteError(null);
+                setPasteFileError(null);
+                fileSelectionRef.current += 1;
+                setPasteFile(null);
+                setPasteFileExtracting(false);
+                setImportText("");
+                setImportUrl("");
+              }}
+              className={`flex items-center justify-center sm:justify-start gap-2 px-4 py-3 sm:py-2 text-sm font-medium transition-colors border-b sm:border-b-0 sm:border-r border-border last:border-0 ${
                 mode === "paste" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-accent"
               }`}
             >
@@ -646,8 +652,17 @@ export default function NewProposal() {
             </button>
             <button
               type="button"
-              onClick={() => setMode("import")}
-              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${
+              onClick={() => {
+                setMode("import");
+                setPasteError(null);
+                setPasteFileError(null);
+                fileSelectionRef.current += 1;
+                setPasteFile(null);
+                setPasteFileExtracting(false);
+                setImportText("");
+                setImportUrl("");
+              }}
+              className={`flex items-center justify-center sm:justify-start gap-2 px-4 py-3 sm:py-2 text-sm font-medium transition-colors border-b sm:border-b-0 sm:border-r border-border last:border-0 ${
                 mode === "import" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-accent"
               }`}
             >
@@ -660,13 +675,13 @@ export default function NewProposal() {
           {mode === "import" && (
             <div className="space-y-4">
               <div className="bg-card border rounded-lg overflow-hidden">
-                <div className="bg-muted px-6 py-4 border-b">
+                <div className="bg-muted px-4 sm:px-6 py-4 border-b">
                   <h2 className="font-semibold text-foreground">Import RFP</h2>
                   <p className="text-sm text-muted-foreground mt-0.5">
                     Upload a file or enter a URL — a new Opportunity will be created for review and pursuit.
                   </p>
                 </div>
-                <div className="p-6 space-y-4">
+                <div className="p-4 sm:p-6 space-y-4">
                   {/* File upload zone */}
                   <div
                     className="border-2 border-dashed border-border rounded-lg p-6 flex flex-col items-center gap-3 cursor-pointer hover:border-primary/50 transition-colors"
@@ -677,6 +692,7 @@ export default function NewProposal() {
                       const f = e.dataTransfer.files[0];
                       if (f) handleFileSelect(f);
                     }}
+                    data-testid="dropzone-import-file"
                   >
                     {pasteFileExtracting ? (
                       <>
@@ -689,8 +705,16 @@ export default function NewProposal() {
                         <span className="text-sm text-foreground flex-1 truncate">{pasteFile.name}</span>
                         <button
                           type="button"
-                          onClick={(e) => { e.stopPropagation(); setPasteFile(null); setPasteText(""); if (fileInputRef.current) fileInputRef.current.value = ""; }}
-                          className="text-muted-foreground hover:text-foreground"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            fileSelectionRef.current += 1;
+                            setPasteFile(null);
+                            setPasteFileExtracting(false);
+                            setImportText("");
+                            if (fileInputRef.current) fileInputRef.current.value = "";
+                          }}
+                          className="h-10 w-10 inline-flex items-center justify-center text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                          aria-label="Remove selected file"
                         >
                           <X className="w-4 h-4" />
                         </button>
@@ -725,6 +749,7 @@ export default function NewProposal() {
                   <Input
                     type="url"
                     placeholder="https://example.gov/rfp/2026-tender.pdf"
+                    data-testid="input-import-url"
                     value={importUrl}
                     onChange={(e) => setImportUrl(e.target.value)}
                   />
@@ -738,7 +763,19 @@ export default function NewProposal() {
               </div>
 
               <div className="flex justify-end">
-                <Button type="button" size="lg" className="gap-2" onClick={() => void handleImportAsOpportunity()} disabled={creatingOpportunity}>
+                <Button
+                  type="button"
+                  size="lg"
+                  className="w-full sm:w-auto gap-2"
+                  onClick={() => void handleImportAsOpportunity()}
+                  disabled={
+                    creatingOpportunity ||
+                    pasteFileExtracting ||
+                    Boolean(pasteFileError) ||
+                    (pasteFile !== null && importText.trim().length === 0)
+                  }
+                  data-testid="button-import-opportunity"
+                >
                   {creatingOpportunity ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
                   {creatingOpportunity ? "Creating Opportunity…" : "Create Opportunity"}
                 </Button>
@@ -746,80 +783,26 @@ export default function NewProposal() {
             </div>
           )}
 
-          {/* ── Paste / Upload panel → creates canonical Opportunity ── */}
+          {/* ── Paste panel → creates canonical Opportunity ── */}
           {mode === "paste" && (
             <div className="space-y-4">
               <div className="bg-card border rounded-lg overflow-hidden">
-                <div className="bg-muted px-6 py-4 border-b">
+                <div className="bg-muted px-4 sm:px-6 py-4 border-b">
                   <h2 className="font-semibold text-foreground">Project Brief</h2>
                   <p className="text-sm text-muted-foreground mt-0.5">
-                    Paste a brief, RFP, or any document — the AI will read it and generate a full proposal.
+                    Paste a brief, RFP, meeting notes, or any project context — the AI will read it and generate a full proposal.
                   </p>
                 </div>
-                <div className="p-6 space-y-4">
-                  {/* File upload zone */}
-                  <div
-                    className="border-2 border-dashed border-border rounded-lg p-6 flex flex-col items-center gap-3 cursor-pointer hover:border-primary/50 transition-colors"
-                    onClick={() => fileInputRef.current?.click()}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      const f = e.dataTransfer.files[0];
-                      if (f) handleFileSelect(f);
-                    }}
-                  >
-                    {pasteFileExtracting ? (
-                      <>
-                        <Loader2 className="w-8 h-8 text-muted-foreground animate-spin" />
-                        <p className="text-sm text-muted-foreground">Reading document…</p>
-                      </>
-                    ) : pasteFile ? (
-                      <div className="flex items-center gap-3 w-full">
-                        <FileText className="w-5 h-5 text-primary shrink-0" />
-                        <span className="text-sm text-foreground flex-1 truncate">{pasteFile.name}</span>
-                        <button
-                          type="button"
-                          onClick={(e) => { e.stopPropagation(); setPasteFile(null); if (fileInputRef.current) fileInputRef.current.value = ""; }}
-                          className="text-muted-foreground hover:text-foreground"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
-                      </div>
-                    ) : (
-                      <>
-                        <UploadCloud className="w-8 h-8 text-muted-foreground" />
-                        <div className="text-center">
-                          <p className="text-sm font-medium text-foreground">Drop a file or click to browse</p>
-                          <p className="text-xs text-muted-foreground mt-0.5">PDF, DOCX, TXT · Max 20 MB</p>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept=".pdf,.docx,.txt"
-                    className="hidden"
-                    onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFileSelect(f); }}
-                  />
-                  {pasteFileError && <p className="text-xs text-destructive">{pasteFileError}</p>}
-
-                  {/* Divider */}
-                  <div className="flex items-center gap-3">
-                    <div className="flex-1 border-t border-border" />
-                    <span className="text-xs text-muted-foreground">or paste text below</span>
-                    <div className="flex-1 border-t border-border" />
-                  </div>
-
-                  {/* Textarea */}
+                <div className="p-4 sm:p-6 space-y-4 flex flex-col h-full">
                   <Textarea
-                    rows={14}
-                    placeholder="Paste your brief, RFP, meeting notes, or any project context here…"
-                    className="resize-y font-mono text-sm"
+                    rows={16}
+                    placeholder="Paste text here..."
+                    className="resize-y font-mono text-sm min-h-[300px]"
                     value={pasteText}
                     onChange={(e) => setPasteText(e.target.value)}
+                    data-testid="textarea-paste-text"
                   />
-                  {/* Completeness check result */}
+
                   {briefChecking && (
                     <div className="flex items-center gap-2 text-xs text-muted-foreground">
                       <Loader2 className="w-3 h-3 animate-spin" />
@@ -832,7 +815,7 @@ export default function NewProposal() {
                         {briefCheck.sufficient ? (
                           <CheckCircle2 className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />
                         ) : (
-                          <span className="text-amber-400 mt-0.5 shrink-0 text-base leading-none">⚠</span>
+                          <AlertTriangle className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
                         )}
                         <div className="flex-1">
                           <p className={`font-medium ${briefCheck.sufficient ? "text-emerald-300" : "text-amber-300"}`}>
@@ -853,17 +836,17 @@ export default function NewProposal() {
                     </div>
                   )}
 
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                     <div>
                       {pasteError && <p className="text-xs text-destructive">{pasteError}</p>}
                     </div>
-                    <span className="text-xs text-muted-foreground">{pasteText.length} chars</span>
+                    <span className="text-xs text-muted-foreground sm:ml-auto">{pasteText.length} chars</span>
                   </div>
                 </div>
               </div>
 
               <div className="flex justify-end">
-                <Button type="button" size="lg" className="gap-2" onClick={() => void handlePasteAsOpportunity()} disabled={creatingOpportunity}>
+                <Button type="button" size="lg" className="w-full sm:w-auto gap-2" onClick={() => void handlePasteAsOpportunity()} disabled={creatingOpportunity} data-testid="button-create-opportunity">
                   {creatingOpportunity ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
                   {creatingOpportunity ? "Creating Opportunity…" : "Create Opportunity"}
                 </Button>
@@ -885,7 +868,7 @@ export default function NewProposal() {
             <div className="bg-muted px-6 py-4 border-b">
               <h2 className="font-semibold text-foreground">About Your Organisation</h2>
             </div>
-            <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-5">
+            <div className="p-4 sm:p-6 grid grid-cols-1 md:grid-cols-2 gap-5">
               {/* Org name */}
               <div className="md:col-span-2">
                 <Label htmlFor="orgName" className="mb-1.5 block">
@@ -894,7 +877,7 @@ export default function NewProposal() {
                 <Input
                   id="orgName"
                   placeholder="e.g. Acme Corporation"
-                  {...intake.register("orgName")}
+                  {...intake.register("orgName")} data-testid="input-org-name"
                 />
                 {intake.formState.errors.orgName && (
                   <p className="text-xs text-destructive mt-1">
@@ -923,7 +906,7 @@ export default function NewProposal() {
                 <Input
                   id="industry"
                   placeholder="e.g. Technology, Healthcare, Retail"
-                  {...intake.register("industry")}
+                  {...intake.register("industry")} data-testid="input-industry"
                 />
                 {intake.formState.errors.industry && (
                   <p className="text-xs text-destructive mt-1">
@@ -1053,7 +1036,7 @@ export default function NewProposal() {
                   id="challenges"
                   rows={4}
                   placeholder="Describe the main challenges you'd like help solving..."
-                  {...intake.register("challenges")}
+                  {...intake.register("challenges")} data-testid="textarea-challenges"
                 />
                 {intake.formState.errors.challenges && (
                   <p className="text-xs text-destructive mt-1">
@@ -1069,7 +1052,7 @@ export default function NewProposal() {
                   id="successCriteria"
                   rows={4}
                   placeholder="Describe what success looks like for this engagement..."
-                  {...intake.register("successCriteria")}
+                  {...intake.register("successCriteria")} data-testid="textarea-success-criteria"
                 />
                 {intake.formState.errors.successCriteria && (
                   <p className="text-xs text-destructive mt-1">
@@ -1085,7 +1068,7 @@ export default function NewProposal() {
             <div className="bg-muted px-6 py-4 border-b">
               <h2 className="font-semibold text-foreground">Timing</h2>
             </div>
-            <div className="p-6">
+            <div className="p-4 sm:p-6">
               <Label className="mb-1.5 block">
                 When would you ideally like to start? <span className="text-destructive">*</span>
               </Label>

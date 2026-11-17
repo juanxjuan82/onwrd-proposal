@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
+import { PUBLIC_INTAKE_URL } from "@/lib/public-links";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 interface Proposal {
@@ -75,7 +76,7 @@ function IntakeShareCard() {
   const [open, setOpen] = useState(true);
   const { toast } = useToast();
 
-  const intakeUrl = `${window.location.origin}${import.meta.env.BASE_URL}intake`;
+  const intakeUrl = PUBLIC_INTAKE_URL;
 
   const copy = async () => {
     try {

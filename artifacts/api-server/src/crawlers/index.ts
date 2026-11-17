@@ -5,7 +5,7 @@ import {
   crawlerRunsTable,
   crawlerLockTable,
 } from "@workspace/db";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { WorldBankAdapter } from "./world-bank.js";
 import { UNGMAdapter } from "./ungm.js";
@@ -15,9 +15,28 @@ import { BahamasGovAdapter } from "./bahamas-gov.js";
 import { CTOAdapter } from "./cto.js";
 import { CARICOMAdapter } from "./caricom.js";
 import { EUCaribbeanAdapter } from "./eu-caribbean.js";
-import { type TenderSourceAdapter, type TenderOpportunity } from "./base-adapter.js";
+import {
+  type AdapterFetchContext,
+  type CrawlDiagnostic,
+  type TenderSourceAdapter,
+  type TenderOpportunity,
+  hasGenuineDetailContent,
+  mergeDocumentEvidence,
+} from "./base-adapter.js";
+import {
+  canRefreshIncompleteDiscovery,
+  mergeCrawlerRawData,
+} from "./crawler-recovery.js";
+import {
+  Crawl4AIError,
+  createCrawl4AIClient,
+  getCrawl4AIConfig,
+  normalizeSourceApprovedDomains,
+} from "./crawl4ai-client.js";
 import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
 import { evaluateCrawlerEligibility } from "../lib/crawler-eligibility.js";
+import { crawlerContentFingerprint, normalizeCrawlerUrl } from "./dedup.js";
+import { tenderSearchProfilesTable } from "@workspace/db";
 
 function getAdapter(adapterType: string): TenderSourceAdapter | null {
   switch (adapterType) {
@@ -48,6 +67,117 @@ interface ScoringResult {
 const CRAWL_LOCK_KEY = "default";
 const LOCK_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours — 2× max expected crawl duration
 const INSTANCE_ID = randomUUID();
+
+export interface SourceAdapterDefinition {
+  adapterType: string;
+  label: string;
+  sourceType: string;
+  allowedHosts: readonly string[];
+  supportsBrowser: boolean;
+  recommended: boolean;
+  blockedReason?: string;
+}
+
+interface CrawlerSearchProfile {
+  keywords: string[];
+  excludedKeywords: string[];
+}
+
+function readProfileTerms(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim().toLowerCase()).filter(Boolean)
+      : [];
+  } catch {
+    // A malformed profile must not make a crawl fail or broaden eligibility.
+    return [];
+  }
+}
+
+export function profileMatchesOpportunity(
+  opp: TenderOpportunity,
+  profiles: CrawlerSearchProfile[],
+): { matched: boolean; excluded: string[]; matchedKeywords: string[] } {
+  const corpus = [opp.title, opp.description, opp.organization, opp.country ?? "", opp.sector ?? ""]
+    .join(" ").toLowerCase();
+  const anyKeywords = profiles.some((profile) => profile.keywords.length > 0);
+  const matches = profiles.map((profile) => ({
+    hasKeywords: profile.keywords.length > 0,
+    keywords: profile.keywords.filter((term) => corpus.includes(term)),
+    excluded: profile.excludedKeywords.filter((term) => corpus.includes(term)),
+  }));
+  const matchedKeywords = [...new Set(matches.flatMap((match) => match.keywords))];
+  // Profiles are alternatives (OR), and an exclusion only applies to the
+  // profile whose keywords matched it. An excluded match can therefore still
+  // be accepted by another profile.
+  const matched = matches.some((match) =>
+    ((!anyKeywords && !match.hasKeywords && match.excluded.length === 0 &&
+      profiles.some((profile) => profile.excludedKeywords.length > 0)) ||
+      match.keywords.length > 0) &&
+    match.excluded.length === 0);
+  const excluded = [...new Set(matches.flatMap((match) => match.excluded))];
+  return { matched, excluded, matchedKeywords };
+}
+
+// This is the only catalog exposed to source administration. Keeping it next
+// to the adapter registry prevents the UI/API from implying support for an
+// arbitrary URL or an adapter that the crawler cannot actually run.
+export const SOURCE_ADAPTER_CATALOG: readonly SourceAdapterDefinition[] = [
+  { adapterType: "world_bank", label: "World Bank Procurement", sourceType: "development_bank", allowedHosts: ["worldbank.org"], supportsBrowser: false, recommended: true },
+  { adapterType: "ungm", label: "UNGM / UNDP Procurement", sourceType: "un", allowedHosts: ["undp.org"], supportsBrowser: false, recommended: false, blockedReason: "UNDP procurement notices are blocked because robots.txt disallows all paths. Use only an authorized official feed/API, opt-in notifications, or user-provided manual imports; do not crawl without permission." },
+  { adapterType: "bahamas_gov", label: "Bahamas Government Procurement", sourceType: "government", allowedHosts: ["bahamas.gov.bs"], supportsBrowser: true, recommended: true },
+  { adapterType: "caricom", label: "CARICOM Secretariat", sourceType: "regional", allowedHosts: ["caricom.org"], supportsBrowser: false, recommended: false },
+  { adapterType: "idb", label: "Inter-American Development Bank", sourceType: "development_bank", allowedHosts: ["iadb.org"], supportsBrowser: false, recommended: false, blockedReason: "The current IDB web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
+  { adapterType: "cdb", label: "Caribbean Development Bank", sourceType: "development_bank", allowedHosts: ["caribank.org"], supportsBrowser: false, recommended: false },
+  { adapterType: "cto", label: "Caribbean Tourism Organization", sourceType: "regional", allowedHosts: ["caribtourism.com"], supportsBrowser: false, recommended: false, blockedReason: "The current CTO web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
+  { adapterType: "eu_caribbean", label: "EU Caribbean Development Fund", sourceType: "development_fund", allowedHosts: ["cariforum.org"], supportsBrowser: false, recommended: false, blockedReason: "The current EU Caribbean web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
+] as const;
+
+export const CONTROLLED_CRAWL_ADAPTERS = ["ungm", "cdb", "caricom"] as const;
+
+export function requiresControlledPilot(adapterType: string): boolean {
+  return (CONTROLLED_CRAWL_ADAPTERS as readonly string[]).includes(adapterType);
+}
+
+export function getSourceAdapterDefinition(adapterType: string): SourceAdapterDefinition | undefined {
+  return SOURCE_ADAPTER_CATALOG.find((definition) => definition.adapterType === adapterType);
+}
+
+export function getCrawlBlockReason(adapterType: string): string | null {
+  return getSourceAdapterDefinition(adapterType)?.blockedReason ?? null;
+}
+
+export function validateSourceConfiguration(input: {
+  adapterType: string;
+  url: string;
+  approvedDomains?: unknown;
+}): { definition: SourceAdapterDefinition; domains: string[] } | { error: string } {
+  const definition = getSourceAdapterDefinition(input.adapterType);
+  if (!definition) return { error: "Unsupported adapter. Choose a registered crawler adapter." };
+
+  let parsed: URL;
+  try {
+    parsed = new URL(input.url);
+  } catch {
+    return { error: "Source URL must be an absolute http(s) URL." };
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { error: "Source URL must use HTTP or HTTPS." };
+  }
+  const host = parsed.hostname.toLowerCase().replace(/^www\./, "");
+  if (!definition.allowedHosts.some((allowed) => host === allowed || host.endsWith(`.${allowed}`))) {
+    return {
+      error: `This adapter only supports registered ${definition.label} domains (${definition.allowedHosts.join(", ")}).`,
+    };
+  }
+  try {
+    return { definition, domains: normalizeSourceApprovedDomains(input.url, input.approvedDomains) };
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
 
 /** @internal Exported for testing only — prefer testing behaviour through runCrawler(). */
 export async function acquireCrawlLock(): Promise<boolean> {
@@ -314,6 +444,10 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
   return { fitScore, recommendation, reasoning, geographyScore, geoRegion, bahamasAdvantageScore, confidence };
 }
 
+export function scoreCrawlerOpportunity(opp: TenderOpportunity): ScoringResult {
+  return keywordScore(opp);
+}
+
 // ── Boilerplate detection ────────────────────────────────────────────────────
 // Synthetic descriptions generated by adapters (not real opportunity content)
 // should not trigger AI scoring — the AI learns nothing useful from them.
@@ -378,6 +512,16 @@ export async function backfillPromotions(): Promise<{ evaluated: number; promote
 // ── Rescore all existing items with keyword engine ──────────────────────────
 export async function rescoreWithKeywords(): Promise<number> {
   const items = await db.select().from(discoveredTendersTable);
+  const persistedProfiles = (await db.select({
+    keywords: tenderSearchProfilesTable.keywords,
+    excludedKeywords: tenderSearchProfilesTable.excludedKeywords,
+  }).from(tenderSearchProfilesTable).where(eq(tenderSearchProfilesTable.active, true)))
+    .map((profile) => ({
+      keywords: readProfileTerms(profile.keywords),
+      excludedKeywords: readProfileTerms(profile.excludedKeywords),
+    }))
+    .filter((profile) => profile.keywords.length > 0 || profile.excludedKeywords.length > 0);
+  const hasProfileKeywords = persistedProfiles.some((profile) => profile.keywords.length > 0);
 
   let count = 0;
   for (const item of items) {
@@ -392,6 +536,17 @@ export async function rescoreWithKeywords(): Promise<number> {
       deadline: item.deadline ? new Date(item.deadline) : undefined,
     };
     const result = keywordScore(opp);
+    const profileMatch = profileMatchesOpportunity(opp, persistedProfiles);
+    if (persistedProfiles.length > 0 &&
+        !profileMatch.matched && (hasProfileKeywords || profileMatch.excluded.length > 0)) {
+      result.fitScore = 0;
+      result.recommendation = "SKIP";
+      result.confidence = "LOW";
+      result.bahamasAdvantageScore = 0;
+      result.reasoning = profileMatch.excluded.length > 0
+        ? `Excluded by search profile keyword: ${profileMatch.excluded[0]} (deterministic profile gate)`
+        : "No active tender search profile keyword matched (deterministic profile gate)";
+    }
     await db.update(discoveredTendersTable).set({
       fitScore: result.fitScore,
       recommendation: result.recommendation,
@@ -408,77 +563,271 @@ export async function rescoreWithKeywords(): Promise<number> {
 }
 
 // ── Main crawl runner ────────────────────────────────────────────────────────
-export async function runCrawler(sourceId?: number): Promise<{
+export interface RunCrawlerResult {
   total: number;
   newItems: number;
   sources: number;
   aiCallCount: number;
   aiFallbackCount: number;
   quotaErrorHit: boolean;
-}> {
+  successfulSources: number[];
+  failedSources: number[];
+}
+
+export async function runCrawler(sourceId?: number): Promise<RunCrawlerResult> {
   // DB-backed overlap prevention — atomic across restarts and instances
   const acquired = await acquireCrawlLock();
   if (!acquired) {
     throw new Error("A crawl is already in progress — skipping to prevent overlap.");
   }
 
-  const sources = sourceId
-    ? await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.id, sourceId))
-    : await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.active, true));
-
-  let totalFound = 0;
-  let totalNew = 0;
-
   try {
+    const queriedSources = sourceId
+      ? await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.id, sourceId))
+      : await db.select().from(tenderSourcesTable).where(eq(tenderSourcesTable.active, true));
+    if (sourceId) {
+      const blocked = queriedSources[0] && getCrawlBlockReason(queriedSources[0].adapterType);
+      if (blocked) throw new Error(blocked);
+    }
+    // Scheduled crawls are deny-by-default too. This protects deployments with
+    // stale rows that predate the startup deactivation sweep.
+    const sources = queriedSources.filter((source) => {
+      const definition = getSourceAdapterDefinition(source.adapterType);
+      return Boolean(definition && !definition.blockedReason);
+    });
+    const persistedProfiles = (await db.select({
+      keywords: tenderSearchProfilesTable.keywords,
+      excludedKeywords: tenderSearchProfilesTable.excludedKeywords,
+    }).from(tenderSearchProfilesTable).where(eq(tenderSearchProfilesTable.active, true)))
+      .map((profile) => ({
+        keywords: readProfileTerms(profile.keywords),
+        excludedKeywords: readProfileTerms(profile.excludedKeywords),
+      }))
+      .filter((profile) => profile.keywords.length > 0 || profile.excludedKeywords.length > 0);
+    const existingDiscoveries = await db.select({
+      id: discoveredTendersTable.id,
+      sourceId: discoveredTendersTable.sourceId,
+      externalId: discoveredTendersTable.externalId,
+      opportunityId: discoveredTendersTable.opportunityId,
+      status: discoveredTendersTable.status,
+      title: discoveredTendersTable.title,
+      organization: discoveredTendersTable.organization,
+      url: discoveredTendersTable.url,
+      deadline: discoveredTendersTable.deadline,
+      description: discoveredTendersTable.description,
+      country: discoveredTendersTable.country,
+      sector: discoveredTendersTable.sector,
+      rawData: discoveredTendersTable.rawData,
+    }).from(discoveredTendersTable);
+    const successfulSources: number[] = [];
+    const failedSources: number[] = [];
+
+    let totalFound = 0;
+    let totalNew = 0;
+    let crawl4aiClient: ReturnType<typeof createCrawl4AIClient> = null;
+    let crawl4aiConfigError: Error | undefined;
+    try {
+      crawl4aiClient = createCrawl4AIClient(getCrawl4AIConfig());
+    } catch (error) {
+      crawl4aiConfigError = error instanceof Error ? error : new Error(String(error));
+    }
+
     for (const source of sources) {
       const adapter = getAdapter(source.adapterType);
       if (!adapter) continue;
 
       const [run] = await db.insert(crawlerRunsTable).values({
         sourceId:  source.id,
+        sourceConfigurationVersion: source.configurationVersion,
         startedAt: new Date(),
         status:    "running",
         aiProvider: null,
         aiModel:    null,
       }).returning();
 
+      const diagnostics: CrawlDiagnostic[] = [];
       try {
-        const opportunities = await adapter.fetchOpportunities();
+        const browserEligible = source.adapterType === "bahamas_gov";
+        const approvedDomains = getApprovedDomains(source);
+        const fetchContext: AdapterFetchContext = {
+          approvedDomains,
+          diagnostics,
+          // The source flag is the final opt-in. API adapters and disabled
+          // HTML sources never receive a browser client.
+          crawl4ai: browserEligible && source.browserEnabled && crawl4aiClient
+            ? crawl4aiClient
+            : undefined,
+        };
+        if (browserEligible && source.browserEnabled && crawl4aiConfigError) {
+          diagnostics.push({
+            code: "crawl4ai_invalid_config",
+            url: source.url,
+            message: crawl4aiConfigError.message,
+            method: "crawl4ai",
+          });
+        }
+        const opportunities = await adapter.fetchOpportunities(fetchContext);
         totalFound += opportunities.length;
 
         let newCount = 0;
 
         for (const opp of opportunities) {
-          // Deduplicate by externalId
-          if (opp.externalId) {
-            const existing = await db.select({ id: discoveredTendersTable.id })
-              .from(discoveredTendersTable)
-              .where(eq(discoveredTendersTable.externalId, opp.externalId));
-            if (existing.length > 0) continue;
+          const canonicalUrl = opp.url ? normalizeCrawlerUrl(opp.url) : null;
+          const fingerprint = crawlerContentFingerprint({
+            sourceId: source.id,
+            externalId: opp.externalId,
+            title: opp.title,
+            organization: opp.organization,
+            description: opp.description,
+            url: canonicalUrl,
+            deadline: opp.deadline,
+          });
+          const existing = existingDiscoveries.find((item) =>
+            crawlerContentFingerprint(item) === fingerprint ||
+            (canonicalUrl && normalizeCrawlerUrl(item.url ?? "") === canonicalUrl) ||
+            (opp.externalId && item.externalId === opp.externalId));
+          if (existing) {
+            let existingRaw = (existing.rawData && typeof existing.rawData === "object")
+              ? existing.rawData as Record<string, unknown> : {};
+            if (existing.opportunityId !== null) {
+              const evidenceOnlyRaw = mergeDocumentEvidence(existingRaw, opp.rawData);
+              if (evidenceOnlyRaw) {
+                // Preserve human-edited canonical fields; only attach source
+                // evidence to the discovery record linked to that opportunity.
+                await db.update(discoveredTendersTable).set({
+                  rawData: evidenceOnlyRaw,
+                  updatedAt: new Date(),
+                }).where(and(
+                  eq(discoveredTendersTable.id, existing.id),
+                  eq(discoveredTendersTable.opportunityId, existing.opportunityId),
+                ));
+                existingRaw = evidenceOnlyRaw;
+                existing.rawData = evidenceOnlyRaw;
+              }
+            }
+            // Only replace a crawler-owned incomplete description. A changed
+            // description, prior decision, user edit marker, or linked
+            // opportunity prevents recovery from changing the record.
+            if (canRefreshIncompleteDiscovery({
+              title: existing.title,
+              organization: existing.organization,
+              description: existing.description,
+              status: existing.status,
+              opportunityId: existing.opportunityId,
+              deadline: existing.deadline,
+              country: existing.country,
+              sector: existing.sector,
+              rawData: existing.rawData,
+            }, opp)) {
+              const refreshedDeadline = existing.deadline ?? opp.deadline ?? null;
+              const refreshedOpportunity = { ...opp, deadline: refreshedDeadline ?? undefined };
+              const refreshedScore = keywordScore(refreshedOpportunity);
+              const refreshedProfileMatch = profileMatchesOpportunity(refreshedOpportunity, persistedProfiles);
+              const hasProfileKeywords = persistedProfiles.some((profile) => profile.keywords.length > 0);
+              if (persistedProfiles.length > 0 &&
+                  !refreshedProfileMatch.matched &&
+                  (hasProfileKeywords || refreshedProfileMatch.excluded.length > 0)) {
+                refreshedScore.fitScore = 0;
+                refreshedScore.recommendation = "SKIP";
+                refreshedScore.confidence = "LOW";
+                refreshedScore.bahamasAdvantageScore = 0;
+                refreshedScore.reasoning = refreshedProfileMatch.excluded.length > 0
+                  ? `Excluded by search profile keyword: ${refreshedProfileMatch.excluded[0]} (deterministic profile gate)`
+                  : "No active tender search profile keyword matched (deterministic profile gate)";
+              }
+
+              const refreshedRaw = mergeCrawlerRawData(existingRaw, {
+                ...(opp.rawData ?? {}),
+                crawlerFingerprint: fingerprint,
+                needsEnrichment: opp.rawData?.needsEnrichment === true,
+                crawlerManagedSnapshot: {
+                  title: existing.title,
+                  organization: existing.organization,
+                  description: opp.description,
+                },
+              });
+              const [refreshed] = await db.update(discoveredTendersTable).set({
+                description: opp.description,
+                rawData: refreshedRaw,
+                deadline: refreshedDeadline,
+                fitScore: refreshedScore.fitScore,
+                recommendation: refreshedScore.recommendation,
+                scoringReasoning: refreshedScore.reasoning,
+                geographyScore: refreshedScore.geographyScore,
+                geoRegion: refreshedScore.geoRegion,
+                bahamasAdvantageScore: refreshedScore.bahamasAdvantageScore,
+                confidence: refreshedScore.confidence,
+                updatedAt: new Date(),
+              }).where(and(
+                eq(discoveredTendersTable.id, existing.id),
+                eq(discoveredTendersTable.status, "new"),
+                isNull(discoveredTendersTable.opportunityId),
+              )).returning({ id: discoveredTendersTable.id });
+              if (refreshed) {
+                existing.description = opp.description;
+                existing.rawData = refreshedRaw;
+                existing.deadline = refreshedDeadline;
+              } else {
+                continue;
+              }
+
+              const eligibility = evaluateCrawlerEligibility({
+                title: refreshedOpportunity.title,
+                description: refreshedOpportunity.description,
+                recommendation: refreshedScore.recommendation,
+                deadline: refreshedDeadline ?? undefined,
+              });
+              if (eligibility.eligible) {
+                try {
+                  const destination = eligibility.destination === "reviewing" ? "reviewing" : "new";
+                  const promoted = await promoteDiscoveredTender(existing.id, destination);
+                  existing.opportunityId = promoted.opportunityId;
+                } catch (error) {
+                  const message = error instanceof Error ? error.message : String(error);
+                  console.warn(`[crawler] refreshed promotion id=${existing.id} failed: ${message.slice(0, 80)}`);
+                }
+              }
+            }
+            continue;
           }
 
-          // Deduplicate by URL
-          if (opp.url) {
-            const existingByUrl = await db.select({ id: discoveredTendersTable.id })
-              .from(discoveredTendersTable)
-              .where(eq(discoveredTendersTable.url, opp.url));
-            if (existingByUrl.length > 0) continue;
-          }
-
+          // Deduplicate by URL or stable external identifier before inserting.
           const result = keywordScore(opp);
-
+          const profileMatch = profileMatchesOpportunity(opp, persistedProfiles);
+          // No active profiles preserves the historical safe default. Once an
+          // administrator saves profiles, they become a deterministic relevance
+          // gate; exclusions always win over keyword matches.
+          const hasProfileKeywords = persistedProfiles.some((profile) => profile.keywords.length > 0);
+          if (persistedProfiles.length > 0 &&
+              !profileMatch.matched && (hasProfileKeywords || profileMatch.excluded.length > 0)) {
+            result.fitScore = 0;
+            result.recommendation = "SKIP";
+            result.confidence = "LOW";
+            result.bahamasAdvantageScore = 0;
+            result.reasoning = profileMatch.excluded.length > 0
+              ? `Excluded by search profile keyword: ${profileMatch.excluded[0]} (deterministic profile gate)`
+              : "No active tender search profile keyword matched (deterministic profile gate)";
+          }
           const [discovery] = await db.insert(discoveredTendersTable).values({
             sourceId:             source.id,
             externalId:           opp.externalId ?? null,
             title:                opp.title,
             organization:         opp.organization,
-            url:                  opp.url ?? null,
+            url:                  canonicalUrl,
             deadline:             opp.deadline ?? null,
             description:          opp.description,
             country:              opp.country ?? null,
             sector:               opp.sector ?? null,
             valueAmount:          opp.valueAmount ?? null,
-            rawData:              opp.rawData ?? null,
+            rawData: {
+              ...(opp.rawData ?? {}),
+              crawlerFingerprint: fingerprint,
+              crawlerManagedSnapshot: {
+                title: opp.title,
+                organization: opp.organization,
+                description: opp.description,
+              },
+            },
             status:               "new",
             fitScore:             result.fitScore,
             recommendation:       result.recommendation,
@@ -488,6 +837,23 @@ export async function runCrawler(sourceId?: number): Promise<{
             bahamasAdvantageScore: result.bahamasAdvantageScore,
             confidence:           result.confidence,
           }).returning({ id: discoveredTendersTable.id });
+          existingDiscoveries.push({
+            id: discovery.id, sourceId: source.id, externalId: opp.externalId ?? null,
+            title: opp.title, organization: opp.organization, url: canonicalUrl,
+            deadline: opp.deadline ?? null, description: opp.description, opportunityId: null,
+            status: "new",
+            country: opp.country ?? null,
+            sector: opp.sector ?? null,
+            rawData: {
+              ...(opp.rawData ?? {}),
+              crawlerFingerprint: fingerprint,
+              crawlerManagedSnapshot: {
+                title: opp.title,
+                organization: opp.organization,
+                description: opp.description,
+              },
+            },
+          });
 
           // Promote only eligible discoveries to canonical Opportunities.
           // SKIP, boilerplate, title-only, and hard-negative-dominated records
@@ -516,24 +882,41 @@ export async function runCrawler(sourceId?: number): Promise<{
           totalNew++;
         }
 
+        const completedAt = new Date();
         await db.update(crawlerRunsTable).set({
-          completedAt:    new Date(),
+          completedAt,
           status:         "success",
           itemsFound:     opportunities.length,
           itemsNew:       newCount,
           aiCallCount:    0,
           aiFallbackCount: 0,
           aiQuotaError:   false,
+          crawlMethod: getCrawlMethod(diagnostics),
+          crawl4aiAttempts: diagnostics.filter((item) => item.method === "crawl4ai").length,
+          crawl4aiSuccesses: diagnostics.filter((item) => item.code === "crawl4ai_success").length,
+          crawlDiagnostics: diagnostics,
         }).where(eq(crawlerRunsTable.id, run.id));
 
         await db.update(tenderSourcesTable).set({
-          lastCheckedAt:   new Date(),
-          lastSuccessAt:   new Date(),
+          lastCheckedAt:   completedAt,
+          lastSuccessAt:   completedAt,
           itemsFoundCount: source.itemsFoundCount + newCount,
-          updatedAt:       new Date(),
-        }).where(eq(tenderSourcesTable.id, source.id));
+          updatedAt:       completedAt,
+        }).where(and(
+          eq(tenderSourcesTable.id, source.id),
+          eq(tenderSourcesTable.configurationVersion, source.configurationVersion),
+        ));
+        successfulSources.push(source.id);
 
       } catch (err) {
+        failedSources.push(source.id);
+        const failureCode = crawl4aiErrorCode(err);
+        diagnostics.push({
+          code: failureCode,
+          url: source.url,
+          message: err instanceof Error ? err.message : String(err),
+          method: failureCode.startsWith("crawl4ai_") ? "crawl4ai" : "direct",
+        });
         await db.update(crawlerRunsTable).set({
           completedAt:    new Date(),
           status:         "failed",
@@ -541,59 +924,149 @@ export async function runCrawler(sourceId?: number): Promise<{
           aiCallCount:    0,
           aiFallbackCount: 0,
           aiQuotaError:   false,
+          crawlMethod: "failed",
+          crawl4aiAttempts: diagnostics.filter((item) => item.method === "crawl4ai").length,
+          crawl4aiSuccesses: diagnostics.filter((item) => item.code === "crawl4ai_success").length,
+          crawlDiagnostics: diagnostics,
         }).where(eq(crawlerRunsTable.id, run.id));
 
         await db.update(tenderSourcesTable).set({
           lastCheckedAt: new Date(),
           updatedAt:     new Date(),
-        }).where(eq(tenderSourcesTable.id, source.id));
+        }).where(and(
+          eq(tenderSourcesTable.id, source.id),
+          eq(tenderSourcesTable.configurationVersion, source.configurationVersion),
+        ));
       }
     }
+
+    return {
+      total:          totalFound,
+      newItems:       totalNew,
+      sources:        sources.length,
+      aiCallCount:    0,
+      aiFallbackCount: 0,
+      quotaErrorHit:  false,
+      successfulSources,
+      failedSources,
+    };
   } finally {
     await releaseCrawlLock();
   }
-
-  return {
-    total:          totalFound,
-    newItems:       totalNew,
-    sources:        sources.length,
-    aiCallCount:    0,
-    aiFallbackCount: 0,
-    quotaErrorHit:  false,
-  };
 }
 
 // ── Seed default sources ─────────────────────────────────────────────────────
+
+// These adapters are blocked from Replit's environment (403/404/timeout) or
+// disallowed by their current robots policy.
+// We always force them inactive so existing deployments are retroactively
+// deactivated without needing a separate migration step.
+const PERMANENTLY_BLOCKED_ADAPTERS = ["idb", "ungm", "cto", "eu_caribbean"] as const;
+
+function getApprovedDomains(source: {
+  url: string;
+  approvedDomains?: unknown;
+}): string[] {
+  try {
+    return normalizeSourceApprovedDomains(source.url, source.approvedDomains);
+  } catch {
+    return [];
+  }
+}
+
+function getCrawlMethod(diagnostics: CrawlDiagnostic[]): string {
+  const methods = new Set(diagnostics.map((item) => item.method));
+  if (diagnostics.some((item) => item.code === "crawl4ai_success")) return "crawl4ai";
+  if (methods.has("crawl4ai")) return "direct_fallback";
+  return "direct";
+}
+
+function crawl4aiErrorCode(error: unknown): CrawlDiagnostic["code"] {
+  const code = error instanceof Crawl4AIError ? error.code : undefined;
+  const map: Record<string, CrawlDiagnostic["code"]> = {
+    timeout: "crawl4ai_timeout",
+    authentication: "crawl4ai_authentication",
+    off_domain_redirect: "crawl4ai_off_domain_redirect",
+    unusable_content: "crawl4ai_unusable_content",
+    service_unavailable: "crawl4ai_service_unavailable",
+    malformed_response: "crawl4ai_malformed_response",
+    blocked: "crawl4ai_blocked",
+    invalid_config: "crawl4ai_invalid_config",
+    version_mismatch: "crawl4ai_version_mismatch",
+    response_too_large: "crawl4ai_response_too_large",
+  };
+  return map[code ?? ""] ?? "direct_failed";
+}
+
 export async function seedDefaultSources(): Promise<void> {
+  // Retroactive deactivation: runs on every startup, idempotent.
+  // Handles upgrades where these sources were previously seeded as active=true.
+  await db
+    .update(tenderSourcesTable)
+    .set({ active: false })
+    .where(inArray(tenderSourcesTable.adapterType, PERMANENTLY_BLOCKED_ADAPTERS));
+
+  const activePilotSources = await db.select({
+    id: tenderSourcesTable.id,
+    configurationVersion: tenderSourcesTable.configurationVersion,
+    adapterType: tenderSourcesTable.adapterType,
+  }).from(tenderSourcesTable).where(and(
+    inArray(tenderSourcesTable.adapterType, ["cdb", "caricom"]),
+    eq(tenderSourcesTable.active, true),
+  ));
+  for (const source of activePilotSources) {
+    const [pilot] = await db.select({ id: crawlerRunsTable.id })
+      .from(crawlerRunsTable)
+      .where(and(
+        eq(crawlerRunsTable.sourceId, source.id),
+        eq(crawlerRunsTable.sourceConfigurationVersion, source.configurationVersion),
+        eq(crawlerRunsTable.status, "success"),
+        gte(crawlerRunsTable.itemsNew, 1),
+      ))
+      .limit(1);
+    if (!pilot) {
+      await db.update(tenderSourcesTable).set({ active: false })
+        .where(and(
+          eq(tenderSourcesTable.id, source.id),
+          eq(tenderSourcesTable.configurationVersion, source.configurationVersion),
+          eq(tenderSourcesTable.active, true),
+        ));
+    }
+  }
+
   const existing = await db.select().from(tenderSourcesTable);
   if (existing.length > 0) {
     const existingTypes = new Set(existing.map((s) => s.adapterType));
     const newSources = [
-      { name: "Caribbean Tourism Organization", sourceType: "regional", url: "https://www.caribtourism.com/", adapterType: "cto" },
-      { name: "CARICOM Secretariat", sourceType: "regional", url: "https://caricom.org/", adapterType: "caricom" },
-      { name: "EU Caribbean Development Fund", sourceType: "development_fund", url: "https://www.cariforum.org/", adapterType: "eu_caribbean" },
+      // active: false — caribtourism.com is unreachable (connection timeout) from Replit
+      { name: "Caribbean Tourism Organization", sourceType: "regional", url: "https://www.caribtourism.com/", adapterType: "cto", active: false },
+      { name: "CARICOM Secretariat", sourceType: "regional", url: "https://caricom.org/procurement-notices/", adapterType: "caricom", active: false, browserEnabled: false, approvedDomains: ["caricom.org"] },
+      // active: false — cariforum.org is unreachable (connection timeout) from Replit
+      { name: "EU Caribbean Development Fund", sourceType: "development_fund", url: "https://www.cariforum.org/", adapterType: "eu_caribbean", active: false },
     ];
     for (const s of newSources) {
       if (!existingTypes.has(s.adapterType)) {
-        await db.insert(tenderSourcesTable).values({ ...s, active: true });
+        await db.insert(tenderSourcesTable).values(s);
       }
     }
     return;
   }
 
+  // active: false sources are blocked from Replit's environment as of July 2026.
+  // Adapters are preserved in code; flip active=true once API-based replacements exist.
   const defaults = [
-    { name: "World Bank Procurement", sourceType: "development_bank", url: "https://search.worldbank.org/api/v2/procnotices", adapterType: "world_bank" },
-    { name: "UNDP Procurement Notices", sourceType: "un", url: "https://procurement-notices.undp.org/", adapterType: "ungm" },
-    { name: "Inter-American Development Bank", sourceType: "development_bank", url: "https://www.iadb.org/en/projects/all", adapterType: "idb" },
-    { name: "Caribbean Development Bank", sourceType: "development_bank", url: "https://www.caribank.org/", adapterType: "cdb" },
-    { name: "Bahamas Government Procurement", sourceType: "government", url: "https://www.bahamas.gov.bs/wps/portal/public/gov/government/news", adapterType: "bahamas_gov" },
-    { name: "Caribbean Tourism Organization", sourceType: "regional", url: "https://www.caribtourism.com/", adapterType: "cto" },
-    { name: "CARICOM Secretariat", sourceType: "regional", url: "https://caricom.org/", adapterType: "caricom" },
-    { name: "EU Caribbean Development Fund", sourceType: "development_fund", url: "https://www.cariforum.org/", adapterType: "eu_caribbean" },
+    { name: "World Bank Procurement",           sourceType: "development_bank",  url: "https://search.worldbank.org/api/v2/procnotices",              adapterType: "world_bank",   active: true  },
+    { name: "UNDP Procurement Notices",         sourceType: "un",                url: "https://procurement-notices.undp.org/",                        adapterType: "ungm",         active: false },
+    { name: "Inter-American Development Bank",  sourceType: "development_bank",  url: "https://www.iadb.org/en/projects/all",                         adapterType: "idb",          active: false },
+    { name: "Caribbean Development Bank",       sourceType: "development_bank",  url: "https://www.caribank.org/",                                    adapterType: "cdb",          active: false },
+      { name: "Bahamas Government Procurement",   sourceType: "government",        url: "https://www.bahamas.gov.bs/wps/portal/public/gov/government/news", adapterType: "bahamas_gov", active: true, browserEnabled: true, approvedDomains: ["bahamas.gov.bs"] },
+    { name: "Caribbean Tourism Organization",   sourceType: "regional",          url: "https://www.caribtourism.com/",                                adapterType: "cto",          active: false },
+      { name: "CARICOM Secretariat",              sourceType: "regional",          url: "https://caricom.org/procurement-notices/",                    adapterType: "caricom",      active: false, browserEnabled: false, approvedDomains: ["caricom.org"] },
+    { name: "EU Caribbean Development Fund",    sourceType: "development_fund",  url: "https://www.cariforum.org/",                                   adapterType: "eu_caribbean", active: false },
   ];
 
   for (const s of defaults) {
-    await db.insert(tenderSourcesTable).values({ ...s, active: true });
+    await db.insert(tenderSourcesTable).values(s);
   }
 }
 

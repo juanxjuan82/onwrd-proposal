@@ -11,6 +11,41 @@ env = { "CI" = "true" }
 [workflows]
 runButton = "Project"
 
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "crawl4ai"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "api-build"
+
+[[workflows.workflow]]
+name = "crawl4ai"
+author = "agent"
+
+[workflows.workflow.metadata]
+isValidation = true
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server exec node --import tsx/esm --test src/crawlers/crawl4ai-client.test.ts src/crawlers/crawler-sources.test.ts src/crawlers/crawl4ai-migration.test.ts"
+
+[[workflows.workflow]]
+name = "api-build"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server typecheck && pnpm --filter @workspace/api-server build"
+
+[workflows.workflow.metadata]
+isValidation = true
+
 [agent]
 stack = "PNPM_WORKSPACE"
 expertMode = true
@@ -32,6 +67,11 @@ SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = "587"
 RESEND_FROM = "ONWRD Tender Desk <desk@onwrdadvisors.com>"
 GITHUB_REPO = "https://github.com/juanxjuan82/onwrd-proposal"
+PROPOSAL_NOTIFY_EMAIL = "j.aymes@onwrdadvisors.com"
+
+[userenv.production]
+GOOGLE_OAUTH_CALLBACK_URL = "https://proposals.onwrdadvisors.com/api/auth/google/callback"
+APP_URL = "https://proposals.onwrdadvisors.com"
 
 [[ports]]
 localPort = 8080

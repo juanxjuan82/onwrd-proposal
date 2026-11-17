@@ -1,7 +1,8 @@
 import app, { dbReady } from "./app";
 import { logger } from "./lib/logger";
-import { startScheduler } from "./crawlers/scheduler.js";
 import { recoverStaleAnalysisJobs } from "./lib/analysis-recovery.js";
+import { reconcileProposalGenerationState } from "./lib/proposal-generation-recovery.js";
+import { startFallbackScheduler } from "./crawlers/scheduler.js";
 
 const rawPort = process.env["PORT"];
 
@@ -32,5 +33,6 @@ app.listen(port, (err) => {
 
   logger.info({ port }, "Server listening");
   void recoverStaleAnalysisJobs();
-  void startScheduler();
+  void reconcileProposalGenerationState();
+  startFallbackScheduler();
 });

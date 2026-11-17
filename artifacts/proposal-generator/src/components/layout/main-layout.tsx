@@ -2,16 +2,23 @@ import { useState, useEffect, useRef } from "react";
 import { Link, useLocation } from "wouter";
 import {
   Plus, Target, LayoutDashboard, BookOpen, Settings,
-  Upload, FileText, Link2, ChevronDown, X,
+  Upload, FileText, Link2, ChevronDown, X, HelpCircle,
 } from "lucide-react";
+import { WalkthroughWizard, useWalkthrough } from "@/components/walkthrough-wizard";
+import { useUser, useClerk } from "@clerk/react";
+import { PUBLIC_INTAKE_URL } from "@/lib/public-links";
 
-const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+const basePath = import.meta.env.BASE_URL.replace(/\/$/, "");
 
 export function MainLayout({ children }: { children: React.ReactNode }) {
   const [location, navigate] = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
   const [showIntakeModal, setShowIntakeModal] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const tour = useWalkthrough();
+  const { user } = useUser();
+  const { signOut } = useClerk();
+  const logout = () => signOut({ redirectUrl: window.location.origin + basePath });
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -39,7 +46,7 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
       active ? "text-white border-[#0000FF]" : "text-[#555] border-transparent hover:text-[#999]"
     }`;
 
-  const intakeUrl = `${window.location.origin}${BASE}/intake`;
+  const intakeUrl = PUBLIC_INTAKE_URL;
 
   const menuItems: { label: string; icon: React.ElementType; action: () => void }[] = [
     {
@@ -165,10 +172,47 @@ export function MainLayout({ children }: { children: React.ReactNode }) {
             </div>
           </nav>
 
+          {/* Help / tour button */}
+          <div className="pt-6 border-t border-[#1a1a1a] mt-4 -mx-1">
+            <button
+              onClick={() => tour.show()}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-md text-[#555] hover:text-white hover:bg-[#111] transition-colors text-xs font-medium"
+            >
+              <HelpCircle className="w-3.5 h-3.5 shrink-0" />
+              How it works
+            </button>
+          </div>
+
+          {/* Signed-in user */}
+          {user && (
+            <div className="pt-3 mt-2 border-t border-[#1a1a1a] -mx-1 flex items-center justify-between gap-2 px-3">
+              <div className="min-w-0" data-testid="text-user-indicator">
+                <p className="text-xs text-[#ccc] truncate">
+                  {user.firstName || user.primaryEmailAddress?.emailAddress || "Signed in"}
+                </p>
+                {user.firstName && user.primaryEmailAddress?.emailAddress && (
+                  <p className="text-[10px] text-[#555] truncate">
+                    {user.primaryEmailAddress.emailAddress}
+                  </p>
+                )}
+              </div>
+              <button
+                onClick={logout}
+                className="text-[10px] text-[#555] hover:text-white transition-colors font-medium shrink-0"
+                data-testid="button-logout"
+              >
+                Log out
+              </button>
+            </div>
+          )}
+
         </div>
       </aside>
 
       <main className="flex-1 overflow-auto bg-black">{children}</main>
+
+      {/* Walkthrough wizard */}
+      <WalkthroughWizard open={tour.open} onClose={tour.hide} />
 
       {/* Prospect Intake share modal */}
       {showIntakeModal && (

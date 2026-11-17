@@ -164,6 +164,64 @@ const CORE_SERVICE_PHRASES: string[] = [
   "sensitisation campaign",
 ];
 
+// ── Individual-hire phrases — looking for a person, not a firm ───────────────
+// These are checked against title + first 300 chars of description and produce
+// a STRICT rejection with no deliverable-count override: even a comms brief
+// hiring one person is not firm-level procurement we can bid on.
+const INDIVIDUAL_HIRE_PHRASES: string[] = [
+  // UN/development-sector standard labels for individual contractor roles
+  "individual consultant",
+  "individual consultancy",
+  "individual contractor",
+  "individual expert",
+  "national consultant",      // UN lingo for local individual hire
+  "international consultant", // UN lingo for international individual hire
+  "short-term consultant",
+  // UN contract types for personal services
+  "personal services contract",
+  "special services agreement",  // SSA
+  "individual service contract", // ISC
+  // Single-person job titles — coordinator / officer / manager as role suffix
+  // These appear in the title of individual-hire postings, not firm-level RFPs.
+  "organizational development consultant",
+  "organisation development consultant",
+  "organisational development consultant",
+  "organization development consultant",
+  "gender specialist",
+  "gender and social inclusion specialist",
+  "social inclusion specialist",
+  "communications coordinator",
+  "communications officer",
+  "communications manager",
+  "communications director",
+  "outreach coordinator",
+  "outreach officer",
+  "project coordinator",
+  "programme coordinator",
+  "program coordinator",
+  "information officer",
+  "knowledge management officer",
+  "social media officer",
+  "social media manager",
+  "digital communications officer",
+  "digital communications manager",
+  "marketing coordinator",
+  "marketing officer",
+  "marketing manager",
+  "public relations officer",
+  "pr officer",
+  "media officer",
+  "media coordinator",
+  "brand manager",
+  "content manager",
+  "content officer",
+  // Generic individual-hire signals in title
+  "gender and social inclusion specialist",
+  "we are looking for a",
+  "seeking a qualified individual",
+  "hire a",
+];
+
 // ── Hard negative phrases — clearly out-of-scope categories ──────────────────
 // Checked against title (with optional description fallback).
 const HARD_NEGATIVE_PHRASES: string[] = [
@@ -195,6 +253,9 @@ const HARD_NEGATIVE_PHRASES: string[] = [
   "job advertisement", "vacancy notice", "employment opportunity",
   "job posting", "we are hiring", "position available",
   "submit your cv", "submit your resume",
+  // Asset disposal / sales
+  "sale of motor vehicles", "sale of vehicles", "sale of equipment",
+  "disposal of assets", "disposal of vehicles",
   // Procurement formalities (not services)
   "contract award notice", "award notice",
   "vendor registration", "supplier registration",
@@ -205,6 +266,9 @@ const BOILERPLATE_PATTERNS: RegExp[] = [
   /^(procurement notice|consulting services?|individual consultant|expression of interest|request for (proposals?|quotations?)|rfp|notice of (procurement|intent))\s*[:.]?\s*$/i,
   /^\[?(no description available|n\/a|tbd|to be determined|see attached|see document)\]?\.?$/i,
   /^(opportunity|tender|contract)\s+(ref(erence)?|no\.?|number|id)[:\s]\s*[\w-]+\s*$/i,
+  // CARICOM / portal navigation pages scraped as fake tenders
+  /^(past notices?|shortlist notices?|procurement notices?|current notices?|open notices?|closed notices?)\s*$/i,
+  /^(\w+\s+)?secretariat['']?s?\s+procurement plan(\s+\(updated\))?\s*$/i,
 ];
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -231,11 +295,18 @@ function matchAll(text: string, phrases: string[]): string[] {
   return phrases.filter((p) => phraseMatch(text, p));
 }
 
+function boundedPhraseMatch(text: string, phrase: string): boolean {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, "i").test(text);
+}
+
 function classifyContentQuality(description: string, title: string): ContentQuality {
   const t = description.trim();
 
-  // Known boilerplate stubs
-  if (BOILERPLATE_PATTERNS.some((p) => p.test(t))) return "boilerplate";
+  // Known boilerplate stubs — check title AND description
+  // (scraped nav pages have long HTML-garbage descriptions that look like full_scope)
+  if (BOILERPLATE_PATTERNS.some((p) => p.test(t)) ||
+      BOILERPLATE_PATTERNS.some((p) => p.test(title.trim()))) return "boilerplate";
 
   // Very short — not enough real content
   if (t.length < 120) return "title_only";
@@ -277,6 +348,26 @@ export function evaluateCrawlerEligibility(discovery: EligibilityInput): Eligibi
     rejectionReasons.push("Recommendation is SKIP — relevance gate not met");
   }
 
+  // 2b. Individual-hire notices → always raw_only, no deliverable-count override.
+  // A comms brief hiring one person is still not firm-level procurement.
+  // Checked against title + first 300 chars of description.
+  const individualHireCorpus = `${discovery.title} ${discovery.description.slice(0, 300)}`.toLowerCase();
+  const individualHireMatches = INDIVIDUAL_HIRE_PHRASES.filter((p) =>
+    boundedPhraseMatch(individualHireCorpus, p),
+  );
+  if (individualHireMatches.length > 0) {
+    return {
+      eligible: false,
+      destination: "raw_only",
+      contentQuality: classifyContentQuality(discovery.description, discovery.title),
+      positiveSignals: [],
+      negativeSignals: individualHireMatches,
+      rejectionReasons: [
+        `Individual hire — seeking a person, not a firm (matched: "${individualHireMatches[0]}")`,
+      ],
+    };
+  }
+
   // 3. Content quality gate
   const contentQuality = classifyContentQuality(discovery.description, discovery.title);
   if (contentQuality === "boilerplate" || contentQuality === "title_only") {
@@ -307,7 +398,8 @@ export function evaluateCrawlerEligibility(discovery: EligibilityInput): Eligibi
     }
   }
 
-  // 8. Require at least one positive signal — generic terms alone cannot qualify
+  // 8. Require explicit scope evidence for every recommendation. A high
+  //    deterministic score cannot make generic language qualify on its own.
   if (positiveSignals.length === 0) {
     rejectionReasons.push(
       "No explicit ONWRD core service phrases found — generic terms alone do not qualify",

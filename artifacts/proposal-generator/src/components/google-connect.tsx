@@ -88,9 +88,12 @@ export function GoogleConnect() {
       ) : (
         <div className="space-y-2">
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-            <span>Not connected</span>
+            <AlertCircle className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+            <span>Not connected — new exports will fail</span>
           </div>
+          <p className="text-xs text-muted-foreground/70 leading-snug">
+            Existing proposal links still work. Reconnect to export new ones to Google Docs.
+          </p>
           <Button
             variant="outline"
             size="sm"
@@ -98,7 +101,7 @@ export function GoogleConnect() {
             onClick={handleConnect}
           >
             <LogIn className="w-3.5 h-3.5" />
-            Connect Google
+            Reconnect Google
           </Button>
         </div>
       )}

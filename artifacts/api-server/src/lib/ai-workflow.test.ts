@@ -22,6 +22,7 @@ import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { db } from "@workspace/db";
 import { proposalsTable, proposalSectionsTable } from "@workspace/db";
+import { sql } from "drizzle-orm";
 import app from "../app.js";
 import {
   invokeAI,
@@ -35,6 +36,8 @@ import {
 describe("ai-workflow: call-count and operationKey idempotency", () => {
   let server: http.Server;
   let baseUrl: string;
+  const trackedTenderIds = new Set<number>();
+  const trackedOperationKeys = new Set<string>();
 
   // Saved quota env vars — restored in after().
   let savedCallLimit:  string | undefined;
@@ -78,9 +81,10 @@ describe("ai-workflow: call-count and operationKey idempotency", () => {
       }),
   );
 
-  after(
-    () =>
-      new Promise<void>((resolve, reject) => {
+  after(async () => {
+    await cleanupTrackedFixtures();
+
+    await new Promise<void>((resolve, reject) => {
         __setInvokeAISpy(null);
         __setOpenAICompletionForTesting(null);
 
@@ -99,12 +103,13 @@ describe("ai-workflow: call-count and operationKey idempotency", () => {
         else delete env.AI_MAX_CALLS_PER_OPERATION;
 
         server.close((err) => (err ? reject(err) : resolve()));
-      }),
-  );
+      });
+  });
 
-  afterEach(() => {
+  afterEach(async () => {
     __setInvokeAISpy(null);
     __setOpenAICompletionForTesting(null);
+    await cleanupTrackedFixtures();
   });
 
   // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -131,7 +136,41 @@ describe("ai-workflow: call-count and operationKey idempotency", () => {
     assert.ok(res.status < 300, `createTender failed with status ${res.status}`);
     const body = (await res.json()) as { id: number };
     assert.ok(typeof body.id === "number", "createTender must return an object with numeric id");
+    trackedTenderIds.add(body.id);
     return body.id;
+  }
+
+  async function cleanupTrackedFixtures(): Promise<void> {
+    for (const tenderId of trackedTenderIds) {
+      await db.transaction(async (tx) => {
+        // These tables do not have foreign keys, so remove their test rows
+        // before deleting proposals and tenders.
+        await tx.execute(sql`
+          DELETE FROM ai_usage_log
+          WHERE opportunity_id = ${tenderId}
+             OR proposal_id IN (
+               SELECT id FROM proposals WHERE tender_id = ${tenderId}
+             )
+        `);
+        await tx.execute(sql`
+          DELETE FROM notifications
+          WHERE proposal_id IN (
+            SELECT id FROM proposals WHERE tender_id = ${tenderId}
+          )
+        `);
+        // Proposal children and tender children use ON DELETE CASCADE.
+        await tx.execute(sql`DELETE FROM proposals WHERE tender_id = ${tenderId}`);
+        await tx.execute(sql`DELETE FROM tenders WHERE id = ${tenderId}`);
+      });
+    }
+    trackedTenderIds.clear();
+
+    for (const operationKey of trackedOperationKeys) {
+      await db.execute(sql`
+        DELETE FROM ai_usage_log WHERE operation_key = ${operationKey}
+      `);
+    }
+    trackedOperationKeys.clear();
   }
 
   function makeRequirementsContent(): string {
@@ -336,7 +375,9 @@ describe("ai-workflow: call-count and operationKey idempotency", () => {
           industry:        "Infrastructure",
           briefText:       "Test brief for run-critic route call-count test.",
           proposalContent: "Test proposal content.",
-          status:          "proposal_drafting",
+          status:          "draft",
+          generationStatus: "failed",
+          generationError: "Terminal test fixture; no generation is active.",
           tenderId,
         })
         .returning();
@@ -380,6 +421,7 @@ describe("ai-workflow: call-count and operationKey idempotency", () => {
       }));
 
       const opKey  = `test-idempotency-${Date.now()}`;
+       trackedOperationKeys.add(opKey);
       const params: InvokeAIParams = {
         feature:      "section_regeneration",
         messages:     [{ role: "user", content: "idempotency test prompt" }],
@@ -421,6 +463,8 @@ describe("ai-workflow: call-count and operationKey idempotency", () => {
       }));
 
       const ts = Date.now();
+       trackedOperationKeys.add(`opkey-A-${ts}`);
+       trackedOperationKeys.add(`opkey-B-${ts}`);
       try {
         const r1 = await invokeAI({
           feature:      "section_regeneration",
@@ -458,6 +502,8 @@ describe("ai-workflow: call-count and operationKey idempotency", () => {
       const ts = Date.now();
       const key1 = `per-key-${ts}-1`;
       const key2 = `per-key-${ts}-2`;
+       trackedOperationKeys.add(key1);
+       trackedOperationKeys.add(key2);
 
       try {
         const [r1, r2] = await Promise.all([

@@ -21,4 +21,17 @@
 - [Shared draft service](shared-draft-service.md) — generateProposalDraftAndPersist() in lib/proposal-draft-service.ts; AI call outside tx, DELETE+INSERT sections + snapshot update in ONE atomic tx; does NOT set generation_status (orchestrator sets it); used by both generate-proposal and runFullGenerationBackground.
 - [Structural tests + refactor drift](structural-test-refactor-drift.md) — when logic moves to a shared service, structural tests that search the old file for prompt strings ("BODY ONLY"), assembly calls, etc. must be updated to point to the new file or check for the delegation call instead.
 - [git commit works in main agent](git-push.md) — git commit and git push both work from ShellExec in the main agent; the REST API workaround documented in github-push-rest-api.md is no longer needed.
+- [Prompt-injection defence layers](prompt-safety-layers.md) — ALL tender-derived fields (title/agency/metadata) are untrusted; wrap at every AI call site, scan every ingestion path, merge persisted values on partial-update re-scans.
 - [Frontend prod build env](frontend-build-env.md) — proposal-generator vite build requires PORT and BASE_PATH env vars; run as PORT=3000 BASE_PATH=/proposal-generator pnpm build.
+
+- [Google Workspace auth + deny-by-default guard](replit-auth-setup.md) — company-domain Google login, session migration guard, and explicit public-route policy
+- [World Bank adapter deadline bug](world-bank-deadline.md) — submission_deadline_date is the bid deadline; submission_date is notice publication date. fq country filter silently ignored — use q text search for targeting.
+- [Crawler source availability](blocked-crawler-sources.md) — CDB/CARICOM notice paths permit respectful tests; UNDP procurement robots.txt disallows all notice paths.
+- [Credential scanner heuristics](credential-scanner.md) — invented-client gate: punctuation-aware extraction, service-phrase filter, case_study-only allowlist, one-directional matching
+- [Generation recovery fencing](generation-recovery-fencing.md) — stale-job recovery requires attempt ownership; fence every write and reconcile proposal/tender terminal state atomically
+- [Browser crawler boundary](browser-crawler-boundary.md) — browser enrichment is opt-in, domain-pinned, bounded, version-attested, direct-first, detail-specific, and zero-AI
+- [Compliance traceability lifecycle](compliance-traceability-lifecycle.md) — requirement coverage is atomic, edit-invalidated, live-evidence-checked, and only fresh documented overrides can waive issues
+- [Deterministic knowledge evidence](deterministic-knowledge-evidence.md) — requirements alone select approved evidence; AI writes prose but never chooses sources
+- [Source activation proof](source-activation-proof.md) — activation evidence must be configuration-versioned and committed with compare-and-set semantics
+- [PDF extraction test seam](pdf-extraction-tests.md) — inject fetch and PDF parsing in unit tests; validate the real parser with an approved live document
+- [PR1 acceptance bar](crawler-pr1-acceptance.md) — require real notice and attachment content persisted to the database before moving to qualification work

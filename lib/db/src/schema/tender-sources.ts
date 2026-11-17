@@ -1,4 +1,4 @@
-import { pgTable, text, serial, timestamp, boolean, integer } from "drizzle-orm/pg-core";
+import { pgTable, text, serial, timestamp, boolean, integer, jsonb } from "drizzle-orm/pg-core";
 
 export const tenderSourcesTable = pgTable("tender_sources", {
   id: serial("id").primaryKey(),
@@ -7,6 +7,9 @@ export const tenderSourcesTable = pgTable("tender_sources", {
   url: text("url").notNull(),
   adapterType: text("adapter_type").notNull(),
   active: boolean("active").notNull().default(true),
+  browserEnabled: boolean("browser_enabled").notNull().default(false),
+  approvedDomains: jsonb("approved_domains"),
+  configurationVersion: integer("configuration_version").notNull().default(1),
   lastCheckedAt: timestamp("last_checked_at"),
   lastSuccessAt: timestamp("last_success_at"),
   itemsFoundCount: integer("items_found_count").notNull().default(0),

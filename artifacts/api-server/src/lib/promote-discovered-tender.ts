@@ -1,6 +1,7 @@
 import { db, discoveredTendersTable, tendersTable } from "@workspace/db";
 import { eq, sql } from "drizzle-orm";
 import { applyDeterministicScore } from "./apply-deterministic-score.js";
+import { computeInjectionWarning } from "./prompt-safety.js";
 
 /**
  * Transactional, concurrent-safe promotion of a raw crawler discovery
@@ -67,6 +68,9 @@ export async function promoteDiscoveredTender(
         valueAmount: row.value_amount ?? undefined,
         sourceUrl:   row.url ?? undefined,
         rawText:     row.description || undefined,
+        injectionWarning: computeInjectionWarning(
+          row.title, row.organization, row.sector, row.description, row.url,
+        ),
         sourceType:  "crawler",
         status:      initialStatus,
       })

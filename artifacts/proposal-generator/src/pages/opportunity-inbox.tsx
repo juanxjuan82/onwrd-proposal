@@ -5,7 +5,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { RefreshCw, ExternalLink, CheckCircle2, X, Flame, Zap, Minus, ArrowRight, Loader2 } from "lucide-react";
+import { RefreshCw, ExternalLink, CheckCircle2, X, Flame, Zap, Minus, ArrowRight, Loader2, Clock3, PlusCircle } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
@@ -30,6 +30,19 @@ interface DiscoveredTender {
   confidence?: string | null;
   status: string;
   createdAt: string;
+}
+
+interface DiscoverOverview {
+  lastCrawl: {
+    id: number;
+    startedAt: string;
+    completedAt?: string | null;
+    status: string;
+    itemsFound: number;
+    itemsNew: number;
+    errorMessage?: string | null;
+  } | null;
+  latestTenderAddedAt: string | null;
 }
 
 const STATUS_FILTERS = [
@@ -116,6 +129,16 @@ export default function OpportunityInbox() {
     },
   });
 
+  const { data: overview, isLoading: isOverviewLoading } = useQuery<DiscoverOverview>({
+    queryKey: ["discovered-tenders-overview"],
+    queryFn: async () => {
+      const r = await fetch(`${BASE}/api/discovered-tenders/overview`);
+      if (!r.ok) throw new Error("Failed to load crawl activity");
+      return r.json();
+    },
+    refetchInterval: 30000,
+  });
+
   // Client-side geo filter
   const items = geoFilter === "all"
     ? rawItems
@@ -165,7 +188,9 @@ export default function OpportunityInbox() {
     },
     onSuccess: () => {
       toast({ title: "Crawl started", description: "New opportunities will appear in ~2 minutes." });
+      qc.invalidateQueries({ queryKey: ["discovered-tenders-overview"] });
       setTimeout(() => qc.invalidateQueries({ queryKey: ["discovered-tenders"] }), 90000);
+      setTimeout(() => qc.invalidateQueries({ queryKey: ["discovered-tenders-overview"] }), 90000);
     },
     onError: () => toast({ title: "Failed to start crawl", variant: "destructive" }),
   });
@@ -191,6 +216,54 @@ export default function OpportunityInbox() {
           <RefreshCw className={`w-4 h-4 mr-2 ${triggerCrawl.isPending ? "animate-spin" : ""}`} />
           {triggerCrawl.isPending ? "Starting…" : "Run Now"}
         </Button>
+      </div>
+
+      {/* Crawl activity */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-8">
+        <div className="flex items-start gap-3 p-4 rounded-lg border border-border bg-card/60">
+          <Clock3 className="w-4 h-4 mt-0.5 text-primary flex-shrink-0" />
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Last crawl</div>
+            {isOverviewLoading ? (
+              <Skeleton className="h-5 w-44 mt-2" />
+            ) : overview?.lastCrawl ? (
+              <>
+                <div className="text-sm text-white mt-1">
+                  {overview.lastCrawl.status === "running"
+                    ? "Running now"
+                    : format(new Date(overview.lastCrawl.completedAt ?? overview.lastCrawl.startedAt), "MMM d, yyyy 'at' h:mm a")}
+                </div>
+                <div className="text-xs text-muted-foreground mt-1">
+                  {overview.lastCrawl.status === "running"
+                    ? `Started ${formatDistanceToNow(new Date(overview.lastCrawl.startedAt), { addSuffix: true })}`
+                    : `${overview.lastCrawl.itemsNew} new · ${overview.lastCrawl.itemsFound} found · ${formatDistanceToNow(new Date(overview.lastCrawl.completedAt ?? overview.lastCrawl.startedAt), { addSuffix: true })}`}
+                </div>
+              </>
+            ) : (
+              <div className="text-sm text-muted-foreground mt-1">Not run yet</div>
+            )}
+          </div>
+        </div>
+        <div className="flex items-start gap-3 p-4 rounded-lg border border-border bg-card/60">
+          <PlusCircle className="w-4 h-4 mt-0.5 text-emerald-400 flex-shrink-0" />
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Latest tender added</div>
+            {isOverviewLoading ? (
+              <Skeleton className="h-5 w-44 mt-2" />
+            ) : overview?.latestTenderAddedAt ? (
+              <>
+                <div className="text-sm text-white mt-1">
+                  {format(new Date(overview.latestTenderAddedAt), "MMM d, yyyy 'at' h:mm a")}
+                </div>
+                <div className="text-xs text-muted-foreground mt-1">
+                  {formatDistanceToNow(new Date(overview.latestTenderAddedAt), { addSuffix: true })}
+                </div>
+              </>
+            ) : (
+              <div className="text-sm text-muted-foreground mt-1">No tenders added yet</div>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Summary cards */}
@@ -353,7 +426,10 @@ export default function OpportunityInbox() {
                   <div className="flex flex-wrap gap-2 text-xs text-muted-foreground">
                     {item.deadline && <span>Deadline: {format(new Date(item.deadline), "MMM d, yyyy")}</span>}
                     {item.valueAmount && <span>· Value: {item.valueAmount}</span>}
-                    <span>· Discovered {format(new Date(item.createdAt), "MMM d")}</span>
+                    <span>
+                      · Added to Discover {format(new Date(item.createdAt), "MMM d, yyyy 'at' h:mm a")}
+                      {" "}({formatDistanceToNow(new Date(item.createdAt), { addSuffix: true })})
+                    </span>
                   </div>
 
                   <div className="flex gap-2 flex-wrap items-center">

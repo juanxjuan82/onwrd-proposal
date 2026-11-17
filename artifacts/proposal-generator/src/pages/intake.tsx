@@ -77,48 +77,77 @@ function formatBytes(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-// ─── Tile components ──────────────────────────────────────────────────────
-function Tile({ label, checked, onToggle, type = "radio" }: {
-  label: string; checked: boolean; onToggle: () => void; type?: "radio"|"checkbox";
+// ─── Selection controls ───────────────────────────────────────────────────
+function SelectBox({ opts, val, set, label, placeholder = "Select…" }: {
+  opts: string[]; val: string; set: (v: string) => void; label: string; placeholder?: string;
 }) {
   return (
-    <label className={`flex items-center gap-2 rounded border px-3 py-1.5 text-[13px] leading-snug cursor-pointer transition-colors select-none
-      ${checked ? "border-[#0000FF] bg-[#0000FF]/10 text-white font-medium" : "border-[#262626] bg-[#0d0d0d] text-[#777] hover:border-[#0000FF]/50 hover:text-[#ccc]"}`}>
-      <input type={type} className="accent-primary shrink-0 w-3 h-3" checked={checked} onChange={onToggle} />
-      <span>{label}</span>
-    </label>
-  );
-}
-
-function Radio({ opts, val, set, cols = 2 }: { opts: string[]; val: string; set: (v: string) => void; cols?: 1|2 }) {
-  return (
-    <div className={`grid gap-1.5 ${cols === 1 ? "grid-cols-1" : "grid-cols-1 sm:grid-cols-2"}`}>
-      {opts.map(o => <Tile key={o} label={o} type="radio" checked={val === o} onToggle={() => set(o)} />)}
+    <div className="relative">
+      <select
+        value={val}
+        onChange={(e) => set(e.target.value)}
+        aria-label={label}
+        data-testid={`select-${label.replace(/[^a-z0-9]/gi, '-').toLowerCase()}`}
+        className={`w-full h-10 appearance-none rounded-md bg-background border border-border px-3 pr-9 text-sm
+          focus:outline-none focus:border-primary transition-colors cursor-pointer
+          ${val ? "text-foreground" : "text-muted-foreground"}`}
+      >
+        <option value="" disabled>{placeholder}</option>
+        {opts.map(o => <option key={o} value={o} className="bg-card text-foreground">{o}</option>)}
+      </select>
+      <svg className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" viewBox="0 0 16 16" fill="none">
+        <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
     </div>
   );
 }
 
-function Checks({ opts, val, set }: { opts: string[]; val: string[]; set: (v: string[]) => void }) {
+function Pill({ label, checked, onToggle }: { label: string; checked: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={checked}
+      onClick={onToggle}
+      data-testid={`button-pill-${label.replace(/[^a-z0-9]/gi, '-').toLowerCase()}`}
+      className={`rounded-full border px-4 py-2 text-sm leading-snug transition-colors select-none text-left
+        ${checked
+          ? "border-primary bg-primary text-primary-foreground font-medium"
+          : "border-border bg-transparent text-muted-foreground hover:border-primary/60 hover:text-foreground"}`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function Pills({ opts, val, set }: { opts: string[]; val: string; set: (v: string) => void }) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {opts.map(o => <Pill key={o} label={o} checked={val === o} onToggle={() => set(o === val ? "" : o)} />)}
+    </div>
+  );
+}
+
+function Chips({ opts, val, set }: { opts: string[]; val: string[]; set: (v: string[]) => void }) {
   const toggle = (o: string) => set(val.includes(o) ? val.filter(x => x !== o) : [...val, o]);
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-      {opts.map(o => <Tile key={o} label={o} type="checkbox" checked={val.includes(o)} onToggle={() => toggle(o)} />)}
+    <div className="flex flex-wrap gap-2">
+      {opts.map(o => <Pill key={o} label={o} checked={val.includes(o)} onToggle={() => toggle(o)} />)}
     </div>
   );
 }
 
 function Err({ msg }: { msg?: string }) {
   if (!msg) return null;
-  return <p className="text-[11px] text-destructive mt-1">{msg}</p>;
+  return <p className="text-xs text-destructive mt-1">{msg}</p>;
 }
 
 function Field({ label, req, opt, children }: { label: string; req?: boolean; opt?: boolean; children: React.ReactNode }) {
   return (
-    <div className="flex flex-col gap-1">
-      <span className="text-[11px] font-medium text-[#999] flex items-center gap-1">
+    <div className="flex flex-col gap-2">
+      <span className="text-sm font-medium text-foreground/90 flex items-center gap-1.5">
         {label}
         {req && <span className="text-destructive">*</span>}
-        {opt && <span className="text-[#555] font-normal">(optional)</span>}
+        {opt && <span className="text-muted-foreground font-normal text-xs">(optional)</span>}
       </span>
       {children}
     </div>
@@ -126,23 +155,26 @@ function Field({ label, req, opt, children }: { label: string; req?: boolean; op
 }
 
 // ─── Section card ─────────────────────────────────────────────────────────
-function Section({ num, title, children }: { num: number; title: string; children: React.ReactNode }) {
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <Card className="bg-[#0a0a0a] border-[#1e1e1e]">
-      <CardHeader className="pb-4 pt-5 px-6">
-        <CardTitle className="flex items-center gap-3 text-sm font-semibold text-white">
-          <span className="flex items-center justify-center w-6 h-6 rounded-full border border-[#0000FF] text-[#0000FF] text-[11px] font-bold shrink-0">
-            {num}
-          </span>
+    <Card className="bg-card border-transparent shadow-none">
+      <CardHeader className="pb-5 pt-6 px-4 sm:px-8">
+        <CardTitle className="text-lg font-semibold text-white tracking-tight">
           {title}
         </CardTitle>
       </CardHeader>
-      <CardContent className="px-6 pb-6">
+      <CardContent className="px-4 sm:px-8 pb-8">
         {children}
       </CardContent>
     </Card>
   );
 }
+
+// ─── Credibility clients ──────────────────────────────────────────────────
+const CLIENTS = ["Heineken", "FIFA", "Rosewood", "IDB", "Sandals"];
+
+// ─── Section titles for progress bar ─────────────────────────────────────
+const SECTION_TITLES = ["Contact Details", "Company & Market", "The Challenge", "Project & Investment"];
 
 // ─── Main ─────────────────────────────────────────────────────────────────
 export default function Intake() {
@@ -153,6 +185,7 @@ export default function Intake() {
   const [submissionKey] = useState(() => crypto.randomUUID());
   const [draftId, setDraftId] = useState<number | null>(null);
   const [autosaved, setAutosaved] = useState(false);
+  const [step, setStep] = useState(1);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const form = useForm<V>({
@@ -172,6 +205,46 @@ export default function Intake() {
   const market = form.watch("market");
   const problems = form.watch("problems");
   const support = form.watch("support");
+
+  // ─── Step navigation ─────────────────────────────────────────────────────
+  const STEP_FIELDS: (keyof V)[][] = [
+    ["firstName", "lastName", "jobTitle", "email", "phone", "preferredContact"],
+    ["orgName", "website", "hearAbout", "hearAboutOther", "industry", "industryOther", "market", "marketOther"],
+    ["problems", "problemsOther", "agencyBefore", "support", "supportOther"],
+    ["projectType", "projectBrief", "investment", "decisionStage"],
+  ];
+
+  const navLock = useRef(false);
+  const goNext = async () => {
+    if (navLock.current) return;
+    navLock.current = true;
+    try {
+      const valid = await form.trigger(STEP_FIELDS[step - 1]);
+      if (valid) {
+        setStep(s => Math.min(s + 1, 4));
+        window.scrollTo({ top: 0 });
+      }
+    } finally {
+      navLock.current = false;
+    }
+  };
+
+  // If final submit finds errors on an earlier (hidden) step, jump there
+  const onInvalid = (errors: Record<string, unknown>) => {
+    const errored = Object.keys(errors);
+    for (let i = 0; i < STEP_FIELDS.length; i++) {
+      if (STEP_FIELDS[i].some(f => errored.includes(f as string))) {
+        setStep(i + 1);
+        window.scrollTo({ top: 0 });
+        return;
+      }
+    }
+  };
+
+  const goBack = () => {
+    setStep(s => Math.max(s - 1, 1));
+    window.scrollTo({ top: 0 });
+  };
 
   // ─── Autosave: fire when Section 1 is filled ────────────────────────────
   const firstName = form.watch("firstName");
@@ -243,11 +316,11 @@ export default function Intake() {
     return (
       <div className="min-h-screen bg-black text-white flex items-center justify-center">
         <div className="text-center space-y-3 max-w-xs px-6">
-          <div className="mx-auto w-12 h-12 rounded-full bg-[#111] border border-[#222] flex items-center justify-center">
+          <div className="mx-auto w-12 h-12 rounded-full bg-card border border-border flex items-center justify-center">
             <CheckCircle className="w-6 h-6" style={{ color: "#00FFD5" }} />
           </div>
           <h2 className="text-xl font-semibold">Thank you.</h2>
-          <p className="text-[#666] text-sm leading-relaxed">
+          <p className="text-muted-foreground text-sm leading-relaxed">
             We'll be in touch within two business days.{" "}
             <a href="https://onwrdadvisors.com" target="_blank" rel="noopener noreferrer" className="text-white underline underline-offset-2">onwrdadvisors.com</a>
           </p>
@@ -259,47 +332,71 @@ export default function Intake() {
   return (
     <div className="min-h-screen bg-black text-white">
       {/* Header */}
-      <header className="border-b border-[#1a1a1a] px-6 py-3 sticky top-0 bg-black z-10">
-        <div className="max-w-4xl mx-auto">
-          <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-[22px] object-contain object-left" />
+      <header className="border-b border-border px-4 sm:px-6 fixed inset-x-0 top-0 bg-black z-10">
+        <div className="max-w-4xl mx-auto flex items-center justify-between py-3">
+          <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-[18px] sm:h-[22px] max-w-[96px] sm:max-w-none object-contain object-left" />
+          <div className="flex items-center justify-end gap-2 sm:gap-3 min-w-0">
+            <span className="hidden sm:inline text-xs text-muted-foreground whitespace-nowrap">
+              {SECTION_TITLES[step - 1]}
+            </span>
+            <div className="flex gap-1">
+              {SECTION_TITLES.map((_, i) => (
+                <div
+                  key={i}
+                  className={`h-1 w-4 sm:w-6 rounded-full transition-colors duration-300 ${i < step ? "bg-primary" : "bg-muted"}`}
+                />
+              ))}
+            </div>
+            <span className="text-xs text-muted-foreground whitespace-nowrap">{step}/4</span>
+          </div>
         </div>
       </header>
 
       {/* Body */}
-      <main className="max-w-4xl mx-auto w-full px-4 sm:px-6 py-8">
-        <div className="mb-8">
-          <h1 className="text-xl font-semibold text-white mb-1">Tell us about your project</h1>
-          <p className="text-[13px] text-[#555]">Fill in the sections below and we'll prepare a tailored proposal.</p>
+      <main className="max-w-4xl mx-auto w-full px-4 sm:px-6 pb-8 pt-[57px]">
+        {/* Credibility strip */}
+        <div className="flex items-center gap-3 mb-5 flex-wrap">
+          <span className="text-xs text-muted-foreground uppercase tracking-widest shrink-0">Trusted by</span>
+          <div className="h-px flex-1 bg-muted" />
+          {CLIENTS.map(name => (
+            <span key={name} className="text-xs font-semibold tracking-wider text-muted-foreground uppercase">{name}</span>
+          ))}
         </div>
 
-        <form onSubmit={form.handleSubmit(submit)} noValidate className="space-y-5">
+        <div className="mb-5">
+          <h1 className="text-xl font-semibold text-white mb-1">Tell us about your project</h1>
+          <p className="text-sm text-muted-foreground">Fill in the sections below and we'll prepare a tailored proposal.</p>
+        </div>
 
-          {/* ── Section 1: Contact Details ── */}
-          <Section num={1} title="Contact Details">
-            <div className="space-y-3">
-              <div className="grid grid-cols-2 gap-3 items-start">
+        <form onSubmit={form.handleSubmit(submit, onInvalid)} noValidate className="space-y-5">
+
+          {/* ── Step 1: Contact Details ── */}
+          {step === 1 && <div key="step1" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section title="Contact Details">
+
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 items-start">
                 <Field label="First name" req>
-                  <Input className="h-9 text-[13px]" {...form.register("firstName")} />
+                  <Input className="h-10 text-sm" {...form.register("firstName")} data-testid="input-firstname" />
                   <Err msg={errors.firstName?.message} />
                 </Field>
                 <Field label="Last name" req>
-                  <Input className="h-9 text-[13px]" {...form.register("lastName")} />
+                  <Input className="h-10 text-sm" {...form.register("lastName")} data-testid="input-lastname" />
                   <Err msg={errors.lastName?.message} />
                 </Field>
               </div>
-              <div className="grid grid-cols-2 gap-3 items-start">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 items-start">
                 <Field label="Job title" req>
-                  <Input className="h-9 text-[13px]" {...form.register("jobTitle")} />
+                  <Input className="h-10 text-sm" {...form.register("jobTitle")} data-testid="input-jobtitle" />
                   <Err msg={errors.jobTitle?.message} />
                 </Field>
                 <Field label="Email" req>
-                  <Input className="h-9 text-[13px]" type="email" {...form.register("email")} />
+                  <Input className="h-10 text-sm" type="email" {...form.register("email")} data-testid="input-email" />
                   <Err msg={errors.email?.message} />
                 </Field>
               </div>
-              <div className="grid grid-cols-2 gap-3 items-start">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 items-start">
                 <Field label="Phone" opt>
-                  <Input className="h-9 text-[13px]" {...form.register("phone")} />
+                  <Input className="h-10 text-sm" {...form.register("phone")} data-testid="input-phone" />
                 </Field>
                 <Field label="Preferred contact" opt>
                   <Controller control={form.control} name="preferredContact" render={({ field }) => (
@@ -311,11 +408,12 @@ export default function Intake() {
                         <button
                           key={val}
                           type="button"
+                          data-testid={`button-contact-${val.toLowerCase()}`}
                           onClick={() => field.onChange(field.value === val ? "" : val)}
-                          className={`flex items-center gap-2 rounded border px-3 py-2 text-[13px] transition-colors flex-1 justify-center min-w-0
+                          className={`flex items-center gap-2 rounded border px-3 py-2 text-sm transition-colors flex-1 justify-center min-w-0
                             ${field.value === val
-                              ? "border-[#0000FF] bg-[#0000FF]/10 text-white font-medium"
-                              : "border-[#262626] bg-[#0d0d0d] text-[#777] hover:border-[#0000FF]/50 hover:text-[#ccc]"}`}
+                              ? "border-primary bg-primary/10 text-primary-foreground font-medium"
+                              : "border-border bg-background text-muted-foreground hover:border-primary/50 hover:text-foreground"}`}
                         >
                           {icon}
                           <span className="truncate">{label}</span>
@@ -326,150 +424,144 @@ export default function Intake() {
                 </Field>
               </div>
               {autosaved && (
-                <p className="text-[11px] text-[#555] flex items-center gap-1">
+                <p className="text-xs text-muted-foreground flex items-center gap-1">
                   <CheckCircle className="w-3 h-3 text-[#00FFD5]" />
                   Contact details saved
                 </p>
               )}
             </div>
-          </Section>
+          </Section></div>}
 
-          {/* ── Section 2: Company & Market ── */}
-          <Section num={2} title="Company & Market">
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3 items-start">
+          {/* ── Step 2: Company & Market ── */}
+          {step === 2 && <div key="step2" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section title="Company & Market">
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 items-start">
                 <Field label="Organisation name" req>
-                  <Input className="h-9 text-[13px]" {...form.register("orgName")} />
+                  <Input className="h-10 text-sm" {...form.register("orgName")} data-testid="input-orgname" />
                   <Err msg={errors.orgName?.message} />
                 </Field>
                 <Field label="Website" opt>
-                  <Input className="h-9 text-[13px]" placeholder="https://…" {...form.register("website")} />
+                  <Input className="h-10 text-sm" placeholder="https://…" {...form.register("website")} data-testid="input-website" />
                 </Field>
               </div>
 
-              <Field label="How did you find us?" req>
-                <div className="mt-1 space-y-1.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 items-start">
+                <Field label="How did you find us?" req>
                   <Controller control={form.control} name="hearAbout" render={({ field }) => (
-                    <Radio opts={HEAR} val={field.value} set={field.onChange} />
+                    <SelectBox opts={HEAR} val={field.value} set={field.onChange} label="How did you find us?" />
                   )} />
                   <Err msg={errors.hearAbout?.message} />
                   {hearAbout === "Other" && (
-                    <Input className="h-9 text-[13px] mt-1" placeholder="Please specify…" {...form.register("hearAboutOther")} />
+                    <Input className="h-10 text-sm mt-2" placeholder="Please specify…" {...form.register("hearAboutOther")} data-testid="input-hearabout-other" />
                   )}
                   <Err msg={errors.hearAboutOther?.message} />
-                </div>
-              </Field>
+                </Field>
 
-              <Field label="Industry" req>
-                <div className="mt-1 space-y-1.5">
+                <Field label="Industry" req>
                   <Controller control={form.control} name="industry" render={({ field }) => (
-                    <Radio opts={INDUSTRY} val={field.value} set={field.onChange} />
+                    <SelectBox opts={INDUSTRY} val={field.value} set={field.onChange} label="Industry" />
                   )} />
                   <Err msg={errors.industry?.message} />
                   {industry === "Other" && (
-                    <Input className="h-9 text-[13px] mt-1" placeholder="Please specify…" {...form.register("industryOther")} />
+                    <Input className="h-10 text-sm mt-2" placeholder="Please specify…" {...form.register("industryOther")} data-testid="input-industry-other" />
                   )}
                   <Err msg={errors.industryOther?.message} />
-                </div>
-              </Field>
+                </Field>
+              </div>
 
               <Field label="Geography — where do you operate?" req>
-                <div className="mt-1 space-y-1.5">
-                  <Controller control={form.control} name="market" render={({ field }) => (
-                    <Radio opts={MARKET} val={field.value} set={field.onChange} />
-                  )} />
-                  <Err msg={errors.market?.message} />
-                  {market === "Other" && (
-                    <Input className="h-9 text-[13px] mt-1" placeholder="Please specify…" {...form.register("marketOther")} />
-                  )}
-                  <Err msg={errors.marketOther?.message} />
-                </div>
+                <Controller control={form.control} name="market" render={({ field }) => (
+                  <SelectBox opts={MARKET} val={field.value} set={field.onChange} label="Geography — where do you operate?" />
+                )} />
+                <Err msg={errors.market?.message} />
+                {market === "Other" && (
+                  <Input className="h-10 text-sm mt-2" placeholder="Please specify…" {...form.register("marketOther")} data-testid="input-market-other" />
+                )}
+                <Err msg={errors.marketOther?.message} />
               </Field>
             </div>
-          </Section>
+          </Section></div>}
 
-          {/* ── Section 3: The Challenge ── */}
-          <Section num={3} title="The Challenge">
-            <div className="space-y-4">
+          {/* ── Step 3: The Challenge ── */}
+          {step === 3 && <div key="step3" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section title="The Challenge">
+            <div className="space-y-6">
               <Field label="What's the challenge?" req>
-                <div className="mt-1 space-y-1.5">
-                  <p className="text-[11px] text-[#555]">Select all that apply</p>
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">Select all that apply</p>
                   <Controller control={form.control} name="problems" render={({ field }) => (
-                    <Checks opts={PROBLEMS} val={field.value} set={field.onChange} />
+                    <Chips opts={PROBLEMS} val={field.value} set={field.onChange} />
                   )} />
                   <Err msg={errors.problems?.message} />
                   {problems.includes("Other") && (
-                    <Input className="h-9 text-[13px]" placeholder="Please specify…" {...form.register("problemsOther")} />
+                    <Input className="h-10 text-sm mt-2" placeholder="Please specify…" {...form.register("problemsOther")} data-testid="input-problems-other" />
                   )}
                   <Err msg={errors.problemsOther?.message} />
                 </div>
               </Field>
 
               <Field label="Have you worked with a marketing agency before?" opt>
-                <div className="mt-1">
-                  <Controller control={form.control} name="agencyBefore" render={({ field }) => (
-                    <Radio opts={AGENCY} val={field.value ?? ""} set={field.onChange} />
-                  )} />
-                </div>
+                <Controller control={form.control} name="agencyBefore" render={({ field }) => (
+                  <SelectBox opts={AGENCY} val={field.value ?? ""} set={field.onChange} label="Have you worked with a marketing agency before?" />
+                )} />
               </Field>
 
               <Field label="Where do you need help?" req>
-                <div className="mt-1 space-y-1.5">
-                  <p className="text-[11px] text-[#555]">Select all that apply</p>
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">Select all that apply</p>
                   <Controller control={form.control} name="support" render={({ field }) => (
-                    <Checks opts={SUPPORT} val={field.value} set={field.onChange} />
+                    <Chips opts={SUPPORT} val={field.value} set={field.onChange} />
                   )} />
                   <Err msg={errors.support?.message} />
                   {support.includes("Other") && (
-                    <Input className="h-9 text-[13px]" placeholder="Please specify…" {...form.register("supportOther")} />
+                    <Input className="h-10 text-sm mt-2" placeholder="Please specify…" {...form.register("supportOther")} data-testid="input-support-other" />
                   )}
                   <Err msg={errors.supportOther?.message} />
                 </div>
               </Field>
             </div>
-          </Section>
+          </Section></div>}
 
-          {/* ── Section 4: Project & Investment ── */}
-          <Section num={4} title="Project & Investment">
-            <div className="space-y-4">
+          {/* ── Step 4: Project & Investment ── */}
+          {step === 4 && <div key="step4" className="animate-in fade-in slide-in-from-right-4 duration-300"><Section title="Project & Investment">
+            <div className="space-y-6">
               <Field label="Project type" req>
-                <div className="mt-1">
+                <div className="space-y-2">
                   <Controller control={form.control} name="projectType" render={({ field }) => (
-                    <Radio opts={PROJECT_TYPE} val={field.value} set={field.onChange} />
+                    <Pills opts={PROJECT_TYPE} val={field.value} set={field.onChange} />
                   )} />
                   <Err msg={errors.projectType?.message} />
                 </div>
               </Field>
 
               <Field label="Project brief" req>
-                <div className="mt-1 space-y-2">
+                <div className="space-y-2">
                   <Textarea
-                    className="text-[13px] resize-none"
+                    className="text-sm resize-none"
                     rows={5}
                     placeholder="Tell us about your goals, challenges, or anything that helps us understand what you need…"
                     {...form.register("projectBrief")}
                   />
                   <div className="flex justify-between items-start">
                     <Err msg={errors.projectBrief?.message} />
-                    <span className="text-[11px] text-[#444] ml-auto">{form.watch("projectBrief").length} chars</span>
+                    <span className="text-xs text-muted-foreground ml-auto">{form.watch("projectBrief").length} chars</span>
                   </div>
 
                   {/* File upload area */}
-                  <div className="border border-dashed border-[#2a2a2a] rounded-lg p-4">
-                    <p className="text-[11px] text-[#555] mb-2">
+                  <div className="border border-dashed border-border rounded-lg p-4">
+                    <p className="text-xs text-muted-foreground mb-2">
                       Have an existing brief? Upload your RFP or project document instead of (or alongside) typing.
                     </p>
                     {briefFile ? (
-                      <div className="flex items-center gap-2 bg-[#111] border border-[#222] rounded px-3 py-2">
-                        <FileText className="w-4 h-4 text-[#0000FF] shrink-0" />
+                      <div className="flex items-center gap-2 bg-card border border-border rounded px-3 py-2">
+                        <FileText className="w-4 h-4 text-primary shrink-0" />
                         <div className="min-w-0 flex-1">
-                          <p className="text-[13px] text-white truncate">{briefFile.name}</p>
-                          <p className="text-[11px] text-[#555]">{formatBytes(briefFile.size)}</p>
+                          <p className="text-sm text-white truncate">{briefFile.name}</p>
+                          <p className="text-xs text-muted-foreground">{formatBytes(briefFile.size)}</p>
                         </div>
                         <button
                           type="button"
                           onClick={() => { setBriefFile(null); if (fileInputRef.current) fileInputRef.current.value = ""; }}
-                          className="text-[#555] hover:text-white transition-colors shrink-0"
+                          className="text-muted-foreground hover:text-white transition-colors shrink-0"
                         >
                           <X className="w-4 h-4" />
                         </button>
@@ -478,11 +570,11 @@ export default function Intake() {
                       <button
                         type="button"
                         onClick={() => fileInputRef.current?.click()}
-                        className="flex items-center gap-2 text-[13px] text-[#666] hover:text-white transition-colors"
+                        className="flex items-center gap-2 text-sm text-muted-foreground hover:text-white transition-colors"
                       >
                         <UploadCloud className="w-4 h-4 shrink-0" />
                         <span>Choose file</span>
-                        <span className="text-[#444]">· PDF, DOCX, TXT · Max 20 MB</span>
+                        <span className="text-muted-foreground">· PDF, DOCX, TXT · Max 20 MB</span>
                       </button>
                     )}
                     <input
@@ -500,31 +592,42 @@ export default function Intake() {
               </Field>
 
               <Field label="How are you thinking about investment?" opt>
-                <div className="mt-1">
-                  <p className="text-[11px] text-[#555] mb-1.5">Optional — helps us tailor our thinking</p>
+                <div className="space-y-2">
+                  <p className="text-xs text-muted-foreground">Optional — helps us tailor our thinking</p>
                   <Controller control={form.control} name="investment" render={({ field }) => (
-                    <Radio opts={INVESTMENT} val={field.value ?? ""} set={field.onChange} cols={1} />
+                    <SelectBox opts={INVESTMENT} val={field.value ?? ""} set={field.onChange} label="How are you thinking about investment?" />
                   )} />
                 </div>
               </Field>
 
               <Field label="Where are you in your decision-making?" req>
-                <div className="mt-1 space-y-1.5">
-                  <Controller control={form.control} name="decisionStage" render={({ field }) => (
-                    <Radio opts={DECISION} val={field.value} set={field.onChange} cols={1} />
-                  )} />
-                  <Err msg={errors.decisionStage?.message} />
-                </div>
+                <Controller control={form.control} name="decisionStage" render={({ field }) => (
+                  <SelectBox opts={DECISION} val={field.value} set={field.onChange} label="Where are you in your decision-making?" />
+                )} />
+                <Err msg={errors.decisionStage?.message} />
               </Field>
             </div>
-          </Section>
+          </Section></div>}
 
-          {/* Submit */}
-          <div className="flex flex-col items-end gap-2 pt-1 pb-8">
-            {submitErr && <p className="text-[11px] text-destructive self-start">{submitErr}</p>}
-            <Button type="submit" size="sm" className="h-9 px-8 text-[13px]" disabled={busy || isSubmitting}>
-              {busy ? "Submitting…" : "Submit"}
-            </Button>
+          {/* Step navigation */}
+          <div className="flex flex-col gap-2 pt-1 pb-8">
+            {submitErr && <p className="text-xs text-destructive">{submitErr}</p>}
+            <div className="flex items-center justify-between">
+              {step > 1 ? (
+                <Button type="button" variant="outline" size="sm" className="h-9 px-6 text-sm" onClick={goBack}>
+                  Back
+                </Button>
+              ) : <span />}
+              {step < 4 ? (
+                <Button type="button" size="sm" className="h-9 px-8 text-sm" onClick={goNext}>
+                  Next
+                </Button>
+              ) : (
+                <Button type="submit" size="sm" className="h-9 px-8 text-sm" disabled={busy || isSubmitting}>
+                  {busy ? "Submitting…" : "Submit"}
+                </Button>
+              )}
+            </div>
           </div>
         </form>
       </main>

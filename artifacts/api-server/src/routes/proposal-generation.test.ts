@@ -25,6 +25,7 @@ const sectionsSrc      = readFileSync(path.join(routesDir, "sections.ts"), "utf8
 const authSrc          = readFileSync(path.join(routesDir, "auth.ts"), "utf8");
 const appSrc           = readFileSync(path.join(apiSrcDir, "app.ts"), "utf8");
 const indexSrc         = readFileSync(path.join(apiSrcDir, "index.ts"), "utf8");
+const proposalsSrc     = readFileSync(path.join(routesDir, "proposals.ts"), "utf8");
 const detailSrc        = readFileSync(path.join(frontendDir, "proposal-detail.tsx"), "utf8");
 const workspaceSrc     = readFileSync(path.join(frontendDir, "proposals-workspace.tsx"), "utf8");
 
@@ -289,6 +290,35 @@ describe("§15 session DDL — await before accepting connections", () => {
 // ── §16  Frontend — polling and form dirty guard ───────────────────────────────
 
 describe("§16 proposal-detail — polling and form sync", () => {
+  it("supports atomic bulk proposal deletion with validation", () => {
+    assert.ok(
+      proposalsSrc.includes('router.post("/proposals/bulk-delete"'),
+      "proposals router must expose the bulk-delete endpoint",
+    );
+    assert.ok(
+      proposalsSrc.includes("ids must be a non-empty array") &&
+        proposalsSrc.includes("rawIds.length > 100"),
+      "bulk deletion must reject empty, malformed, and oversized selections",
+    );
+    assert.ok(
+      proposalsSrc.includes("db.transaction") &&
+        proposalsSrc.includes("deletedCount"),
+      "bulk deletion must be transactional and return its result",
+    );
+    assert.ok(
+      proposalsSrc.includes("One or more proposals no longer exist"),
+      "bulk deletion must report stale selections without partial deletion",
+    );
+  });
+
+  it("provides multi-select controls and a deliberate confirmation step", () => {
+    assert.ok(workspaceSrc.includes("Select proposals"));
+    assert.ok(workspaceSrc.includes("select-all-proposals"));
+    assert.ok(workspaceSrc.includes("delete-selected-proposals"));
+    assert.ok(workspaceSrc.includes("confirm-delete-selected-proposals"));
+    assert.ok(workspaceSrc.includes("/api/proposals/bulk-delete"));
+  });
+
   it("uses setInterval for continuous polling while isDrafting", () => {
     assert.ok(
       detailSrc.includes("setInterval"),
@@ -363,6 +393,25 @@ describe("§16 proposal-detail — polling and form sync", () => {
     );
   });
 
+  it("proposal detail does not treat legacy proposal_drafting status alone as active", () => {
+    const activeStart = detailSrc.indexOf("const isGenActive");
+    const activeEnd = detailSrc.indexOf(";", activeStart) + 1;
+    const activeExpression = activeStart >= 0 ? detailSrc.slice(activeStart, activeEnd) : "";
+    assert.ok(activeExpression.includes('"extracting"'));
+    assert.ok(activeExpression.includes('"strategizing"'));
+    assert.ok(activeExpression.includes('"drafting"'));
+    assert.equal(
+      activeExpression.includes("proposal_drafting"),
+      false,
+      "detail polling must stop when no explicit generation phase is active",
+    );
+    assert.equal(
+      detailSrc.includes('generationStatus === "drafting" || isDrafting'),
+      false,
+      "detail status panel must not spin from legacy proposal status alone",
+    );
+  });
+
   it("proposals-workspace uses run-full-generation to launch generation", () => {
     // The workspace page (not proposal-detail) now drives generation via run-full-generation
     assert.ok(
@@ -372,6 +421,57 @@ describe("§16 proposal-detail — polling and form sync", () => {
     assert.ok(
       workspaceSrc.includes("Generate Proposal"),
       "proposals-workspace.tsx must show a Generate Proposal action"
+    );
+  });
+
+  it("does not relaunch extraction when the source is only a short summary", () => {
+    assert.ok(
+      opportunitiesSrc.includes("MIN_EXTRACTION_SOURCE_CHARS"),
+      "full generation must validate source length before launching extraction",
+    );
+    assert.ok(
+      opportunitiesSrc.includes('"source_text_too_short"'),
+      "thin-source failures must return an actionable error code",
+    );
+    assert.ok(
+      workspaceSrc.includes("Import full RFP"),
+      "the workspace must offer source replacement instead of an identical retry",
+    );
+  });
+
+  it("classifies empty extraction output without reporting unknown", () => {
+    assert.ok(
+      opportunitiesSrc.includes('code === "no_requirements_extracted"'),
+      "empty extraction output must produce an actionable generation error",
+    );
+  });
+
+  it("workspace polling is gated only by explicit active generation phases", () => {
+    const fnStart = workspaceSrc.indexOf("function isActiveGeneration");
+    const fnEnd = workspaceSrc.indexOf("\n}", fnStart) + 2;
+    const fnBody = fnStart >= 0 ? workspaceSrc.slice(fnStart, fnEnd) : "";
+    assert.ok(fnBody.includes('"extracting"'));
+    assert.ok(fnBody.includes('"strategizing"'));
+    assert.ok(fnBody.includes('"drafting"'));
+    assert.equal(
+      fnBody.includes("proposal_drafting"),
+      false,
+      "legacy proposal_drafting status alone must not cause perpetual polling",
+    );
+  });
+
+  it("failed workspace rows explain the interruption and retry through the canonical flow", () => {
+    assert.ok(
+      workspaceSrc.includes("proposal.generationError"),
+      "workspace must display the persisted generation failure explanation",
+    );
+    assert.ok(
+      workspaceSrc.includes("Retry to start again"),
+      "workspace must explain that the user can safely retry",
+    );
+    assert.ok(
+      workspaceSrc.includes("onGenerate(item.id)"),
+      "Retry must use the same canonical full-generation action as Generate Proposal",
     );
   });
 });
@@ -479,28 +579,38 @@ describe("§B-1 concurrent generate-proposal → one AI invocation", () => {
     const tenderId = await _createTestTender();
     let aiCallCount = 0;
     let resolveAi!: () => void;
+    let releaseAi!: () => void;
     const aiCalled = new Promise<void>((resolve) => { resolveAi = resolve; });
+    const aiRelease = new Promise<void>((resolve) => { releaseAi = resolve; });
     __setInvokeAISpy(async () => {
       aiCallCount++;
       resolveAi();
+      await aiRelease;
       return { content: JSON.stringify({ sections: [] }), model: "test", usage: { promptTokens: 1, completionTokens: 1, totalTokens: 2 } };
     });
     const send = () => fetch(`${_baseUrl}/api/opportunities/${tenderId}/generate-proposal`, {
       method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
     });
     try {
-      const [r1, r2] = await Promise.all([send(), send()]);
+      const firstResponsePromise = send();
+      await Promise.race([
+        aiCalled,
+        new Promise<void>((_, reject) => setTimeout(() => reject(new Error("AI spy not called within 5 s")), 5000)),
+      ]);
+      const r2 = await send();
+      releaseAi();
+      const r1 = await firstResponsePromise;
       const statuses = [r1.status, r2.status].sort((a, b) => a - b);
       assert.deepStrictEqual(statuses, [200, 409], "One request must get 200 and the other 409");
       const rejected = [r1, r2].find((r) => r.status === 409)!;
       const body = await rejected.json() as { code?: string };
       assert.equal(body.code, "generation_in_progress", "409 must carry code: generation_in_progress");
-      await Promise.race([
-        aiCalled,
-        new Promise<void>((_, reject) => setTimeout(() => reject(new Error("AI spy not called within 5 s")), 5000)),
-      ]);
       assert.equal(aiCallCount, 1, "AI must be invoked exactly once across both requests");
-    } finally { __setInvokeAISpy(null); await _cleanupTestTender(tenderId); }
+    } finally {
+      releaseAi();
+      __setInvokeAISpy(null);
+      await _cleanupTestTender(tenderId);
+    }
   });
 
   it("both requests resolve the same canonical Proposal id", async () => {
@@ -653,5 +763,119 @@ describe("§B-5 session init failure → dbReady rejects", () => {
     const exitPos   = indexSrc.indexOf("process.exit(1)");
     const listenPos = indexSrc.indexOf("app.listen");
     assert.ok(exitPos < listenPos, "process.exit(1) must precede app.listen");
+  });
+});
+
+// ── §B-6  Retry a recovered generation through the canonical flow ────────────
+
+describe("§B-6 failed generation → explicit safe retry", () => {
+  it("reuses the canonical proposal and claims the full-generation flow", async () => {
+    const tenderId = await _createTestTender();
+    const detailedSource =
+      "The supplier must submit a complete technical proposal, delivery plan, " +
+      "staffing approach, implementation schedule, risk register, pricing breakdown, " +
+      "quality assurance method, data protection controls, accessibility statement, " +
+      "and evidence of relevant experience. The proposal must also explain reporting, " +
+      "governance, stakeholder engagement, acceptance criteria, and transition support.";
+    await db
+      .update(tendersTable)
+      .set({ description: detailedSource, rawText: detailedSource })
+      .where(eq(tendersTable.id, tenderId));
+    const [proposal] = await db.insert(proposalsTable).values({
+      clientName: "Test Agency",
+      industry: "General",
+      briefText: "Recovered proposal brief.",
+      proposalContent: "",
+      status: "draft",
+      generationStatus: "failed",
+      generationError: "Generation was interrupted. Retry to start again.",
+      tenderId,
+    }).returning({ id: proposalsTable.id });
+    await db
+      .update(tendersTable)
+      .set({ proposalId: proposal.id, status: "draft" })
+      .where(eq(tendersTable.id, tenderId));
+
+    let resolveFirstAi!: () => void;
+    let firstCall = true;
+    const firstAiCalled = new Promise<void>((resolve) => {
+      resolveFirstAi = resolve;
+    });
+    let releaseFirstAi!: () => void;
+    const firstAiGate = new Promise<void>((resolve) => {
+      releaseFirstAi = resolve;
+    });
+
+    __setInvokeAISpy(async (params) => {
+      if (firstCall) {
+        firstCall = false;
+        resolveFirstAi();
+        await firstAiGate;
+      }
+      if (params.feature === "requirements_extraction") {
+        return {
+          content: JSON.stringify({
+            requirements: [
+              { requirementText: "Submit a proposal", category: "general", isMandatory: true },
+            ],
+          }),
+          model: "test",
+        };
+      }
+      if (params.feature === "strategy_generation") {
+        return {
+          content: JSON.stringify({
+            positioning: "Clear response",
+            winThemes: ["Clarity"],
+            recommendedCaseStudies: [],
+            risks: [],
+            messagingGuidance: "Be direct",
+          }),
+          model: "test",
+        };
+      }
+      return { content: JSON.stringify({ sections: [] }), model: "test" };
+    });
+
+    try {
+      const response = await fetch(
+        `${_baseUrl}/api/opportunities/${tenderId}/run-full-generation`,
+        { method: "POST", headers: { "Content-Type": "application/json" } },
+      );
+      const body = await response.json() as { proposalId?: number; generationStatus?: string };
+      assert.equal(response.status, 202);
+      assert.equal(body.proposalId, proposal.id, "retry must reuse the canonical proposal");
+      assert.equal(body.generationStatus, "extracting");
+
+      await Promise.race([
+        firstAiCalled,
+        new Promise<void>((_, reject) =>
+          setTimeout(() => reject(new Error("retry did not reach AI within 5 s")), 5000),
+        ),
+      ]);
+
+      const [claimed] = await db
+        .select()
+        .from(proposalsTable)
+        .where(eq(proposalsTable.id, proposal.id));
+      assert.equal(claimed.generationStatus, "extracting");
+      assert.equal(claimed.status, "proposal_drafting");
+      assert.equal(claimed.generationError, null);
+    } finally {
+      releaseFirstAi();
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
+        const [row] = await db
+          .select({ generationStatus: proposalsTable.generationStatus })
+          .from(proposalsTable)
+          .where(eq(proposalsTable.id, proposal.id));
+        if (!row || row.generationStatus === "ready" || row.generationStatus === "failed") {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      __setInvokeAISpy(null);
+      await _cleanupTestTender(tenderId);
+    }
   });
 });

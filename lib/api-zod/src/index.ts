@@ -1,2 +1,11 @@
 export * from "./generated/api";
-export * from "./generated/types";
+export type { ErrorResponse } from "./generated/types/errorResponse";
+export type { GoogleDocsExportResponse } from "./generated/types/googleDocsExportResponse";
+export type { HealthStatus } from "./generated/types/healthStatus";
+export type { ListTendersParams } from "./generated/types/listTendersParams";
+export type { Proposal } from "./generated/types/proposal";
+export type { RunFullGenerationResponse } from "./generated/types/runFullGenerationResponse";
+export type { Tender } from "./generated/types/tender";
+export type { UpdateProposalBodyStatus } from "./generated/types/updateProposalBodyStatus";
+export type { WorkspaceItem } from "./generated/types/workspaceItem";
+export type { WorkspaceProposal } from "./generated/types/workspaceProposal";

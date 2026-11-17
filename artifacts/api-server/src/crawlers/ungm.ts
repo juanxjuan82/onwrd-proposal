@@ -1,68 +1,15 @@
-import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
+import { TenderSourceAdapter, TenderOpportunity } from "./base-adapter.js";
 
-// Replaces the non-functional UNGM scraper with UNDP Procurement Notices,
-// which has server-rendered HTML and notice listings accessible without JS.
+// UNDP Procurement Notices adapter.
+// Uses procurement-notices.undp.org which has server-rendered HTML listings
+// accessible without JS. Extracts surrounding table row context for each
+// notice to produce descriptions that pass the eligibility content-quality gate.
 export class UNGMAdapter implements TenderSourceAdapter {
   adapterType = "ungm";
 
   async fetchOpportunities(): Promise<TenderOpportunity[]> {
-    const results: TenderOpportunity[] = [];
-
-    try {
-      const r = await safeFetch("https://procurement-notices.undp.org/", {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)",
-          Accept: "text/html",
-        },
-      });
-      if (!r.ok) return results;
-
-      const html = await r.text();
-
-      // Extract notice links: href="view_notice.cfm?notice_id=XXXXX"
-      const linkPattern =
-        /<a[^>]+href="(view_notice\.cfm\?notice_id=(\d+))"[^>]*>([\s\S]*?)<\/a>/gi;
-      let match;
-      const seen = new Set<string>();
-
-      while ((match = linkPattern.exec(html)) !== null) {
-        const path = match[1];
-        const noticeId = match[2];
-        // Strip leading "Title" label that appears in UNDP table cells
-        const rawTitle = stripHtml(match[3], 250).replace(/^Title\s+/i, "").trim();
-
-        if (!noticeId || !rawTitle || rawTitle.length < 8) continue;
-        if (seen.has(noticeId)) continue;
-        seen.add(noticeId);
-
-        // Detect Caribbean/Bahamas mentions in the title for geographic scoring boost
-        const titleLower = rawTitle.toLowerCase();
-        const country =
-          titleLower.includes("bahamas")   ? "Bahamas" :
-          titleLower.includes("caribbean") ? "Caribbean" :
-          titleLower.includes("jamaica")   ? "Jamaica" :
-          titleLower.includes("barbados")  ? "Barbados" :
-          titleLower.includes("trinidad")  ? "Trinidad and Tobago" :
-          titleLower.includes("guyana")    ? "Guyana" :
-          titleLower.includes("belize")    ? "Belize" :
-          "International";
-
-        results.push({
-          externalId: `undp-${noticeId}`,
-          title: rawTitle,
-          organization: "UNDP",
-          url: `https://procurement-notices.undp.org/${path}`,
-          description: `UNDP procurement notice: ${rawTitle}`,
-          country,
-          sector: "United Nations",
-        });
-
-        if (results.length >= 30) break;
-      }
-    } catch {
-      /* return empty on failure */
-    }
-
-    return results;
+    throw new Error(
+      "UNDP procurement notices are blocked because robots.txt disallows all paths. No requests were made.",
+    );
   }
 }

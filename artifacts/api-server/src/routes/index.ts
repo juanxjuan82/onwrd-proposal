@@ -10,8 +10,26 @@ import knowledgeRouter from "./knowledge";
 import tenderIntelligenceRouter from "./tender-intelligence";
 import driveConfigRouter from "./drive-config";
 import adminRouter from "./admin";
+import {
+  aiRouteLimiter,
+  globalApiLimiter,
+  intakeLimiter,
+  requireAuth,
+} from "../middlewares/apiGuard";
 
 const router: IRouter = Router();
+
+// ── Global rate limit on every /api route ────────────────────────────────────
+router.use(globalApiLimiter);
+
+// ── Stricter limit on public intake submissions ─────────────────────────────
+router.post("/intake", intakeLimiter);
+
+// ── Deny-by-default auth guard (explicit public allowlist in apiGuard.ts) ───
+router.use(requireAuth);
+
+// ── Per-session limit on AI-invoking routes ─────────────────────────────────
+router.use(aiRouteLimiter);
 
 router.use(healthRouter);
 router.use(proposalsRouter);

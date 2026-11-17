@@ -18,7 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
-import { ExternalLink, Loader2, ArrowLeft, Trash2, CheckCircle2, Eye, Pencil, Sparkles, AlertCircle, ShieldCheck, Clock, AlertTriangle, Share2, RotateCcw } from "lucide-react";
+import { ExternalLink, Loader2, ArrowLeft, Trash2, CheckCircle2, Eye, Pencil, Sparkles, AlertCircle, ShieldCheck, Clock, AlertTriangle, Share2, RotateCcw, Target, FileText } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { assembleProposalFromSections } from "@workspace/proposal-content";
@@ -44,6 +44,25 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+
+interface ComplianceItem {
+  id: number;
+  requirementId: number;
+  requirementText: string;
+  category: string;
+  isMandatory: boolean;
+  status: 'covered' | 'needs_review' | 'unanswered';
+  confidence: number;
+  reviewReason: string | null;
+  mappedSection: { id: number; key: string; title: string } | null;
+  evidence: {
+    type: 'tender' | 'knowledge';
+    knowledgeDocumentId?: number;
+    title: string;
+    sourceUrl?: string | null;
+    excerpt: string;
+  }[];
+}
 
 const proposalSchema = z.object({
   clientName: z.string().min(1, "Client name is required"),
@@ -122,6 +141,8 @@ function SectionsPanel({ proposalId }: { proposalId: number }) {
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["proposal-sections", proposalId] });
+      qc.invalidateQueries({ queryKey: ["proposal-compliance", proposalId] });
+      qc.invalidateQueries({ queryKey: getGetProposalQueryKey(proposalId) });
       setEditingSection(null);
       toast({ title: "Section saved" });
     },
@@ -166,6 +187,8 @@ function SectionsPanel({ proposalId }: { proposalId: number }) {
     },
     onSuccess: (data) => {
       setTimeout(() => qc.invalidateQueries({ queryKey: ["proposal-sections", proposalId] }), 5000);
+      setTimeout(() => qc.invalidateQueries({ queryKey: ["proposal-compliance", proposalId] }), 5000);
+      setTimeout(() => qc.invalidateQueries({ queryKey: getGetProposalQueryKey(proposalId) }), 5000);
       toast({
         title: `Auto-improving ${data.count} section(s)…`,
         description: "AI is rewriting flagged sections. Refresh in ~30 seconds to see the results.",
@@ -185,7 +208,11 @@ function SectionsPanel({ proposalId }: { proposalId: number }) {
       const data = await r.json();
       if (!r.ok) {
         const err = data as { error?: string; blockers?: string[]; hint?: string };
-        throw { message: err.error ?? "Approve failed", blockers: err.blockers ?? [] };
+        const approvalError = new Error(err.error ?? "Approve failed") as Error & {
+          blockers: string[];
+        };
+        approvalError.blockers = err.blockers ?? [];
+        throw approvalError;
       }
       return data;
     },
@@ -284,7 +311,7 @@ function SectionsPanel({ proposalId }: { proposalId: number }) {
       {/* Section list */}
       <div className="space-y-3">
         {sections.map((section) => (
-          <div key={section.id} className="border rounded-lg bg-card overflow-hidden">
+          <div key={section.id} id={`section-item-${section.id}`} className="border rounded-lg bg-card overflow-hidden transition-all duration-300">
             <div className="flex items-start gap-3 p-4">
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1 flex-wrap">
@@ -422,12 +449,196 @@ function SectionsPanel({ proposalId }: { proposalId: number }) {
   );
 }
 
+function ComplianceStatusBadge({ status }: { status: string }) {
+  if (status === "covered") {
+    return <Badge className="bg-green-900/20 text-green-400 border-green-900 gap-1.5 shadow-none"><CheckCircle2 className="w-3 h-3" /> Covered</Badge>;
+  }
+  if (status === "needs_review") {
+    return <Badge className="bg-orange-900/20 text-orange-400 border-orange-900 gap-1.5 shadow-none"><AlertTriangle className="w-3 h-3" /> Needs Review</Badge>;
+  }
+  if (status === "unanswered") {
+    return <Badge className="bg-red-900/20 text-red-400 border-red-900 gap-1.5 shadow-none"><AlertCircle className="w-3 h-3" /> Unanswered</Badge>;
+  }
+  return <Badge variant="outline" className="shadow-none">{status}</Badge>;
+}
+
+function CompliancePanel({ proposalId, onJumpToSection }: { proposalId: number; onJumpToSection: (id: number) => void }) {
+  const { data: complianceItems, isLoading, isError, error } = useQuery<ComplianceItem[]>({
+    queryKey: ["proposal-compliance", proposalId],
+    queryFn: async () => {
+      const r = await fetch(`${BASE}/api/proposals/${proposalId}/compliance`);
+      if (!r.ok) {
+        if (r.status === 404) return [];
+        throw new Error("Failed to load compliance data");
+      }
+      return r.json();
+    },
+  });
+
+  if (isLoading) {
+    return (
+      <div className="space-y-4 mt-6">
+        <Skeleton className="h-24 w-full rounded-lg" />
+        <Skeleton className="h-32 w-full rounded-lg" />
+        <Skeleton className="h-32 w-full rounded-lg" />
+      </div>
+    );
+  }
+
+  if (isError) {
+    return (
+      <div className="mt-6 p-6 border rounded-lg bg-red-900/10 border-red-900/30 text-center text-sm text-red-400">
+        <AlertTriangle className="w-5 h-5 mx-auto mb-2 opacity-80" />
+        Failed to load compliance data. {(error as Error).message}
+      </div>
+    );
+  }
+
+  if (!complianceItems || complianceItems.length === 0) {
+    return (
+      <div className="mt-6 p-6 border border-dashed rounded-lg bg-card/50 text-center text-sm text-muted-foreground">
+        No compliance requirements mapped for this proposal.
+      </div>
+    );
+  }
+
+  const coveredCount = complianceItems.filter(i => i.status === 'covered').length;
+  const needsReviewCount = complianceItems.filter(i => i.status === 'needs_review').length;
+  const unansweredCount = complianceItems.filter(i => i.status === 'unanswered').length;
+  const exceptionCount = needsReviewCount + unansweredCount;
+
+  const sortedItems = [...complianceItems].sort((a, b) => {
+    const aIsException = a.status !== 'covered';
+    const bIsException = b.status !== 'covered';
+    if (aIsException && !bIsException) return -1;
+    if (!aIsException && bIsException) return 1;
+    return 0;
+  });
+
+  return (
+    <div className="space-y-6 mt-6">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="border rounded-lg bg-card p-4 flex flex-col justify-center" data-testid="compliance-stat-coverage">
+          <div className="text-sm font-medium text-muted-foreground mb-1">Coverage</div>
+          <div className="text-3xl font-semibold text-foreground tracking-tight">
+            {Math.round((coveredCount / Math.max(1, complianceItems.length)) * 100)}%
+          </div>
+          <div className="text-xs text-muted-foreground mt-1">{coveredCount} of {complianceItems.length} requirements met</div>
+        </div>
+        <div className="border rounded-lg bg-card p-4 flex flex-col justify-center" data-testid="compliance-stat-review">
+          <div className="text-sm font-medium text-muted-foreground mb-1">Needs Review</div>
+          <div className="text-3xl font-semibold text-orange-400 tracking-tight">{needsReviewCount}</div>
+          <div className="text-xs text-muted-foreground mt-1">Requires manual validation</div>
+        </div>
+        <div className="border rounded-lg bg-card p-4 flex flex-col justify-center" data-testid="compliance-stat-unanswered">
+          <div className="text-sm font-medium text-muted-foreground mb-1">Unanswered</div>
+          <div className="text-3xl font-semibold text-red-400 tracking-tight">{unansweredCount}</div>
+          <div className="text-xs text-muted-foreground mt-1">Missing from proposal</div>
+        </div>
+      </div>
+
+      {exceptionCount === 0 && (
+        <div className="p-4 rounded-lg bg-green-900/10 border border-green-900/30 flex items-center gap-3 text-green-400">
+          <CheckCircle2 className="w-5 h-5 flex-shrink-0" />
+          <p className="text-sm font-medium">All compliance requirements are fully covered. No exceptions found.</p>
+        </div>
+      )}
+
+      <div className="space-y-4">
+        {sortedItems.map(item => (
+          <div key={item.id} className="border rounded-lg bg-card overflow-hidden" data-testid={`compliance-item-${item.id}`}>
+            <div className="p-4">
+              <div className="flex items-start justify-between gap-4 mb-3">
+                <div>
+                  <div className="flex items-center gap-2 mb-2 flex-wrap">
+                    <ComplianceStatusBadge status={item.status} />
+                    {item.isMandatory && (
+                      <Badge variant="outline" className="text-[10px] uppercase tracking-wider text-muted-foreground bg-muted/30">Mandatory</Badge>
+                    )}
+                    <span className="text-xs font-medium text-muted-foreground bg-muted/50 px-2 py-0.5 rounded-sm">{item.category}</span>
+                  </div>
+                  <h4 className="font-medium text-sm text-foreground leading-relaxed max-w-3xl">{item.requirementText}</h4>
+                </div>
+                {item.confidence > 0 && (
+                  <div className="flex-shrink-0 text-right bg-muted/30 px-2.5 py-1.5 rounded-md border">
+                    <div className="text-[10px] uppercase tracking-wide text-muted-foreground mb-0.5">Confidence</div>
+                    <div className="text-sm font-semibold">{item.confidence}%</div>
+                  </div>
+                )}
+              </div>
+
+              {item.reviewReason && item.status !== 'covered' && (
+                <div className="mt-3 p-3 rounded bg-orange-900/10 border border-orange-900/30 text-sm text-orange-300">
+                  <div className="flex items-center gap-1.5 font-semibold mb-1.5 text-xs uppercase tracking-wide">
+                    <AlertTriangle className="w-3.5 h-3.5" /> Exception Reason
+                  </div>
+                  <p className="text-xs leading-relaxed opacity-90">{item.reviewReason}</p>
+                </div>
+              )}
+
+              {item.mappedSection && (
+                <div className="mt-4 flex flex-wrap items-center gap-2 text-xs">
+                  <span className="text-muted-foreground">Mapped to section:</span>
+                  <button
+                    onClick={() => onJumpToSection(item.mappedSection!.id)}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-muted/50 hover:bg-muted text-foreground font-medium transition-colors border border-transparent hover:border-border"
+                    data-testid={`jump-to-section-${item.mappedSection!.id}`}
+                  >
+                    <Target className="w-3.5 h-3.5 text-primary" />
+                    {item.mappedSection.title}
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {item.evidence && item.evidence.length > 0 && (
+              <div className="border-t bg-muted/10 px-4 py-3.5">
+                <h5 className="text-[11px] uppercase tracking-wider font-semibold text-muted-foreground mb-3 flex items-center gap-1.5">
+                  <FileText className="w-3.5 h-3.5" /> Source Evidence
+                </h5>
+                <div className="space-y-3.5">
+                  {item.evidence.map((ev, idx) => (
+                    <div key={idx} className="relative pl-3 border-l-2 border-primary/30">
+                      <div className="flex items-center gap-2 mb-1.5 text-xs">
+                        <span className="font-medium text-foreground">{ev.title}</span>
+                        <span className="text-[10px] uppercase tracking-wider text-muted-foreground border bg-background px-1.5 py-0.5 rounded-sm shadow-sm">{ev.type}</span>
+                        {ev.sourceUrl && (
+                          <a href={ev.sourceUrl} target="_blank" rel="noreferrer" className="text-primary hover:underline inline-flex items-center gap-1">
+                            <ExternalLink className="w-3 h-3" /> <span className="sr-only">Source link</span>
+                          </a>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground italic leading-relaxed">"{ev.excerpt}"</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function ProposalDetail() {
   const [, params] = useRoute("/proposals/:id");
   const id = Number(params?.id);
   const [, setLocation] = useLocation();
   const [previewMode, setPreviewMode] = useState(false);
-  const [activeTab, setActiveTab] = useState<"preview" | "sections">("preview");
+  const [activeTab, setActiveTab] = useState<"preview" | "sections" | "compliance">("preview");
+
+  const handleJumpToSection = (sectionId: number) => {
+    setActiveTab("sections");
+    setTimeout(() => {
+      const el = document.getElementById(`section-item-${sectionId}`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.classList.add("ring-2", "ring-primary", "ring-offset-2", "ring-offset-background");
+        setTimeout(() => el.classList.remove("ring-2", "ring-primary", "ring-offset-2", "ring-offset-background"), 2000);
+      }
+    }, 100);
+  };
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -458,6 +669,7 @@ export default function ProposalDetail() {
   // Derived from proposal
   const linkedTenderId = (proposal as Record<string, unknown> | undefined)?.tenderId as number | null | undefined;
   const generationStatus = (proposal as Record<string, unknown> | undefined)?.generationStatus as string | null | undefined;
+  const generationError = (proposal as Record<string, unknown> | undefined)?.generationError as string | null | undefined;
 
   const hasSections = sectionsLoaded && sections && sections.length > 0;
 
@@ -504,8 +716,8 @@ export default function ProposalDetail() {
   }, [proposal, form]);
 
   // ── Continuous polling while proposal is being generated ──────────────────
-  const isDrafting = (proposal?.status as string | undefined) === "proposal_drafting";
-  const isGenActive = isDrafting || ["extracting", "strategizing", "drafting"].includes(generationStatus ?? "");
+  const isGenActive = ["extracting", "strategizing", "drafting"].includes(generationStatus ?? "");
+  const isDrafting = isGenActive;
   useEffect(() => {
     if (!isGenActive) return;
     const poll = setInterval(() => {
@@ -538,9 +750,29 @@ export default function ProposalDetail() {
         });
       },
       onError: (error) => {
+        const apiData = (error as { data?: { code?: string; googleDocUrl?: string } }).data;
+        if (apiData?.code === "google_doc_canonical") {
+          toast({
+            title: "Editing locked",
+            description: (
+              <div className="flex flex-col gap-2 mt-1">
+                <p>This proposal lives in Google Docs — edit it there.</p>
+                {apiData.googleDocUrl && (
+                  <a href={apiData.googleDocUrl} target="_blank" rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 text-xs underline underline-offset-2">
+                    <ExternalLink className="w-3 h-3" />
+                    Open Google Doc
+                  </a>
+                )}
+              </div>
+            ),
+            variant: "destructive",
+          });
+          return;
+        }
         toast({
           title: "Save failed",
-          description: (error as { error?: string }).error || "Could not save changes.",
+          description: (error as Error).message || "Could not save changes.",
           variant: "destructive"
         });
       }
@@ -665,6 +897,30 @@ export default function ProposalDetail() {
         )}
       </div>
 
+      {(proposal as { reviewRequired?: boolean }).reviewRequired && (
+        <div
+          className="mb-6 rounded-lg border border-red-900 bg-red-900/15 px-4 py-3 text-sm text-red-300"
+          data-testid="banner-review-required"
+        >
+          <p className="font-medium mb-1">Review required</p>
+          {((proposal as { flaggedPhrases?: string[] }).flaggedPhrases ?? []).length > 0 && (
+            <p className="text-red-400/90">
+              The generated content contains phrases ONWRD does not commit to (
+              {((proposal as { flaggedPhrases?: string[] }).flaggedPhrases ?? []).join(", ")}
+              ). Nothing was removed automatically — review and edit before approving or exporting.
+            </p>
+          )}
+          {((proposal as { unverifiedCredentials?: string[] }).unverifiedCredentials ?? []).length > 0 && (
+            <p className="text-red-400/90" data-testid="text-unverified-credentials">
+              The Case Studies section cites organisations that are not in the approved Knowledge
+              Library ({((proposal as { unverifiedCredentials?: string[] }).unverifiedCredentials ?? []).join(", ")}
+              ). Sharing and export are blocked until these are removed or replaced with approved
+              case studies.
+            </p>
+          )}
+        </div>
+      )}
+
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-8">
         <h1 className="text-4xl font-bold text-white tracking-tight">
           {hasSections ? "Proposal Desk" : "Edit Proposal"}
@@ -728,7 +984,7 @@ export default function ProposalDetail() {
                   </span>
                 );
               }
-              if (generationStatus === "drafting" || isDrafting) {
+              if (generationStatus === "drafting") {
                 return (
                   <span className="inline-flex items-center gap-1.5 text-sm text-amber-400" data-testid="gen-status-text">
                     <Loader2 className="w-3.5 h-3.5 animate-spin" /> Writing draft…
@@ -745,7 +1001,8 @@ export default function ProposalDetail() {
               if (generationStatus === "failed") {
                 return (
                   <span className="inline-flex items-center gap-1.5 text-sm text-red-400" data-testid="gen-status-text">
-                    <AlertCircle className="w-3.5 h-3.5" /> Generation failed — retry from Proposals
+                    <AlertCircle className="w-3.5 h-3.5" />
+                    {generationError ?? "Generation stopped — retry from Proposals"}
                   </span>
                 );
               }
@@ -809,7 +1066,7 @@ export default function ProposalDetail() {
                 <img src="/onwrd-logo-white.png" alt="ONWRD" className="h-7 object-contain" />
               </div>
               <div
-                className="min-h-[600px] p-8 font-sans text-base leading-relaxed prose prose-sm max-w-none
+                className="min-h-[600px] p-8 font-sans text-base leading-relaxed prose prose-sm prose-invert max-w-none
                   [&_table]:w-full [&_table]:border-collapse [&_table]:text-sm
                   [&_th]:border [&_th]:border-border [&_th]:bg-muted [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:font-semibold
                   [&_td]:border [&_td]:border-border [&_td]:px-3 [&_td]:py-2 [&_td]:align-top
@@ -876,7 +1133,7 @@ export default function ProposalDetail() {
                     <FormControl>
                       {previewMode ? (
                         <div
-                          className="min-h-[600px] p-8 font-sans text-base leading-relaxed prose prose-sm max-w-none
+                          className="min-h-[600px] p-8 font-sans text-base leading-relaxed prose prose-sm prose-invert max-w-none
                             [&_table]:w-full [&_table]:border-collapse [&_table]:text-sm
                             [&_th]:border [&_th]:border-border [&_th]:bg-muted [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:font-semibold
                             [&_td]:border [&_td]:border-border [&_td]:px-3 [&_td]:py-2 [&_td]:align-top
@@ -929,6 +1186,22 @@ export default function ProposalDetail() {
             </div>
           )}
 
+          {/* ── Compliance disclosure ─────────────────────────────────────── */}
+          {hasSections && (
+            <div className="mt-4 border-t border-border/50 pt-4">
+              <button
+                type="button"
+                className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground transition-colors py-2"
+                onClick={() => setActiveTab(activeTab === "compliance" ? "preview" : "compliance")}
+                data-testid="toggle-compliance"
+              >
+                <Target className="w-3.5 h-3.5" />
+                {activeTab === "compliance" ? "Hide Compliance" : "Compliance Overview"}
+              </button>
+              {activeTab === "compliance" && <CompliancePanel proposalId={id} onJumpToSection={handleJumpToSection} />}
+            </div>
+          )}
+
           {(
             <div className="pt-4 space-y-3">
               {/* ── Google Doc status panel ─────────────────────────────────── */}
@@ -944,8 +1217,8 @@ export default function ProposalDetail() {
                       <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" />
                       <span className="text-muted-foreground">
                         Shared for team review
-                        {proposal.lastSyncedAt && (
-                          <> — <span className="text-foreground">{new Date(proposal.lastSyncedAt).toLocaleString()}</span></>
+                        {!!(proposal as any).lastSyncedAt && (
+                          <> — <span className="text-foreground">{new Date((proposal as any).lastSyncedAt).toLocaleString()}</span></>
                         )}
                       </span>
                     </div>
@@ -972,11 +1245,11 @@ export default function ProposalDetail() {
                     <div className="flex flex-wrap items-center gap-3 text-sm bg-card border rounded-lg px-4 py-3">
                       <CheckCircle2 className="w-4 h-4 text-green-400 shrink-0" />
                       <span className="text-muted-foreground">Linked to Google Docs</span>
-                      {proposal.lastSyncedAt && (
+                      {!!(proposal as any).lastSyncedAt && (
                         <>
                           <Clock className="w-4 h-4 text-muted-foreground shrink-0" />
                           <span className="text-muted-foreground">
-                            Shared for team review — {new Date(proposal.lastSyncedAt).toLocaleString()}
+                            Shared for team review — {new Date((proposal as any).lastSyncedAt).toLocaleString()}
                           </span>
                         </>
                       )}

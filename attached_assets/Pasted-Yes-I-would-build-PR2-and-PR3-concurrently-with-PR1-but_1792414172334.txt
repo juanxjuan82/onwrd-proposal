@@ -1,0 +1,68 @@
+Yes. I would build PR2 and PR3 concurrently with PR1, but keep their branches independent and merge them sequentially.
+
+There is no reason to serialize all the development. The dependencies are primarily at the integration level, not necessarily at the implementation level.
+
+The key is to divide ownership carefully so the Replit agents don't modify the same files.
+
+## Recommended parallel workflow
+
+| PR                              | Primary responsibility                         | Can build now?        | Merge order |
+| ------------------------------- | ---------------------------------------------- | --------------------- | ----------- |
+| PR1 — Discovery recovery        | Source adapters, extraction, record enrichment | Already underway      | 1st         |
+| PR2 — Intelligent qualification | Relevance, eligibility, semantic scoring       | Yes                   | 2nd         |
+| PR3 — Observability             | Crawler telemetry, source health, diagnostics  | Yes, with constraints | 3rd         |
+
+## Where conflicts could occur
+
+The main risk is `artifacts/api-server/src/crawlers/index.ts`, which currently handles discovery, scoring, promotion and run tracking in one file.
+
+I would establish these boundaries:
+
+- PR1 owns: `crawlers/` source adapters, notice extraction and discovery refresh.
+- PR2 owns: qualification services, scoring logic, eligibility rules and their tests.
+- PR3 owns: telemetry services, diagnostics, source-health APIs and dashboard components.
+
+PR2 and PR3 should avoid changing `crawlers/index.ts` until integration. Instead, implement their functionality in separate modules with clear interfaces.
+
+That allows meaningful parallel development without having three agents repeatedly rebasing overlapping changes.
+
+## Send this instruction to both agents
+
+Proceed with implementation concurrently with PR1, using the existing PR2/PR3 specifications.
+
+**Important parallel-development constraints:**
+
+1. Create your own feature branch from the current `main`, not from PR1 or another agent's branch.
+2. Limit changes to your assigned responsibility. Do not modify files actively owned by another PR.
+3. Treat `artifacts/api-server/src/crawlers/index.ts` as an integration boundary. Avoid modifying it while PR1 is underway.
+4. Build new functionality behind clearly defined interfaces in separate modules where possible.
+5. Do not change existing database schemas or shared types without documenting the proposed migration and its impact on the other PRs.
+6. Add independent unit tests using mocked or fixture-based discovery data.
+7. Do not merge or deploy.
+8. Push changes to your own branch and open a draft PR.
+9. Once PR1 merges, rebase or merge the latest `main`, complete the integration wiring, and run the full test suite.
+10. Request code review before marking the PR ready.
+
+Report any dependencies that cannot be completed independently rather than making speculative changes to PR1-owned code.
+
+## One adjustment to PR3
+
+I'd split PR3 internally into two phases:
+
+Build now: Telemetry schema, source-health aggregation, diagnostics endpoints, monitoring UI and tests using fixtures.
+
+Integrate after PR1 and PR2: Instrument the actual crawler pipeline and qualification outcomes, then validate metrics against real crawl results.
+
+This avoids designing a dashboard around counters that don't yet exist.
+
+### My recommendation
+
+Run all three agents concurrently.
+
+Integrate in order: PR1 → PR2 → PR3.
+
+Require review and green CI before each merge.
+
+This is a good use of parallel agents because the workstreams are sufficiently separable.
+
+One final consideration: do not let PR2 change ONWRD's qualification criteria based solely on the crawler's current output. That dataset is already biased by the existing extraction failures. Use manually verified relevant and irrelevant opportunities as test fixtures instead.
