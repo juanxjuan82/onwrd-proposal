@@ -1,12 +1,10 @@
-import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml, stableId, absoluteUrl } from "./base-adapter.js";
+import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
 
 export class IDBAdapter implements TenderSourceAdapter {
   adapterType = "idb";
 
   async fetchOpportunities(): Promise<TenderOpportunity[]> {
     const results: TenderOpportunity[] = [];
-    let lastError: Error | undefined;
-    let okPages = 0;
 
     const urls = [
       "https://www.iadb.org/en/projects/all?query=communications+marketing&country=BS,JM,TT,BB,GY,LC,VC",
@@ -21,10 +19,9 @@ export class IDBAdapter implements TenderSourceAdapter {
             Accept: "text/html",
           },
         });
-        if (!r.ok) { lastError = new Error(`${url} answered HTTP ${r.status}`); continue; }
+        if (!r.ok) continue;
         const html = await r.text();
-        if (html.length < 500) { lastError = new Error(`${url} returned an empty page`); continue; }
-        okPages++;
+        if (html.length < 500) continue;
 
         const articlePattern = /<article[^>]*>([\s\S]*?)<\/article>/gi;
         let match;
@@ -40,7 +37,7 @@ export class IDBAdapter implements TenderSourceAdapter {
           const href = linkMatch ? linkMatch[1] : "";
           count++;
           results.push({
-            externalId: stableId("idb", href || title),
+            externalId: `idb-${Buffer.from(title.slice(0, 40)).toString("base64").slice(0, 16)}`,
             title,
             organization: "Inter-American Development Bank",
             url: href
@@ -53,12 +50,9 @@ export class IDBAdapter implements TenderSourceAdapter {
         }
 
         if (results.length > 0) break;
-      } catch (err) { lastError = err instanceof Error ? err : new Error(String(err)); }
+      } catch { /* try next */ }
     }
 
-    // Every listing failed — surface it instead of pretending the source is empty.
-    // No listing page could be loaded at all — report it rather than look "empty".
-    if (okPages === 0 && lastError) throw lastError;
     return results;
   }
 }

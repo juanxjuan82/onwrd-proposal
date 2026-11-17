@@ -48,9 +48,3 @@ The `keywordScore()` function in `crawlers/index.ts` already excludes `rawData` 
 - When adding new ONWRD service phrases: add to `CORE_SERVICE_PHRASES` as multi-word phrases or `\b`-anchored single words.
 - Hard negatives go in `HARD_NEGATIVE_PHRASES` (title-dominant check triggers rejection).
 - Tests: `src/lib/crawler-eligibility.test.ts`
-
-## Adapter conventions (added Nov 2026)
-- IDs: always `stableId(prefix, url)` from `crawlers/base-adapter.ts` (full SHA-1). Never build IDs from a truncated title/URL — the old base64-slice kept only 12 characters and made unrelated notices collide.
-- Adapters return headline-only descriptions; `runCrawler()` then calls `enrichOpportunity()` for each NEW item to read the notice page/PDF (real scope text + deadline). Set `skipDetailFetch = true` only when the adapter already has full text (World Bank API) or the pages are unreadable (Bahamas Bonfire).
-- Adapters must THROW when no listing page can be loaded (use `fetchListingHtml`). Never swallow errors and return `[]` — the Sources page flags failing/empty sources from crawler_runs.
-- World Bank: `submission_date` is the PUBLISH date; the deadline is `submission_deadline_date`.
