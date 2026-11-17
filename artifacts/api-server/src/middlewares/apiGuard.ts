@@ -33,6 +33,9 @@ const PUBLIC_ROUTES: PublicRule[] = [
   // Public prospect intake form
   { method: "POST", pattern: /^\/intake\/?$/ },
   { method: "POST", pattern: /^\/intake\/draft\/?$/ },
+  // Inbound-email webhook — called by the email provider, authenticated by a
+  // signature over the request body (verified in routes/inbound-email.ts).
+  { method: "POST", pattern: /^\/inbound\/email\/?$/ },
 ];
 
 export function isPublicRoute(method: string, path: string): boolean {
@@ -220,6 +223,16 @@ export const intakeLimiter = rateLimit({
   legacyHeaders: false,
   skip: skipInTests,
   message: { error: "Too many intake submissions. Please try again later." },
+});
+
+/** 120 inbound-email webhook deliveries per IP per hour. */
+export const inboundEmailLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: skipInTests,
+  message: { error: "Too many inbound email deliveries. Please try again later." },
 });
 
 /** 20 AI-invoking requests per session (fallback: IP) per hour. */

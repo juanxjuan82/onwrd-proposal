@@ -10,9 +10,11 @@ import knowledgeRouter from "./knowledge";
 import tenderIntelligenceRouter from "./tender-intelligence";
 import driveConfigRouter from "./drive-config";
 import adminRouter from "./admin";
+import inboundEmailRouter from "./inbound-email";
 import {
   aiRouteLimiter,
   globalApiLimiter,
+  inboundEmailLimiter,
   intakeLimiter,
   requireAuth,
 } from "../middlewares/apiGuard";
@@ -24,6 +26,9 @@ router.use(globalApiLimiter);
 
 // ── Stricter limit on public intake submissions ─────────────────────────────
 router.post("/intake", intakeLimiter);
+
+// ── Limit on the public inbound-email webhook ───────────────────────────────
+router.post("/inbound/email", inboundEmailLimiter);
 
 // ── Deny-by-default auth guard (explicit public allowlist in apiGuard.ts) ───
 router.use(requireAuth);
@@ -41,6 +46,7 @@ router.use(sectionsRouter);
 router.use(knowledgeRouter);
 router.use(tenderIntelligenceRouter);
 router.use(driveConfigRouter);
+router.use(inboundEmailRouter);
 router.use("/admin", adminRouter);
 
 export default router;

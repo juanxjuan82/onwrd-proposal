@@ -35,3 +35,4 @@
 - [Source activation proof](source-activation-proof.md) — activation evidence must be configuration-versioned and committed with compare-and-set semantics
 - [PDF extraction test seam](pdf-extraction-tests.md) — inject fetch and PDF parsing in unit tests; validate the real parser with an approved live document
 - [PR1 acceptance bar](crawler-pr1-acceptance.md) — require real notice and attachment content persisted to the database before moving to qualification work
+- [Email forwarding intake](inbound-email-forwarding.md) — forwarded alert emails become opportunities via a signature-verified public webhook; no AI, no link fetching, approved senders only

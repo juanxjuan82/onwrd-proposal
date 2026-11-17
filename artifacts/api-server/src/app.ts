@@ -65,6 +65,24 @@ export const dbReady: Promise<void> = pool
   .then(() => pool.query(`ALTER TABLE proposals ADD COLUMN IF NOT EXISTS generation_attempt_id TEXT`))
   .then(() => pool.query(`ALTER TABLE tender_sources ADD COLUMN IF NOT EXISTS configuration_version integer NOT NULL DEFAULT 1`))
   .then(() => pool.query(`ALTER TABLE crawler_runs ADD COLUMN IF NOT EXISTS source_configuration_version integer NOT NULL DEFAULT 0`))
+  // ── Email forwarding log (also the idempotency store for webhook retries) ─
+  .then(() =>
+    pool.query(
+      `CREATE TABLE IF NOT EXISTS inbound_emails (
+         id serial PRIMARY KEY,
+         email_id text NOT NULL UNIQUE,
+         message_id text,
+         from_address text NOT NULL DEFAULT '',
+         subject text NOT NULL DEFAULT '',
+         status text NOT NULL DEFAULT 'processing',
+         reason text,
+         tender_id integer REFERENCES tenders(id) ON DELETE SET NULL,
+         attachment_count integer NOT NULL DEFAULT 0,
+         received_at timestamp NOT NULL DEFAULT now(),
+         updated_at timestamp NOT NULL DEFAULT now()
+       )`,
+    ),
+  )
   // ── Session table ─────────────────────────────────────────────────────────
   .then(() =>
     pool.query(
@@ -225,7 +243,17 @@ app.use(
     },
   }),
 );
-app.use(express.json({ limit: "50mb" }));
+app.use(express.json({
+  limit: "50mb",
+  // The inbound-email webhook is authenticated by a signature over the exact
+  // bytes the provider sent, so keep the raw body for that one route only.
+  verify: (req, _res, buf) => {
+    const url = (req as { originalUrl?: string; url?: string }).originalUrl ?? req.url ?? "";
+    if (url.split("?")[0].replace(/\/+$/, "") === "/api/inbound/email") {
+      (req as { rawBody?: string }).rawBody = buf.toString("utf8");
+    }
+  },
+}));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 // Resolve the publishable key from the incoming request host so the same

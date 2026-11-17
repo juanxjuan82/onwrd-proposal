@@ -114,6 +114,91 @@ interface DigestSettings {
   enabled: boolean;
 }
 
+interface EmailForwardingStatus {
+  configured: boolean;
+  forwardingAddress: string | null;
+  companyDomain: string;
+  allowedSenders: string[];
+  recent: Array<{
+    id: number;
+    fromAddress: string;
+    subject: string;
+    status: string;
+    reason: string | null;
+    tenderId: number | null;
+    receivedAt: string;
+  }>;
+}
+
+const EMAIL_STATUS_LABELS: Record<string, { label: string; className: string }> = {
+  imported: { label: "Added", className: "text-emerald-300" },
+  processing: { label: "Processing", className: "text-muted-foreground" },
+  rejected_sender: { label: "Sender not approved", className: "text-orange-300" },
+  rejected_recipient: { label: "Wrong address", className: "text-orange-300" },
+  empty: { label: "Nothing readable", className: "text-yellow-300" },
+  failed: { label: "Failed", className: "text-red-400" },
+};
+
+// Forwarded tender alerts: shows whether forwarding is set up, where to send
+// mail, who may send it, and what happened to the last few emails.
+function EmailForwardingCard() {
+  const { data, isLoading } = useQuery<EmailForwardingStatus>({
+    queryKey: ["inbound-email-status"],
+    queryFn: async () => {
+      const r = await fetch(`${BASE}/api/inbound/email/status`);
+      if (!r.ok) throw new Error("Failed to load email forwarding status");
+      return r.json();
+    },
+    refetchInterval: 60_000,
+  });
+
+  if (isLoading || !data) return <Skeleton className="h-24 w-full rounded-lg" />;
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-4 text-sm">
+      <div className="flex flex-wrap items-center gap-2">
+        <Mail className="w-4 h-4 text-muted-foreground" />
+        <p className="font-medium text-white">Email forwarding</p>
+        {data.configured ? (
+          <Badge variant="outline" className="text-xs py-0 border-emerald-700/60 text-emerald-300">Ready</Badge>
+        ) : (
+          <Badge variant="outline" className="text-xs py-0 border-yellow-600/60 text-yellow-300">Not set up</Badge>
+        )}
+      </div>
+      {data.configured ? (
+        <p className="mt-2 text-muted-foreground leading-relaxed break-words">
+          Forward a tender alert to{" "}
+          <span className="text-white font-medium">{data.forwardingAddress ?? "your Resend receiving address"}</span>{" "}
+          and it appears under Opportunities for review. Accepted from @{data.companyDomain}
+          {data.allowedSenders.length > 0 ? ` and ${data.allowedSenders.join(", ")}` : ""}.
+          Links in the email are not opened automatically.
+        </p>
+      ) : (
+        <p className="mt-2 text-muted-foreground leading-relaxed">
+          Forwarding is switched off until the RESEND_API_KEY and RESEND_WEBHOOK_SECRET secrets are both set.
+        </p>
+      )}
+      {data.recent.length > 0 && (
+        <ul className="mt-3 space-y-1.5 border-t border-border pt-3">
+          {data.recent.slice(0, 5).map((item) => {
+            const status = EMAIL_STATUS_LABELS[item.status] ?? { label: item.status, className: "text-muted-foreground" };
+            return (
+              <li key={item.id} className="flex flex-col sm:flex-row sm:items-baseline sm:gap-2 text-xs">
+                <span className={`shrink-0 font-medium ${status.className}`}>{status.label}</span>
+                <span className="text-white truncate" title={item.subject}>{item.subject || "(no subject)"}</span>
+                <span className="text-muted-foreground shrink-0">
+                  {item.fromAddress ? `${item.fromAddress} · ` : ""}
+                  {formatDistanceToNow(new Date(item.receivedAt), { addSuffix: true })}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function SettingsSources() {
   const { toast } = useToast();
   const qc = useQueryClient();
@@ -407,6 +492,7 @@ export default function SettingsSources() {
 
       {tab === "sources" && (
         <div className="space-y-3">
+          <EmailForwardingCard />
           <div className="rounded-lg border border-blue-900/60 bg-blue-950/20 p-4 text-sm">
             <p className="font-medium text-white">Current monitored set</p>
             <p className="mt-1 text-muted-foreground leading-relaxed">
