@@ -1,4 +1,4 @@
-import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml, stableId, absoluteUrl } from "./base-adapter.js";
+import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
 
 const TENDER_URLS = [
   "https://www.bahamas.gov.bs/tender-notices",
@@ -27,16 +27,15 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
   async fetchOpportunities(): Promise<TenderOpportunity[]> {
     const results: TenderOpportunity[] = [];
     const seen = new Set<string>();
-    let lastError: Error | undefined;
 
     for (const pageUrl of TENDER_URLS) {
       try {
         const r = await safeFetch(pageUrl, {
           headers: { "User-Agent": USER_AGENT, Accept: "text/html" },
         });
-        if (!r.ok) { lastError = new Error(`${pageUrl} answered HTTP ${r.status}`); continue; }
+        if (!r.ok) continue;
         const html = await r.text();
-        if (html.length < 1000) { lastError = new Error(`${pageUrl} returned an empty page`); continue; }
+        if (html.length < 1000) continue;
 
         // Pattern 1: links with title + category span (tender-notices page format)
         const pattern1 = /<a\s+href="([^"]+)"[^>]*title="([^"]+)"[^>]*>[\s\S]*?<span class="category">([^<]+)<\/span>/g;
@@ -47,8 +46,6 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
           const category = m[3].trim();
 
           if (!title || title.length < 8) continue;
-          // Site-wide header link, not a tender.
-          if (/^government of the commonwealth of the bahamas$/i.test(title)) continue;
           if (url.includes("bahamas.gov.bs") && !url.includes("cdn.") && !url.includes("gov.bs/wps")) {
             // internal page link — not a document, skip
           }
@@ -60,13 +57,13 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
           if (seen.has(key)) continue;
           seen.add(key);
 
-          const externalId = stableId("bah", url, title);
+          const externalId = `bah-${Buffer.from((url + title).slice(0, 50)).toString("base64").slice(0, 16)}`;
 
           results.push({
             externalId,
             title,
             organization: "Government of The Bahamas",
-            url: absoluteUrl(url, pageUrl),
+            url: url.startsWith("http") ? url : `https://www.bahamas.gov.bs${url}`,
             description: `Bahamas government procurement notice. Category: ${category}. Source: ${pageUrl}`,
             country: "Bahamas",
             sector: mapCategory(category),
@@ -86,7 +83,7 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
           seen.add(key);
 
           results.push({
-            externalId: stableId("bah", url),
+            externalId: `bah-${Buffer.from(url.slice(-40)).toString("base64").slice(0, 16)}`,
             title,
             organization: "Government of The Bahamas",
             url,
@@ -97,10 +94,9 @@ export class BahamasGovAdapter implements TenderSourceAdapter {
         }
 
         if (results.length >= 30) break;
-      } catch (err) { lastError = err instanceof Error ? err : new Error(String(err)); }
+      } catch { /* try next URL */ }
     }
 
-    if (results.length === 0 && lastError) throw lastError;
-    return results.slice(0, 60);
+    return results.slice(0, 30);
   }
 }

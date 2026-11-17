@@ -15,9 +15,7 @@ import { BahamasGovAdapter } from "./bahamas-gov.js";
 import { CTOAdapter } from "./cto.js";
 import { CARICOMAdapter } from "./caricom.js";
 import { EUCaribbeanAdapter } from "./eu-caribbean.js";
-import { BahamasBonfireAdapter } from "./bahamas-bonfire.js";
-import { OECSAdapter } from "./oecs.js";
-import { type TenderSourceAdapter, type TenderOpportunity, enrichOpportunity } from "./base-adapter.js";
+import { type TenderSourceAdapter, type TenderOpportunity } from "./base-adapter.js";
 import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
 import { evaluateCrawlerEligibility } from "../lib/crawler-eligibility.js";
 
@@ -28,8 +26,6 @@ function getAdapter(adapterType: string): TenderSourceAdapter | null {
     case "idb":          return new IDBAdapter();
     case "cdb":          return new CDBAdapter();
     case "bahamas_gov":  return new BahamasGovAdapter();
-    case "bahamas_bonfire": return new BahamasBonfireAdapter();
-    case "oecs":         return new OECSAdapter();
     case "cto":          return new CTOAdapter();
     case "caricom":      return new CARICOMAdapter();
     case "eu_caribbean": return new EUCaribbeanAdapter();
@@ -433,12 +429,6 @@ export async function runCrawler(sourceId?: number): Promise<{
   let totalFound = 0;
   let totalNew = 0;
 
-  // Opening each notice's own page is what gives us real scope text and
-  // deadlines. Only NEW notices are opened (already-stored ones are skipped
-  // before this point), with a per-source cap and a short pause to be polite.
-  const MAX_DETAIL_FETCHES_PER_SOURCE = 40;
-  const DETAIL_FETCH_PAUSE_MS = 300;
-
   try {
     for (const source of sources) {
       const adapter = getAdapter(source.adapterType);
@@ -457,8 +447,6 @@ export async function runCrawler(sourceId?: number): Promise<{
         totalFound += opportunities.length;
 
         let newCount = 0;
-        let detailFetches = 0;
-        let enrichedCount = 0;
 
         for (const opp of opportunities) {
           // Deduplicate by externalId
@@ -475,14 +463,6 @@ export async function runCrawler(sourceId?: number): Promise<{
               .from(discoveredTendersTable)
               .where(eq(discoveredTendersTable.url, opp.url));
             if (existingByUrl.length > 0) continue;
-          }
-
-          // Read the notice's own page so scoring and eligibility see the real
-          // scope text rather than just a headline.
-          if (!adapter.skipDetailFetch && opp.url && detailFetches < MAX_DETAIL_FETCHES_PER_SOURCE) {
-            detailFetches++;
-            if (await enrichOpportunity(opp)) enrichedCount++;
-            await new Promise((resolve) => setTimeout(resolve, DETAIL_FETCH_PAUSE_MS));
           }
 
           const result = keywordScore(opp);
@@ -536,13 +516,6 @@ export async function runCrawler(sourceId?: number): Promise<{
           totalNew++;
         }
 
-        // A run that reaches the site but lists nothing still counts as a
-        // completed run here; the Sources page flags it from itemsFound = 0.
-        console.log(
-          `[crawler] ${source.name}: ${opportunities.length} listed, ${newCount} new, ` +
-          `${enrichedCount}/${detailFetches} notice pages read`,
-        );
-
         await db.update(crawlerRunsTable).set({
           completedAt:    new Date(),
           status:         "success",
@@ -555,14 +528,12 @@ export async function runCrawler(sourceId?: number): Promise<{
 
         await db.update(tenderSourcesTable).set({
           lastCheckedAt:   new Date(),
-          // "Last success" means the source actually listed something.
-          ...(opportunities.length > 0 ? { lastSuccessAt: new Date() } : {}),
+          lastSuccessAt:   new Date(),
           itemsFoundCount: source.itemsFoundCount + newCount,
           updatedAt:       new Date(),
         }).where(eq(tenderSourcesTable.id, source.id));
 
       } catch (err) {
-        console.warn(`[crawler] ${source.name} FAILED: ${err instanceof Error ? err.message : String(err)}`);
         await db.update(crawlerRunsTable).set({
           completedAt:    new Date(),
           status:         "failed",
@@ -601,8 +572,6 @@ export async function seedDefaultSources(): Promise<void> {
       { name: "Caribbean Tourism Organization", sourceType: "regional", url: "https://www.caribtourism.com/", adapterType: "cto" },
       { name: "CARICOM Secretariat", sourceType: "regional", url: "https://caricom.org/", adapterType: "caricom" },
       { name: "EU Caribbean Development Fund", sourceType: "development_fund", url: "https://www.cariforum.org/", adapterType: "eu_caribbean" },
-      { name: "Bahamas e-Procurement Portal", sourceType: "government", url: "https://bahamas.bonfirehub.com/portal/?tab=openOpportunities", adapterType: "bahamas_bonfire" },
-      { name: "OECS Commission Tenders", sourceType: "regional", url: "https://www.oecs.int/en/work-with-us/procurements/current-tenders", adapterType: "oecs" },
     ];
     for (const s of newSources) {
       if (!existingTypes.has(s.adapterType)) {
@@ -616,13 +585,11 @@ export async function seedDefaultSources(): Promise<void> {
     { name: "World Bank Procurement", sourceType: "development_bank", url: "https://search.worldbank.org/api/v2/procnotices", adapterType: "world_bank" },
     { name: "UNDP Procurement Notices", sourceType: "un", url: "https://procurement-notices.undp.org/", adapterType: "ungm" },
     { name: "Inter-American Development Bank", sourceType: "development_bank", url: "https://www.iadb.org/en/projects/all", adapterType: "idb" },
-    { name: "Caribbean Development Bank", sourceType: "development_bank", url: "https://www.caribank.org/work-with-us/procurement", adapterType: "cdb" },
+    { name: "Caribbean Development Bank", sourceType: "development_bank", url: "https://www.caribank.org/", adapterType: "cdb" },
     { name: "Bahamas Government Procurement", sourceType: "government", url: "https://www.bahamas.gov.bs/wps/portal/public/gov/government/news", adapterType: "bahamas_gov" },
     { name: "Caribbean Tourism Organization", sourceType: "regional", url: "https://www.caribtourism.com/", adapterType: "cto" },
     { name: "CARICOM Secretariat", sourceType: "regional", url: "https://caricom.org/", adapterType: "caricom" },
     { name: "EU Caribbean Development Fund", sourceType: "development_fund", url: "https://www.cariforum.org/", adapterType: "eu_caribbean" },
-    { name: "Bahamas e-Procurement Portal", sourceType: "government", url: "https://bahamas.bonfirehub.com/portal/?tab=openOpportunities", adapterType: "bahamas_bonfire" },
-    { name: "OECS Commission Tenders", sourceType: "regional", url: "https://www.oecs.int/en/work-with-us/procurements/current-tenders", adapterType: "oecs" },
   ];
 
   for (const s of defaults) {
