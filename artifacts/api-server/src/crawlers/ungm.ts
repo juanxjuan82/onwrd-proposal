@@ -1,68 +1,91 @@
-import { TenderSourceAdapter, TenderOpportunity, safeFetch, stripHtml } from "./base-adapter.js";
+import {
+  TenderSourceAdapter, TenderOpportunity, fetchListingHtml, stripHtml, parseLooseDate,
+} from "./base-adapter.js";
 
-// Replaces the non-functional UNGM scraper with UNDP Procurement Notices,
-// which has server-rendered HTML and notice listings accessible without JS.
+// NOTE: despite the historical "ungm" adapter type, this reads the UNDP
+// Procurement Notices site (server-rendered, one row per notice with country,
+// process type and deadline). The runner then opens each new notice's own page
+// to get the real scope text.
+
+const LISTING_URL = "https://procurement-notices.undp.org/";
+
+// Caribbean offices/countries as they appear in the "UNDP Office/Country" column.
+const CARIBBEAN_RX =
+  /bahamas|jamaica|barbados|trinidad|guyana|belize|suriname|haiti|dominican republic|saint lucia|st\.? lucia|grenada|antigua|dominica\b|saint vincent|st\.? vincent|saint kitts|st\.? kitts|cuba|caribbean|turks|cayman|bermuda|aruba|cura[cç]ao|sint maarten|montserrat|anguilla|virgin islands/i;
+
+// Titles that suggest communications / marketing / creative work anywhere in the world.
+const COMMS_RX =
+  /communicat|marketing|media\b|campaign|brand|awareness|outreach|visibility|public relations|advocacy|video|film|documentar|photograph|graphic|design of|content|storytelling|social media|website|web design|publication|editorial|sensiti[sz]ation|multimedia|audio.?visual|creative|advertis|event management|public information/i;
+
+const MAX_ITEMS = 80;
+
+function cell(block: string, label: string): string {
+  const rx = new RegExp(
+    `vacanciesTable__cell__label">\\s*${label}\\s*</div>\\s*<span>([\\s\\S]*?)</span>`, "i",
+  );
+  const m = block.match(rx);
+  return m ? stripHtml(m[1], 300) : "";
+}
+
+function titleCase(s: string): string {
+  return s.toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase()).replace(/\bAnd\b/g, "and");
+}
+
 export class UNGMAdapter implements TenderSourceAdapter {
   adapterType = "ungm";
 
   async fetchOpportunities(): Promise<TenderOpportunity[]> {
-    const results: TenderOpportunity[] = [];
+    const html = await fetchListingHtml(LISTING_URL);
 
-    try {
-      const r = await safeFetch("https://procurement-notices.undp.org/", {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (compatible; TenderBot/1.0)",
-          Accept: "text/html",
-        },
-      });
-      if (!r.ok) return results;
+    const rowPattern =
+      /<a\s+href="(view_n[a-z]+\.cfm\?(?:notice|nego)_id=(\d+))"[^>]*class="vacanciesTableLink[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
 
-      const html = await r.text();
+    const caribbean: TenderOpportunity[] = [];
+    const comms: TenderOpportunity[] = [];
+    const seen = new Set<string>();
+    let rowCount = 0;
+    let match: RegExpExecArray | null;
 
-      // Extract notice links: href="view_notice.cfm?notice_id=XXXXX"
-      const linkPattern =
-        /<a[^>]+href="(view_notice\.cfm\?notice_id=(\d+))"[^>]*>([\s\S]*?)<\/a>/gi;
-      let match;
-      const seen = new Set<string>();
+    while ((match = rowPattern.exec(html)) !== null) {
+      rowCount++;
+      const [, path, noticeId, block] = match;
+      if (seen.has(noticeId)) continue;
+      seen.add(noticeId);
 
-      while ((match = linkPattern.exec(html)) !== null) {
-        const path = match[1];
-        const noticeId = match[2];
-        // Strip leading "Title" label that appears in UNDP table cells
-        const rawTitle = stripHtml(match[3], 250).replace(/^Title\s+/i, "").trim();
+      const title = cell(block, "Title");
+      if (title.length < 8) continue;
 
-        if (!noticeId || !rawTitle || rawTitle.length < 8) continue;
-        if (seen.has(noticeId)) continue;
-        seen.add(noticeId);
+      const refNo = cell(block, "Ref No");
+      const office = cell(block, "UNDP Office/Country");
+      const process = cell(block, "Process");
+      const deadline = parseLooseDate(cell(block, "Deadline"));
 
-        // Detect Caribbean/Bahamas mentions in the title for geographic scoring boost
-        const titleLower = rawTitle.toLowerCase();
-        const country =
-          titleLower.includes("bahamas")   ? "Bahamas" :
-          titleLower.includes("caribbean") ? "Caribbean" :
-          titleLower.includes("jamaica")   ? "Jamaica" :
-          titleLower.includes("barbados")  ? "Barbados" :
-          titleLower.includes("trinidad")  ? "Trinidad and Tobago" :
-          titleLower.includes("guyana")    ? "Guyana" :
-          titleLower.includes("belize")    ? "Belize" :
-          "International";
+      // "UNDP-JAM/BAHAMAS" → "Bahamas"
+      const countryRaw = office.includes("/") ? office.split("/").pop()!.trim() : office;
+      const isCaribbean = CARIBBEAN_RX.test(office) || CARIBBEAN_RX.test(title);
+      const isComms = COMMS_RX.test(title);
+      if (!isCaribbean && !isComms) continue;
 
-        results.push({
-          externalId: `undp-${noticeId}`,
-          title: rawTitle,
-          organization: "UNDP",
-          url: `https://procurement-notices.undp.org/${path}`,
-          description: `UNDP procurement notice: ${rawTitle}`,
-          country,
-          sector: "United Nations",
-        });
-
-        if (results.length >= 30) break;
-      }
-    } catch {
-      /* return empty on failure */
+      const opp: TenderOpportunity = {
+        externalId: `undp-${noticeId}`,
+        title,
+        organization: "UNDP",
+        url: `https://procurement-notices.undp.org/${path}`,
+        deadline,
+        // Headline-only for now; replaced with the real notice text by the runner.
+        description: `UNDP procurement notice: ${title}`,
+        country: countryRaw ? titleCase(countryRaw) : "International",
+        sector: process || "United Nations",
+        rawData: { refNo, office, process },
+      };
+      (isCaribbean ? caribbean : comms).push(opp);
     }
 
-    return results;
+    if (rowCount === 0) {
+      throw new Error("UNDP listing loaded but no notice rows were recognised — page layout may have changed");
+    }
+
+    // Caribbean notices first, then comms-flavoured notices from elsewhere.
+    return [...caribbean, ...comms].slice(0, MAX_ITEMS);
   }
 }

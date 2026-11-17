@@ -13,10 +13,62 @@ import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
 
 const router = Router();
 
+type SourceHealth = "ok" | "empty" | "failing" | "never_run";
+
+/**
+ * Turn a source's recent runs (newest first) into a health verdict.
+ *  - failing: the latest run errored (site down, blocked, or layout changed)
+ *  - empty:   the latest run worked but the source listed nothing
+ */
+export function summariseSourceHealth(
+  runs: Array<{ status: string; itemsFound: number; errorMessage: string | null; startedAt: Date }>,
+): { health: SourceHealth; healthMessage: string | null; consecutiveProblemRuns: number } {
+  const latest = runs[0];
+  if (!latest) return { health: "never_run", healthMessage: null, consecutiveProblemRuns: 0 };
+
+  const isProblem = (r: { status: string; itemsFound: number }) =>
+    r.status === "failed" || r.itemsFound === 0;
+  let streak = 0;
+  for (const r of runs) {
+    if (!isProblem(r)) break;
+    streak++;
+  }
+
+  if (latest.status === "failed") {
+    return {
+      health: "failing",
+      healthMessage: latest.errorMessage ?? "The last crawl failed.",
+      consecutiveProblemRuns: streak,
+    };
+  }
+  if (latest.itemsFound === 0) {
+    return {
+      health: "empty",
+      healthMessage:
+        streak >= 3
+          ? `No tenders listed in the last ${streak} crawls — the site has probably moved or changed its layout.`
+          : "The last crawl reached the site but found no tenders listed.",
+      consecutiveProblemRuns: streak,
+    };
+  }
+  return { health: "ok", healthMessage: null, consecutiveProblemRuns: 0 };
+}
+
 // ── Tender Sources ─────────────────────────────────────────────────────────
 router.get("/tender-sources", async (req, res) => {
   const sources = await db.select().from(tenderSourcesTable).orderBy(tenderSourcesTable.name);
-  res.json(sources);
+
+  // Attach a simple health verdict per source, based on its most recent
+  // finished crawl runs, so a broken or empty source is visible in the UI.
+  const recentRuns = await db
+    .select()
+    .from(crawlerRunsTable)
+    .orderBy(desc(crawlerRunsTable.startedAt))
+    .limit(400);
+
+  res.json(sources.map((s) => ({ ...s, ...summariseSourceHealth(
+    recentRuns.filter((r) => r.sourceId === s.id && r.status !== "running"),
+  ) })));
 });
 
 router.post("/tender-sources", async (req, res) => {

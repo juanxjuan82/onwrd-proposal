@@ -21,6 +21,9 @@ interface TenderSource {
   lastCheckedAt?: string | null;
   lastSuccessAt?: string | null;
   itemsFoundCount: number;
+  health?: "ok" | "empty" | "failing" | "never_run";
+  healthMessage?: string | null;
+  consecutiveProblemRuns?: number;
 }
 
 interface CrawlerRun {
@@ -290,6 +293,14 @@ export default function SettingsSources() {
                   <div className="flex items-center gap-2 mb-0.5">
                     <span className="font-medium text-sm text-white">{s.name}</span>
                     <Badge variant="outline" className="text-xs py-0"><SourceTypeLabel type={s.sourceType} /></Badge>
+                    {s.health === "failing" && (
+                      <Badge variant="outline" className="text-xs py-0 border-red-500/50 text-red-400">Not working</Badge>
+                    )}
+                    {s.health === "empty" && (
+                      <Badge variant="outline" className="text-xs py-0 border-yellow-500/50 text-yellow-400">
+                        {(s.consecutiveProblemRuns ?? 0) >= 3 ? "Nothing found — check source" : "Nothing found last run"}
+                      </Badge>
+                    )}
                   </div>
                   <div className="flex items-center gap-3 text-xs text-muted-foreground">
                     <span>{s.itemsFoundCount} found total</span>
@@ -297,6 +308,11 @@ export default function SettingsSources() {
                       <span>· Last checked {formatDistanceToNow(new Date(s.lastCheckedAt), { addSuffix: true })}</span>
                     )}
                   </div>
+                  {(s.health === "failing" || s.health === "empty") && s.healthMessage && (
+                    <p className={`text-xs mt-1 break-words ${s.health === "failing" ? "text-red-400" : "text-yellow-400"}`}>
+                      {s.healthMessage}
+                    </p>
+                  )}
                 </div>
                 <div className="flex gap-1">
                   <Button
