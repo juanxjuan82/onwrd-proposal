@@ -15,6 +15,7 @@ import { BahamasGovAdapter } from "./bahamas-gov.js";
 import { CTOAdapter } from "./cto.js";
 import { CARICOMAdapter } from "./caricom.js";
 import { EUCaribbeanAdapter } from "./eu-caribbean.js";
+import { LISTING_SOURCES, ListingAdapter, getListingSource } from "./listing-adapter.js";
 import {
   type AdapterFetchContext,
   type CrawlDiagnostic,
@@ -48,7 +49,10 @@ function getAdapter(adapterType: string): TenderSourceAdapter | null {
     case "cto":          return new CTOAdapter();
     case "caricom":      return new CARICOMAdapter();
     case "eu_caribbean": return new EUCaribbeanAdapter();
-    default:             return null;
+    default: {
+      const listingSource = getListingSource(adapterType);
+      return listingSource ? new ListingAdapter(listingSource) : null;
+    }
   }
 }
 
@@ -133,7 +137,16 @@ export const SOURCE_ADAPTER_CATALOG: readonly SourceAdapterDefinition[] = [
   { adapterType: "cdb", label: "Caribbean Development Bank", sourceType: "development_bank", allowedHosts: ["caribank.org"], supportsBrowser: false, recommended: false },
   { adapterType: "cto", label: "Caribbean Tourism Organization", sourceType: "regional", allowedHosts: ["caribtourism.com"], supportsBrowser: false, recommended: false, blockedReason: "The current CTO web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
   { adapterType: "eu_caribbean", label: "EU Caribbean Development Fund", sourceType: "development_fund", allowedHosts: ["cariforum.org"], supportsBrowser: false, recommended: false, blockedReason: "The current EU Caribbean web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
-] as const;
+  // Listing-page sources: one shared adapter, configured in listing-adapter.ts.
+  ...LISTING_SOURCES.map((source): SourceAdapterDefinition => ({
+    adapterType: source.adapterType,
+    label: source.label,
+    sourceType: source.adapterType.endsWith("_gov") ? "government" : "regional",
+    allowedHosts: source.approvedDomains,
+    supportsBrowser: false,
+    recommended: false,
+  })),
+];
 
 export const CONTROLLED_CRAWL_ADAPTERS = ["ungm", "cdb", "caricom"] as const;
 
@@ -1052,7 +1065,7 @@ export async function seedDefaultSources(): Promise<void> {
       // active: false — cariforum.org is unreachable (connection timeout) from Replit
       { name: "EU Caribbean Development Fund", sourceType: "development_fund", url: "https://www.cariforum.org/", adapterType: "eu_caribbean", active: false },
     ];
-    for (const s of newSources) {
+    for (const s of [...newSources, ...listingSourceSeeds()]) {
       if (!existingTypes.has(s.adapterType)) {
         await db.insert(tenderSourcesTable).values(s);
       }
@@ -1073,9 +1086,23 @@ export async function seedDefaultSources(): Promise<void> {
     { name: "EU Caribbean Development Fund",    sourceType: "development_fund",  url: "https://www.cariforum.org/",                                   adapterType: "eu_caribbean", active: false },
   ];
 
-  for (const s of defaults) {
+  for (const s of [...defaults, ...listingSourceSeeds()]) {
     await db.insert(tenderSourcesTable).values(s);
   }
+}
+
+// Listing-page sources are added switched off, like every new source: run a
+// test crawl from Settings → Sources, then activate.
+function listingSourceSeeds() {
+  return LISTING_SOURCES.map((source) => ({
+    name: source.label,
+    sourceType: source.adapterType.endsWith("_gov") ? "government" : "regional",
+    url: source.listingUrls[0],
+    adapterType: source.adapterType,
+    active: false,
+    browserEnabled: false,
+    approvedDomains: [...source.approvedDomains],
+  }));
 }
 
 // ── Seed default search profiles ─────────────────────────────────────────────

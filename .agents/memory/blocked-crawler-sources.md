@@ -38,3 +38,13 @@ As checked on 2026-11-20 (live runs of every unblocked adapter):
 - **Bahamas gov tender page is an archive:** 27 rows, nearly all 2022–2024, newest due date Jan 2026. Zero live tenders is the correct result today. The adapter drops expired rows, undated rows whose document upload stamp (`-YYYYMMDDhhmmss.pdf`) is over 180 days old, contract awards, job posts and links to other organisations' portals.
 - **CDB and CARICOM are small:** 8 and 3 open notices in total, all engineering/works on this date. Low volume there is the source, not a crawler fault.
 - **Scoring:** a recommendation above SKIP requires a named ONWRD service phrase (`findCoreServicePhrases`); loose words such as "communications" in notice boilerplate previously scored sewage and tariff notices as PURSUE.
+
+**New listing-page sources (added 2026-11-20, config in `crawlers/listing-adapter.ts`):** `bermuda_gov` (gov.bm/procurement-notices, no robots.txt published, 10 open notices), `central_bank_bahamas` (public-procurement news list), `compete_caribbean` (opportunities, 0 open on this date), `ccreee` (all-procurements, all expired on this date). One shared `ListingAdapter`; adding a similar site is a config entry. Seeded inactive like every new source.
+
+Checked and rejected on the same date:
+- GOJEP (Jamaica e-procurement): search is behind a CAPTCHA — do not automate.
+- UNGM: HTTP 403 to automated requests. IDB: still 403.
+- TED (EU) API works but has almost no open Caribbean notices.
+- Caribbean Export tenders page and Jamaica Tourist Board procurement table are filled in by JavaScript; plain fetch sees no notices. JTB posts marketing/PR agency RFPs as PDFs, so it is worth a browser-rendered adapter later.
+- CDEMA and CARPHA "opportunities" are mostly staff vacancies.
+- Not reachable from the test network: caribbeanclimate.bz, nassaulpia.com, caribtourism.com / onecaribbean.org.
