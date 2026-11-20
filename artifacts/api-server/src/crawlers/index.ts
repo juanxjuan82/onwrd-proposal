@@ -34,7 +34,7 @@ import {
   normalizeSourceApprovedDomains,
 } from "./crawl4ai-client.js";
 import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
-import { evaluateCrawlerEligibility } from "../lib/crawler-eligibility.js";
+import { evaluateCrawlerEligibility, findCoreServicePhrases } from "../lib/crawler-eligibility.js";
 import { crawlerContentFingerprint, normalizeCrawlerUrl } from "./dedup.js";
 import { tenderSearchProfilesTable } from "@workspace/db";
 
@@ -296,6 +296,14 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
   if (!marketingGate.some((kw) => text.includes(kw))) {
     const { geographyScore, geoRegion } = computeGeoScore(opp.country, text);
     return { fitScore: 0, recommendation: "SKIP", reasoning: "No marketing or communications terms — not a fit for ONWRD.", geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
+  }
+
+  // Loose words like "communications" or "brand" appear in the boilerplate of
+  // almost every notice (sewage plants, airport tariffs). Unless the notice
+  // names an actual ONWRD service, it must not be recommended.
+  if (findCoreServicePhrases(`${opp.title} ${opp.description}`).length === 0) {
+    const { geographyScore, geoRegion } = computeGeoScore(opp.country, text);
+    return { fitScore: 0, recommendation: "SKIP", reasoning: "Mentions marketing/communications only in passing — no specific ONWRD service is named in the scope.", geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
   }
 
   const disqualifiers = [

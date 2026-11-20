@@ -500,3 +500,96 @@ describe("World Bank adapter — correct deadline field", () => {
     );
   });
 });
+
+// ── (5) World Bank — queries that actually filter ─────────────────────────────
+
+describe("World Bank adapter — targeted queries", () => {
+  it("filters by Caribbean country and by service term instead of the ignored q/fq parameters", async () => {
+    const requested: string[] = [];
+    const mock: MockFetchFn = async (input) => {
+      requested.push(String(input));
+      return new Response(JSON.stringify({ procnotices: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    const { WorldBankAdapter } = await import("./world-bank.js");
+    await withMockFetch(mock, () => new WorldBankAdapter().fetchOpportunities());
+
+    assert.ok(requested.some((url) => /project_ctry_name_exact=[^&]*Jamaica/.test(url)));
+    assert.ok(requested.some((url) => /[?&]qterm=/.test(url)));
+    assert.ok(requested.every((url) => /notice_type_exact=/.test(url)));
+    assert.ok(requested.every((url) => !/[?&]q=/.test(url) && !/[?&]fq=/.test(url)));
+  });
+
+  it("titles a notice by its contract, and drops awards, undated and non-English notices", async () => {
+    const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    const notices = {
+      a: {
+        id: "OP1", project_name: "Umbrella Health Programme", project_ctry_name: "Jamaica",
+        bid_description: "Development of a Communication Strategy",
+        notice_type: "Request for Expression of Interest", submission_deadline_date: future,
+        notice_text: "<p>The Ministry invites firms to develop the communication strategy for the project and to deliver it with the team.</p>",
+      },
+      b: { id: "OP2", bid_description: "Road works", notice_type: "Contract Award", submission_deadline_date: future },
+      c: { id: "OP3", bid_description: "General notice with no deadline", notice_type: "Invitation for Bids" },
+      d: {
+        id: "OP4", bid_description: "Servicios de consultoría para la estrategia de marketing",
+        notice_type: "Request for Expression of Interest", submission_deadline_date: future,
+        notice_text: "El Ministerio invita a las firmas de consultoría para la elaboración de la estrategia de marketing del proyecto en la región y los servicios de comunicación.",
+      },
+    };
+    const mock: MockFetchFn = async () =>
+      new Response(JSON.stringify({ procnotices: notices }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    const { WorldBankAdapter } = await import("./world-bank.js");
+    const results = await withMockFetch(mock, () => new WorldBankAdapter().fetchOpportunities());
+
+    assert.deepEqual(results.map((item) => item.externalId), ["wb-OP1"]);
+    assert.equal(results[0].title, "Development of a Communication Strategy");
+    assert.ok(!results[0].description.includes("<p>"));
+    assert.ok(results[0].description.includes("Umbrella Health Programme"));
+  });
+});
+
+// ── (6) Bahamas Gov — live notices only ───────────────────────────────────────
+
+describe("Bahamas Gov adapter — row parsing and stale-notice filter", () => {
+  const row = (href: string, title: string, category: string, due = "") => `
+    <li><div class="date-info"><a href="${href}" target="_blank" title="${title}"></a></div>
+      <div class="content"><div class="heading"><span class="category">${category}</span>
+      ${due ? `<span class="due-date">Due Date: ${due}</span>` : ""}</div>
+      <h2 class="title"><a href="${href}" target="_blank" title="${title}">${title}</a></h2></div></li>`;
+  const cdn = "https://cdn.bahamas.gov.bs/tenant/tenanttgotb/documents/All Documents";
+  const html = `
+    <a href="https://www.bahamas.gov.bs" title="Government of The Commonwealth of The Bahamas">Home</a>
+    <ul class="tender-ul">
+      ${row(`${cdn}/Tourism-Marketing-RFP-20260601101010.pdf`, "Tourism Marketing Campaign RFP", "Request for Proposal", "30 Jun 2026")}
+      ${row(`${cdn}/Old-RFP-20240110160011.pdf`, "Public Relations Services RFP", "Request for Proposal", "08 Feb 2024")}
+      ${row(`${cdn}/MktingCommsTOR-20240110162109.pdf`, "Marketing &amp; Communications Plan and Strategy - BBSQ", "Term of Reference")}
+      ${row(`${cdn}/NotificationofContractAwardNEIA-20260601101010.pdf`, "Engineering Consulting Services", "Notification of Contract Award")}
+      ${row("https://www.un.org/Depts/ptd/eoi", "Invitation for Potential Bidders", "UN Procurement Opportunities")}
+      ${row(`${cdn}/Junior-Dev-20260601101010.pdf`, "Junior Software Developer", "Request for Expression of Interest", "30 Jun 2026")}
+    </ul><span class="category">Footer</span>`;
+
+  it("reads one listing per tender row and ignores navigation links", async () => {
+    const { parseBahamasTenderList } = await import("./bahamas-gov.js");
+    const rows = parseBahamasTenderList(html);
+    assert.equal(rows.length, 6);
+    assert.equal(rows[0].title, "Tourism Marketing Campaign RFP");
+    assert.equal(rows[0].dueDate?.toISOString().slice(0, 10), "2026-06-30");
+    assert.equal(rows[2].title, "Marketing & Communications Plan and Strategy - BBSQ");
+    assert.equal(rows[2].uploadedAt?.toISOString().slice(0, 10), "2024-01-10");
+  });
+
+  it("keeps only notices that can still be bid on", async () => {
+    const { parseBahamasTenderList, bahamasListingRejection } = await import("./bahamas-gov.js");
+    const now = new Date("2026-06-10T12:00:00Z");
+    const verdicts = parseBahamasTenderList(html).map((item) => bahamasListingRejection(item, now));
+    assert.deepEqual(verdicts, [
+      null, "expired", "stale_undated", "contract_award", "external_link", "job_posting",
+    ]);
+  });
+});

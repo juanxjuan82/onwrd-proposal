@@ -300,6 +300,11 @@ function boundedPhraseMatch(text: string, phrase: string): boolean {
   return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, "i").test(text);
 }
 
+/** ONWRD core service phrases explicitly named in a piece of text. */
+export function findCoreServicePhrases(text: string): string[] {
+  return matchAll(text, CORE_SERVICE_PHRASES);
+}
+
 function classifyContentQuality(description: string, title: string): ContentQuality {
   const t = description.trim();
 
