@@ -19,7 +19,7 @@ const CARICOM_ORIGIN = "https://caricom.org";
 const CARICOM_ROBOTS_URL = `${CARICOM_ORIGIN}/robots.txt`;
 const CARICOM_SOURCE_PAGE = `${CARICOM_ORIGIN}/procurement-notices/`;
 const CARICOM_NOTICE_HOSTS = ["caricom.org"];
-const MAX_NOTICES_PER_RUN = 5;
+const MAX_NOTICES_PER_RUN = 15;
 
 function makeOpportunity(
   title: string,

@@ -17,7 +17,7 @@ import {
 const CDB_ORIGIN = "https://www.caribank.org";
 const CDB_LISTING_URL = `${CDB_ORIGIN}/work-with-us/procurement/procurement-notices`;
 const CDB_APPROVED_DOMAINS = ["caribank.org"];
-const MAX_NOTICES_PER_RUN = 5;
+const MAX_NOTICES_PER_RUN = 15;
 
 export class CDBAdapter implements TenderSourceAdapter {
   adapterType = "cdb";

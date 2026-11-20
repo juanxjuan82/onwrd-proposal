@@ -32,3 +32,9 @@ As checked on 2026-11-17 (from a different network than Replit):
 - Bahamas e-procurement (`bahamas.bonfirehub.com`): robots.txt is `Disallow: /`. Do not crawl.
 
 **External IDs:** build them with `stableExternalId()` in `crawlers/dedup.ts` (full hash of the notice URL). Never truncate an encoded URL/title — a 16-char base64 slice keeps only 12 characters (`https://www.`), and the crawl loop treats a matching externalId as an existing record, so later notices were dropped as duplicates.
+
+As checked on 2026-11-20 (live runs of every unblocked adapter):
+- **World Bank API filters:** `q=` and `fq=` do NOT filter — they return the newest notices worldwide (the source of the Rwanda/Kyrgyz junk). What works: `project_ctry_name_exact=A^B` (exact names, `^` = OR; e.g. `St. Lucia`, `OECS Countries`, `Caribbean`), `notice_type_exact=A^B`, and `qterm="phrase"`. Use `bid_description` as the title (the contract); `project_name` is only the umbrella programme.
+- **Bahamas gov tender page is an archive:** 27 rows, nearly all 2022–2024, newest due date Jan 2026. Zero live tenders is the correct result today. The adapter drops expired rows, undated rows whose document upload stamp (`-YYYYMMDDhhmmss.pdf`) is over 180 days old, contract awards, job posts and links to other organisations' portals.
+- **CDB and CARICOM are small:** 8 and 3 open notices in total, all engineering/works on this date. Low volume there is the source, not a crawler fault.
+- **Scoring:** a recommendation above SKIP requires a named ONWRD service phrase (`findCoreServicePhrases`); loose words such as "communications" in notice boilerplate previously scored sewage and tariff notices as PURSUE.
