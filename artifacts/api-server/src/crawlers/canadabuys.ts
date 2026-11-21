@@ -89,7 +89,7 @@ export function selectCanadaBuysNotices(csvText: string, now = new Date()): Tend
       deadline,
       description: [
         `${title}.`,
-        `Buyer: ${entity}.`,
+        `Buyer: ${entity} (Government of Canada public sector tender).`,
         get(col.type) ? `Notice type: ${get(col.type)}.` : "",
         get(col.category) ? `Category: ${get(col.category).replace(/\s+/g, " ").slice(0, 200)}.` : "",
         details,

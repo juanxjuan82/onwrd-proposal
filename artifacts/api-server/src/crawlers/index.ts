@@ -38,7 +38,7 @@ import {
   normalizeSourceApprovedDomains,
 } from "./crawl4ai-client.js";
 import { promoteDiscoveredTender } from "../lib/promote-discovered-tender.js";
-import { evaluateCrawlerEligibility, findCoreServicePhrases } from "../lib/crawler-eligibility.js";
+import { evaluateCrawlerEligibility, findCoreServicePhrases, findIndividualHireSignals, titleOutOfScopeReason } from "../lib/crawler-eligibility.js";
 import { crawlerContentFingerprint, normalizeCrawlerUrl } from "./dedup.js";
 import { tenderSearchProfilesTable } from "@workspace/db";
 
@@ -315,6 +315,26 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
     }
   }
 
+  // A notice hiring one person is never a lead for an agency, so it must not
+  // carry a PURSUE/CONSIDER rating in the list.
+  const individualHire = findIndividualHireSignals(opp.title, opp.description);
+  if (individualHire.length > 0) {
+    const { geographyScore, geoRegion } = computeGeoScore(opp.country, text);
+    return { fitScore: 0, recommendation: "SKIP", reasoning: `Individual hire — seeking a person, not a firm (matched: "${individualHire[0]}").`, geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
+  }
+
+  // Same rule the promotion gate applies, so the list never shows a good
+  // rating on something that cannot be promoted.
+  const outOfScope = titleOutOfScopeReason(opp.title, opp.description);
+  if (outOfScope) {
+    const { geographyScore, geoRegion } = computeGeoScore(opp.country, text);
+    return { fitScore: 0, recommendation: "SKIP", reasoning: outOfScope, geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
+  }
+
+  // Named ONWRD services found in the notice (the vetted phrase list).
+  const coreServices = findCoreServicePhrases(`${opp.title} ${opp.description}`);
+  const coreServicesInTitle = findCoreServicePhrases(opp.title);
+
   const marketingGate = [
     "marketing", "communications", "branding", "brand",
     "campaign", "public relations", "advertising", "media relations",
@@ -324,7 +344,9 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
     "awareness campaign", "visibility campaign", "community engagement",
     "stakeholder communications", "digital communications",
   ];
-  if (!marketingGate.some((kw) => text.includes(kw))) {
+  // A notice titled with a named service (e.g. "Graphic Design Services")
+  // passes the gate even when it never says "marketing" or "communications".
+  if (coreServicesInTitle.length === 0 && !marketingGate.some((kw) => text.includes(kw))) {
     const { geographyScore, geoRegion } = computeGeoScore(opp.country, text);
     return { fitScore: 0, recommendation: "SKIP", reasoning: "No marketing or communications terms — not a fit for ONWRD.", geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
   }
@@ -332,7 +354,7 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
   // Loose words like "communications" or "brand" appear in the boilerplate of
   // almost every notice (sewage plants, airport tariffs). Unless the notice
   // names an actual ONWRD service, it must not be recommended.
-  if (findCoreServicePhrases(`${opp.title} ${opp.description}`).length === 0) {
+  if (coreServices.length === 0) {
     const { geographyScore, geoRegion } = computeGeoScore(opp.country, text);
     return { fitScore: 0, recommendation: "SKIP", reasoning: "Mentions marketing/communications only in passing — no specific ONWRD service is named in the scope.", geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
   }
@@ -420,13 +442,18 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
   if (hasHighSignal) {
     for (const kw of weakSignals) { if (text.includes(kw)) rawCap += 2; }
   }
+  // A named service is stronger evidence than a loose keyword, and strongest
+  // when it is what the notice is titled.
+  rawCap += Math.min(coreServices.length, 3) * 6;
+  if (coreServicesInTitle.length > 0) rawCap += 8;
   for (const kw of negativeSignals) { if (text.includes(kw)) rawCap -= 6; }
   const capComponent = Math.max(0, Math.min(30, rawCap));
 
   const industryTiers: Array<{ terms: string[]; pts: number }> = [
     { terms: ["financial services", "banking", "insurance", "fintech", "investment"], pts: 20 },
     { terms: ["tourism", "hospitality", "hotel", "resort", "travel", "visitor economy", "destination"], pts: 20 },
-    { terms: ["ministry", "government", "public sector", "national authority", "state agency"], pts: 18 },
+    // Public bodies, including how US/Canadian local ones are named.
+    { terms: ["ministry", "government", "public sector", "national authority", "state agency", " county", "municipal", " district", " authority", "department of", "city of", "town of", "public agency"], pts: 18 },
     { terms: ["ngo", "non-governmental", "nonprofit", "non-profit", "civil society", "foundation"], pts: 16 },
     { terms: ["multilateral", "idb", "world bank", "undp", "unicef", "cdb", "development bank"], pts: 16 },
     { terms: ["health", "education", "environment", "climate", "energy transition"], pts: 10 },

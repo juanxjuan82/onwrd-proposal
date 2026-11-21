@@ -169,3 +169,64 @@ describe("scoring — leads outside the Caribbean", () => {
     assert.ok(!/Outside the Caribbean/.test(bahamas.reasoning));
   });
 });
+
+describe("scoring — fixes found by reviewing a real crawl", () => {
+  const deadline = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  const score = async (title: string, description: string, country = "United States", organization = "Public body") => {
+    const { scoreCrawlerOpportunity } = await import("./index.js");
+    const { evaluateCrawlerEligibility } = await import("../lib/crawler-eligibility.js");
+    const result = scoreCrawlerOpportunity({ title, organization, description, country, deadline });
+    const eligibility = evaluateCrawlerEligibility({ title, description, recommendation: result.recommendation, deadline });
+    return { ...result, eligible: eligibility.eligible };
+  };
+
+  it("a short agency search naming one service is no longer just under the line", async () => {
+    const result = await score(
+      "Denver Transit Seeks Brand Rep Campaign",
+      "The Denver-based Regional Transportation District is gathering quotes for a brand reputation campaign. Listing: Denver Transit Seeks Brand Rep Campaign Transportation CO Posted: 2026-11-19 Due: 2026-12-04",
+    );
+    assert.notEqual(result.recommendation, "SKIP");
+    assert.ok(result.eligible);
+  });
+
+  it("a notice titled with a named service passes without the words marketing or communications", async () => {
+    const result = await score(
+      "Creative and Graphic Design Services",
+      "Creative and Graphic Design Services. Buyer: Canada Lands Company Limited (CLC) (Government of Canada public sector tender). Notice type: Request for Proposal. Category: *Graphic design. This RFP is issued for the purpose of obtaining Proposals for creative and graphic design services.",
+      "Canada",
+    );
+    assert.notEqual(result.recommendation, "SKIP");
+    assert.ok(result.eligible);
+  });
+
+  it("an individual hire is rated SKIP in the list, not PURSUE", async () => {
+    const result = await score(
+      "Stakeholder Engagement Specialist",
+      "Method: Individual Consultant Selection. The project seeks a specialist to lead stakeholder engagement, a communications strategy, media relations and public awareness campaign activities for the ministry over two years.",
+      "Uzbekistan", "World Bank",
+    );
+    assert.equal(result.recommendation, "SKIP");
+    assert.match(result.reasoning, /Individual hire/);
+    assert.ok(!result.eligible);
+  });
+
+  it("buying audio-visual equipment is not audiovisual production", async () => {
+    const result = await score(
+      "Audio Visual Equipment for Secondary Schools",
+      "Invitation for bids for the supply and delivery of audio-visual equipment including projectors, screens and speakers for forty secondary schools under the education project.",
+      "Jamaica",
+    );
+    assert.equal(result.recommendation, "SKIP");
+    assert.ok(!result.eligible);
+  });
+
+  it("a software platform with marketing in its name is rated SKIP", async () => {
+    const result = await score(
+      "Request for Proposal Smartmail Marketing Platform 2026",
+      "The objective of this RFP is to select one qualified Service Provider to implement, support, and evolve the next-generation Smartmail Marketing Digital Platform for planning and measuring Smartmail Marketing campaigns.",
+      "Canada",
+    );
+    assert.equal(result.recommendation, "SKIP");
+    assert.ok(!result.eligible);
+  });
+});
