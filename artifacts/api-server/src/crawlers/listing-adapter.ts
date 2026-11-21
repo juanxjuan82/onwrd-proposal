@@ -38,6 +38,10 @@ export interface ListingSourceConfig {
   skipBlock?: RegExp;
   /** Where the notice text sits on a detail page with no <main>/<article>. */
   contentPattern?: RegExp;
+  /** Reads a posting month from the notice URL, e.g. /files/2026-07/name.pdf. */
+  postedFromUrl?: RegExp;
+  /** Removed from the start of link text to leave the notice name. */
+  titlePrefix?: RegExp;
   /** Undated notices older than this many days (by posted date) are dropped. */
   maxUndatedAgeDays?: number;
 }
@@ -76,7 +80,8 @@ export function readListingDeadline(text: string): Date | undefined {
   const normalised = text
     .replace(/\b(?:mon|tues|wednes|thurs|fri|satur|sun)day,?\s+/gi, "")
     .replace(/\b(?:closes|closing|close date|submission date)\b\s*:?\s*/gi, "Closing date: ")
-    .replace(/(\d{1,2})(?:st|nd|rd|th)\b/gi, "$1");
+    .replace(/(\d{1,2})(?:st|nd|rd|th)\b/gi, "$1")
+    .replace(/\s*,\s*/g, ", ");
   return extractDeadline(normalised);
 }
 
@@ -84,6 +89,13 @@ function readPostedDate(text: string): Date | undefined {
   const labelled = text.match(/\b(?:issued|posted|published)\b\s*:?\s*(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})/i)?.[1]
     ?? text.match(/^\s*(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})\b/)?.[1];
   return labelled ? extractDeadline(`Deadline: ${labelled}`) : undefined;
+}
+
+function readPostedFromUrl(url: string, config: ListingSourceConfig): Date | undefined {
+  const match = config.postedFromUrl ? decodeURIComponent(url).match(config.postedFromUrl) : null;
+  if (!match) return undefined;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, 1));
+  return Number.isNaN(date.getTime()) ? undefined : date;
 }
 
 /** Read the notice blocks of a listing page. Pure: no network access. */
@@ -106,7 +118,7 @@ export function parseListingPage(
       if (!url) continue;
       const path = new URL(url).pathname;
       if (!config.noticePath.test(path)) continue;
-      const title = blockText(anchor[3], 250);
+      const title = blockText(anchor[3], 250).replace(config.titlePrefix ?? /^$/, "").trim();
       // "Read more" style links point at the notice but do not name it.
       if (title.length < 8 || /^(?:read more|learn more|view|details|download)$/i.test(title)) continue;
       chosen = { url, title };
@@ -121,7 +133,7 @@ export function parseListingPage(
       ...chosen,
       summary,
       deadline: readListingDeadline(summary),
-      postedAt: readPostedDate(summary),
+      postedAt: readPostedDate(summary) ?? readPostedFromUrl(chosen.url, config),
     });
   }
   return results;
@@ -271,6 +283,24 @@ export class ListingAdapter implements TenderSourceAdapter {
     documents: Array<{ url: string; format: "pdf" | "docx" | "unsupported"; status: "extracted" | "scanned_or_textless" | "fetch_failed" | "malformed" | "unsupported" | "blocked_by_robots"; characters: number; extractedText?: string }>;
   }> {
     if (!robotsAllows(url)) return { content: "", status: "blocked_by_robots", documents: [] };
+    if (/\.(?:pdf|docx)(?:[?#]|$)/i.test(url)) {
+      // The notice itself is a document: its text is the scope.
+      const escaped = url.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+      const documents = await extractProcurementDocuments(
+        `<a href="${escaped}">tender notice document</a>`,
+        url,
+        this.config.approvedDomains,
+        (documentUrl, domains, maxBytes) => this.fetchBytes(documentUrl, domains, maxBytes),
+      );
+      const text = (documents[0]?.text ?? "").replace(/\s+/g, " ").trim();
+      return {
+        content: text,
+        status: text ? "success" : (documents[0]?.status ?? "fetch_failed"),
+        documents: documents.map(({ url: documentUrl, format, status, characters }) => ({
+          url: documentUrl, format, status, characters,
+        })),
+      };
+    }
     try {
       const detail = await this.fetchText(url, 1_000_000, {
         headers: { Accept: "text/html, application/xhtml+xml" },
@@ -390,6 +420,49 @@ export const LISTING_SOURCES: readonly ListingSourceConfig[] = [
     approvedDomains: ["ccreee.org"],
     blockPattern: /<section>\s*<div class="inside">[\s\S]*?<\/section>/g,
     noticePath: /^\/procurements\/[^/]+/,
+    maxUndatedAgeDays: 120,
+  },
+  {
+    adapterType: "bermuda_tourism",
+    label: "Bermuda Tourism Authority RFPs",
+    organization: "Bermuda Tourism Authority",
+    country: "Bermuda (Caribbean region)",
+    sector: "Tourism / Destination Marketing",
+    origin: "https://www.gotobermuda.com",
+    listingUrls: ["https://www.gotobermuda.com/bta/rfp"],
+    approvedDomains: ["gotobermuda.com"],
+    // The page is a short list of links to RFP documents.
+    blockPattern: /<a\b[^>]*href=["'][^"']*\/sites\/default\/files\/[^"']+\.(?:pdf|docx)["'][^>]*>[\s\S]*?<\/a>/gi,
+    noticePath: /^\/sites\/default\/files\/.+\.(?:pdf|docx)$/i,
+    postedFromUrl: /\/files\/(20\d{2})-(\d{2})\//,
+    titlePrefix: /^(?:view|download|read)\s+(?:the\s+)?/i,
+    maxUndatedAgeDays: 120,
+  },
+  {
+    adapterType: "turks_caicos_gov",
+    label: "Turks and Caicos Government Tenders",
+    organization: "Turks and Caicos Islands Government",
+    country: "Turks and Caicos (Caribbean)",
+    sector: "Government Procurement",
+    origin: "https://gov.tc",
+    listingUrls: ["https://gov.tc/publicservice/government-tenders"],
+    approvedDomains: ["gov.tc"],
+    blockPattern: /<tr class="cat-list-row\d+"[\s\S]*?<\/tr>/g,
+    noticePath: /^\/publicservice\/government-tenders\/[^/]+/,
+    maxUndatedAgeDays: 120,
+  },
+  {
+    adapterType: "belize_gov",
+    label: "Belize Government Procurement Portal",
+    organization: "Government of Belize",
+    country: "Belize (Caribbean)",
+    sector: "Government Procurement",
+    origin: "https://procurement.gov.bz",
+    listingUrls: ["https://procurement.gov.bz/opportunities/"],
+    approvedDomains: ["procurement.gov.bz"],
+    blockPattern: /<tr id="post-row-\d+"[\s\S]*?<\/tr>/g,
+    noticePath: /^\/(?!category\/|opportunities\/?$)[^/]+\/?$/,
+    skipBlock: /<a\b[^>]*>\s*Expired:/i,
     maxUndatedAgeDays: 120,
   },
 ] as const;

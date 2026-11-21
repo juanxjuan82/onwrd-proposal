@@ -50,3 +50,9 @@ Checked and rejected on the same date:
 - Not reachable from the test network: caribbeanclimate.bz, nassaulpia.com, caribtourism.com / onecaribbean.org.
 
 **Jamaica Tourist Board (`jtb`, added 2026-11-21):** the procurement page table is empty; every tender is a PDF advert in the public WordPress media feed (`/wp-json/wp/v2/media?search=…&mime_type=application/pdf&after=…`, permitted by robots.txt). Files live at `lcms-mysql-server.s3.us-east-2.amazonaws.com/jtbonline.org/wp-content/uploads/` — the adapter accepts that folder only. Volume is low (roughly 2–4 adverts a year) but on target: past adverts were for a global advertising agency, UK PR firm, and Latin America marketing representation, and each scores PURSUE. Deadlines are read from the PDF text.
+
+**Tourism boards and island governments (checked 2026-11-21):**
+- Added: `belize_tourism` (Belize Tourism Board — WordPress feed, same adapter as JTB; posts marketing-representation EOIs as news posts, last batch Jan 2023), `bermuda_tourism` (gotobermuda.com/bta/rfp — a page of links to RFP PDFs; past RFPs covered PR, advertising/media and social media agencies), `turks_caicos_gov` (gov.tc/publicservice/government-tenders — closing date is in each title), `belize_gov` (procurement.gov.bz/opportunities).
+- Cayman Islands: Department of Tourism tenders are on `cayman.bonfirehub.com`, whose robots.txt is `Disallow: /`. Do not crawl.
+- Saint Lucia `govt.lc/tenders` and `/consultancies`: the page returns "No Vacancies to display" to a plain fetch and the site publishes no robots.txt. Not added.
+- Barbados Tourism Marketing Inc. and the Bahamas Ministry of Tourism have no tender page; their agency reviews are announced through press releases only.

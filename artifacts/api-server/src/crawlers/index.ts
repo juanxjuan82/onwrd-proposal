@@ -15,7 +15,7 @@ import { BahamasGovAdapter } from "./bahamas-gov.js";
 import { CTOAdapter } from "./cto.js";
 import { CARICOMAdapter } from "./caricom.js";
 import { EUCaribbeanAdapter } from "./eu-caribbean.js";
-import { JTBAdapter } from "./jtb.js";
+import { BELIZE_TOURISM_FEED, JTBAdapter, WpFeedAdapter } from "./jtb.js";
 import { LISTING_SOURCES, ListingAdapter, getListingSource } from "./listing-adapter.js";
 import {
   type AdapterFetchContext,
@@ -51,6 +51,7 @@ function getAdapter(adapterType: string): TenderSourceAdapter | null {
     case "caricom":      return new CARICOMAdapter();
     case "eu_caribbean": return new EUCaribbeanAdapter();
     case "jtb":          return new JTBAdapter();
+    case "belize_tourism": return new WpFeedAdapter(BELIZE_TOURISM_FEED);
     default: {
       const listingSource = getListingSource(adapterType);
       return listingSource ? new ListingAdapter(listingSource) : null;
@@ -140,6 +141,7 @@ export const SOURCE_ADAPTER_CATALOG: readonly SourceAdapterDefinition[] = [
   { adapterType: "cto", label: "Caribbean Tourism Organization", sourceType: "regional", allowedHosts: ["caribtourism.com"], supportsBrowser: false, recommended: false, blockedReason: "The current CTO web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
   { adapterType: "eu_caribbean", label: "EU Caribbean Development Fund", sourceType: "development_fund", allowedHosts: ["cariforum.org"], supportsBrowser: false, recommended: false, blockedReason: "The current EU Caribbean web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
   { adapterType: "jtb", label: "Jamaica Tourist Board", sourceType: "regional", allowedHosts: ["jtbonline.org"], supportsBrowser: false, recommended: false },
+  { adapterType: "belize_tourism", label: "Belize Tourism Board", sourceType: "regional", allowedHosts: ["belizetourismboard.org"], supportsBrowser: false, recommended: false },
   // Listing-page sources: one shared adapter, configured in listing-adapter.ts.
   ...LISTING_SOURCES.map((source): SourceAdapterDefinition => ({
     adapterType: source.adapterType,
@@ -1105,6 +1107,14 @@ function listingSourceSeeds() {
     active: false,
     browserEnabled: false,
     approvedDomains: ["jtbonline.org"],
+  }, {
+    name: "Belize Tourism Board",
+    sourceType: "regional",
+    url: "https://www.belizetourismboard.org/",
+    adapterType: "belize_tourism",
+    active: false,
+    browserEnabled: false,
+    approvedDomains: ["belizetourismboard.org"],
   }, ...LISTING_SOURCES.map((source) => ({
     name: source.label,
     sourceType: source.adapterType.endsWith("_gov") ? "government" : "regional",

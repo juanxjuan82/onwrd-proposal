@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { JTBAdapter, selectJtbAdverts } from "./jtb.js";
+import { BELIZE_TOURISM_FEED, JTBAdapter, selectFeedAdverts, selectFeedPosts, selectJtbAdverts } from "./jtb.js";
 
 const bucket = "https://lcms-mysql-server.s3.us-east-2.amazonaws.com/jtbonline.org/wp-content/uploads";
 const item = (id: number, title: string, file: string, extra: Record<string, unknown> = {}) => ({
@@ -37,6 +37,31 @@ describe("Jamaica Tourist Board adapter — choosing adverts from the media feed
       item(4, "RFP Four", "x.pdf", { source_url: "https://www.jtbonline.org/wp-content/uploads/rfp.pdf" }),
     ]);
     assert.deepEqual(adverts.map((advert) => advert.id), [4]);
+  });
+});
+
+describe("Belize Tourism Board — news posts and documents", () => {
+  it("keeps tender posts on the board's own site and reads their text", () => {
+    const post = (id: number, title: string, link: string) => ({
+      id, date: "2026-11-10T09:00:00", link, title: { rendered: title },
+      content: { rendered: "<p>The Belize Tourism Board invites firms to provide marketing representation and public relations services.</p>" },
+    });
+    const posts = selectFeedPosts([
+      post(1, "Request for Expression of Interest Marketing Representation Services in Mexico", "https://www.belizetourismboard.org/request-mexico/"),
+      post(2, "BTB Announces Winners of Photography Sweepstake", "https://www.belizetourismboard.org/winners/"),
+      post(3, "Request for Proposals: Elsewhere", "https://example.com/rfp/"),
+    ], BELIZE_TOURISM_FEED);
+    assert.deepEqual(posts.map((item) => item.id), [1]);
+    assert.match(posts[0].text, /marketing representation and public relations/);
+    assert.equal(posts[0].postedAt?.toISOString().slice(0, 10), "2026-11-10");
+  });
+
+  it("accepts documents only from the board's own site", () => {
+    const adverts = selectFeedAdverts([
+      item(1, "RFP Destination Branding", "x.pdf", { source_url: "https://www.belizetourismboard.org/wp-content/uploads/2026/11/rfp.pdf" }),
+      item(2, "RFP Elsewhere", "x.pdf"),
+    ], BELIZE_TOURISM_FEED);
+    assert.deepEqual(adverts.map((advert) => advert.id), [1]);
   });
 });
 
@@ -80,5 +105,7 @@ describe("Jamaica Tourist Board adapter — crawl rules", () => {
       adapterType: "jtb", url: "https://www.jtbonline.org/public-offerings/procurement/",
     });
     assert.ok(!("error" in validated));
+    const belize = validateSourceConfiguration({ adapterType: "belize_tourism", url: "https://www.belizetourismboard.org/" });
+    assert.ok(!("error" in belize));
   });
 });

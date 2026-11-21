@@ -80,6 +80,39 @@ describe("listing sources — page parsing", () => {
   });
 });
 
+describe("listing sources — tourism board and government pages added later", () => {
+  it("Bermuda Tourism Authority: each RFP document link is a notice, dated by its folder", () => {
+    const html = `<main><p>The BTA uses an RFP process.</p>
+      <a href="https://www.gotobermuda.com/sites/default/files/2026-11/bta_public_relations_rfp.pdf">View the Public Relations Agency RFP</a>
+      <a href="https://www.gotobermuda.com/meetings-groups/meetings-rfp">Click Here to Submit a Meetings RFP</a></main>`;
+    const rows = parseListingPage(html, "https://www.gotobermuda.com/bta/rfp", source("bermuda_tourism"));
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].title, "Public Relations Agency RFP");
+    assert.equal(rows[0].postedAt?.toISOString().slice(0, 10), "2026-11-01");
+  });
+
+  it("Turks and Caicos: reads the closing date written into the notice title", () => {
+    const html = `<tr class="cat-list-row0" > <th class="list-title" scope="row">
+      <a href="/publicservice/government-tenders/tender-notice-tr-26-30-destination-marketing">
+      TENDER NOTICE: TR 26/30, DESTINATION MARKETING SERVICES; Closing: Wednesday, 9 December 2026 at 10:00 A.M. </a> </th> </tr>`;
+    const rows = parseListingPage(html, "https://gov.tc/publicservice/government-tenders", source("turks_caicos_gov"));
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].url, "https://gov.tc/publicservice/government-tenders/tender-notice-tr-26-30-destination-marketing");
+    assert.equal(rows[0].deadline?.toISOString().slice(0, 10), "2026-12-09");
+  });
+
+  it("Belize portal: reads its deadline wording and skips rows marked Expired", () => {
+    const row = (id: number, slug: string, title: string) => `<tr id="post-row-${id}" class="post-row"><td><a href="https://procurement.gov.bz/${slug}/">${title}</a></td>
+      <td><p>Belize Tourism Board<br /> Deadline December 30th ,2026; 10:00 AM (Local Belize Time)</p></td>
+      <td data-sort="2026-11-18">November 18, 2026</td><td><a href="https://procurement.gov.bz/category/all-notices/consulting-services/">Consulting Services</a></td></tr>`;
+    const html = row(1, "btb-marketing-agency", "BTB &#8211; Marketing Agency Services") +
+      row(2, "old-notice", "Expired: 2026-11-10 10:00am Old Notice Title");
+    const rows = parseListingPage(html, "https://procurement.gov.bz/opportunities/", source("belize_gov"));
+    assert.deepEqual(rows.map((item) => item.title), ["BTB – Marketing Agency Services"]);
+    assert.equal(rows[0].deadline?.toISOString().slice(0, 10), "2026-12-30");
+  });
+});
+
 describe("listing sources — which notices are kept", () => {
   const now = new Date("2026-11-20T12:00:00Z");
   it("drops expired notices and long-undated ones, keeps the rest", () => {
