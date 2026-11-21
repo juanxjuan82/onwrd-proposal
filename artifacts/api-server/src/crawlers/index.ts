@@ -15,6 +15,7 @@ import { BahamasGovAdapter } from "./bahamas-gov.js";
 import { CTOAdapter } from "./cto.js";
 import { CARICOMAdapter } from "./caricom.js";
 import { EUCaribbeanAdapter } from "./eu-caribbean.js";
+import { JTBAdapter } from "./jtb.js";
 import { LISTING_SOURCES, ListingAdapter, getListingSource } from "./listing-adapter.js";
 import {
   type AdapterFetchContext,
@@ -49,6 +50,7 @@ function getAdapter(adapterType: string): TenderSourceAdapter | null {
     case "cto":          return new CTOAdapter();
     case "caricom":      return new CARICOMAdapter();
     case "eu_caribbean": return new EUCaribbeanAdapter();
+    case "jtb":          return new JTBAdapter();
     default: {
       const listingSource = getListingSource(adapterType);
       return listingSource ? new ListingAdapter(listingSource) : null;
@@ -137,6 +139,7 @@ export const SOURCE_ADAPTER_CATALOG: readonly SourceAdapterDefinition[] = [
   { adapterType: "cdb", label: "Caribbean Development Bank", sourceType: "development_bank", allowedHosts: ["caribank.org"], supportsBrowser: false, recommended: false },
   { adapterType: "cto", label: "Caribbean Tourism Organization", sourceType: "regional", allowedHosts: ["caribtourism.com"], supportsBrowser: false, recommended: false, blockedReason: "The current CTO web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
   { adapterType: "eu_caribbean", label: "EU Caribbean Development Fund", sourceType: "development_fund", allowedHosts: ["cariforum.org"], supportsBrowser: false, recommended: false, blockedReason: "The current EU Caribbean web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
+  { adapterType: "jtb", label: "Jamaica Tourist Board", sourceType: "regional", allowedHosts: ["jtbonline.org"], supportsBrowser: false, recommended: false },
   // Listing-page sources: one shared adapter, configured in listing-adapter.ts.
   ...LISTING_SOURCES.map((source): SourceAdapterDefinition => ({
     adapterType: source.adapterType,
@@ -1094,7 +1097,15 @@ export async function seedDefaultSources(): Promise<void> {
 // Listing-page sources are added switched off, like every new source: run a
 // test crawl from Settings → Sources, then activate.
 function listingSourceSeeds() {
-  return LISTING_SOURCES.map((source) => ({
+  return [{
+    name: "Jamaica Tourist Board",
+    sourceType: "regional",
+    url: "https://www.jtbonline.org/public-offerings/procurement/",
+    adapterType: "jtb",
+    active: false,
+    browserEnabled: false,
+    approvedDomains: ["jtbonline.org"],
+  }, ...LISTING_SOURCES.map((source) => ({
     name: source.label,
     sourceType: source.adapterType.endsWith("_gov") ? "government" : "regional",
     url: source.listingUrls[0],
@@ -1102,7 +1113,7 @@ function listingSourceSeeds() {
     active: false,
     browserEnabled: false,
     approvedDomains: [...source.approvedDomains],
-  }));
+  }))];
 }
 
 // ── Seed default search profiles ─────────────────────────────────────────────

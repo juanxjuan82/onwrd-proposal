@@ -53,7 +53,7 @@ export interface ParsedListing {
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MAX_NOTICES_PER_RUN = 15;
 
-function decodeEntities(value: string): string {
+export function decodeEntities(value: string): string {
   return value
     .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
     .replace(/&#x([0-9a-f]+);/gi, (_, code) => String.fromCodePoint(parseInt(code, 16)))

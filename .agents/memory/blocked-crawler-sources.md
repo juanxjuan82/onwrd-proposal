@@ -45,6 +45,8 @@ Checked and rejected on the same date:
 - GOJEP (Jamaica e-procurement): search is behind a CAPTCHA — do not automate.
 - UNGM: HTTP 403 to automated requests. IDB: still 403.
 - TED (EU) API works but has almost no open Caribbean notices.
-- Caribbean Export tenders page and Jamaica Tourist Board procurement table are filled in by JavaScript; plain fetch sees no notices. JTB posts marketing/PR agency RFPs as PDFs, so it is worth a browser-rendered adapter later.
+- Caribbean Export tenders page and Jamaica Tourist Board procurement table are filled in by JavaScript; plain fetch sees no notices. (JTB is now covered a different way — see below.)
 - CDEMA and CARPHA "opportunities" are mostly staff vacancies.
 - Not reachable from the test network: caribbeanclimate.bz, nassaulpia.com, caribtourism.com / onecaribbean.org.
+
+**Jamaica Tourist Board (`jtb`, added 2026-11-21):** the procurement page table is empty; every tender is a PDF advert in the public WordPress media feed (`/wp-json/wp/v2/media?search=…&mime_type=application/pdf&after=…`, permitted by robots.txt). Files live at `lcms-mysql-server.s3.us-east-2.amazonaws.com/jtbonline.org/wp-content/uploads/` — the adapter accepts that folder only. Volume is low (roughly 2–4 adverts a year) but on target: past adverts were for a global advertising agency, UK PR firm, and Latin America marketing representation, and each scores PURSUE. Deadlines are read from the PDF text.
