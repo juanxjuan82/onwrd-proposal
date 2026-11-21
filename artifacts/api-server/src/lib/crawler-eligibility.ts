@@ -92,8 +92,11 @@ const CORE_SERVICE_PHRASES: string[] = [
   "visual identity",
   "video production",
   "multimedia production",
-  "audio-visual",
-  "audiovisual",
+  // "Audio-visual" alone usually means buying equipment, so only production
+  // and content wording counts.
+  "audio-visual production", "audiovisual production",
+  "audio-visual content", "audiovisual content",
+  "audio-visual materials", "audiovisual materials",
   "documentary production",
   "destination marketing",
   "tourism marketing",
@@ -117,6 +120,14 @@ const CORE_SERVICE_PHRASES: string[] = [
   "website design",
   "website development",
   "publication design",
+  // ── How agency searches are worded (tourism boards, US/Canada public bodies)
+  "pr firm", "pr agency", "pr services", "pr support", "pr partner", "pr rep",
+  "tourism pr", "destination pr", "travel pr",
+  "marketing agency", "marketing firm", "marketing partner", "marketing representation",
+  "advertising agency", "ad agency", "agency of record", "communications agency",
+  "brand campaign", "branding services", "tourism campaign", "marketing and advertising",
+  "marketing communications", "marketing program", "communications program",
+  "reputation campaign", "sales & marketing", "sales and marketing",
   // ── International procurement / development-sector synonyms ──────────────
   // These are how World Bank, UNDP, IDB, CDB, etc. describe the same services
   "outreach activities",
@@ -242,6 +253,8 @@ const HARD_NEGATIVE_PHRASES: string[] = [
   "it hardware", "network equipment", "networking hardware",
   "software license", "software licensing", "erp implementation",
   "sap implementation", "data centre", "data center",
+  // Software builds that only sound like marketing work
+  "marketing platform", "digital platform", "software platform", "crm platform",
   // Financial / legal / audit
   "financial audit", "external audit", "statutory audit",
   "tax compliance", "accounting services", "legal services",
@@ -305,6 +318,29 @@ export function findCoreServicePhrases(text: string): string[] {
   return matchAll(text, CORE_SERVICE_PHRASES);
 }
 
+/**
+ * Wording that shows a notice is hiring one person rather than a firm.
+ * Checked against the title and the opening of the description.
+ */
+export function findIndividualHireSignals(title: string, description: string): string[] {
+  const corpus = `${title} ${description.slice(0, 300)}`.toLowerCase();
+  return INDIVIDUAL_HIRE_PHRASES.filter((phrase) => boundedPhraseMatch(corpus, phrase));
+}
+
+/**
+ * When a notice's title names an out-of-scope category (e.g. a software
+ * platform), it only counts if the description clearly lists at least two
+ * ONWRD services. Returns the reason it is out of scope, or null.
+ */
+export function titleOutOfScopeReason(title: string, description: string): string | null {
+  const titleNegatives = matchAll(title, HARD_NEGATIVE_PHRASES);
+  if (titleNegatives.length === 0) return null;
+  const descPositives = matchAll(description, CORE_SERVICE_PHRASES);
+  if (descPositives.length >= 2) return null;
+  return `Title is dominated by out-of-scope category ("${titleNegatives[0]}"). ` +
+    `Need ≥2 explicit ONWRD deliverables in description (found ${descPositives.length}).`;
+}
+
 function classifyContentQuality(description: string, title: string): ContentQuality {
   const t = description.trim();
 
@@ -356,10 +392,7 @@ export function evaluateCrawlerEligibility(discovery: EligibilityInput): Eligibi
   // 2b. Individual-hire notices → always raw_only, no deliverable-count override.
   // A comms brief hiring one person is still not firm-level procurement.
   // Checked against title + first 300 chars of description.
-  const individualHireCorpus = `${discovery.title} ${discovery.description.slice(0, 300)}`.toLowerCase();
-  const individualHireMatches = INDIVIDUAL_HIRE_PHRASES.filter((p) =>
-    boundedPhraseMatch(individualHireCorpus, p),
-  );
+  const individualHireMatches = findIndividualHireSignals(discovery.title, discovery.description);
   if (individualHireMatches.length > 0) {
     return {
       eligible: false,
@@ -389,19 +422,11 @@ export function evaluateCrawlerEligibility(discovery: EligibilityInput): Eligibi
 
   // 6. Hard negatives
   const negativeSignals = matchAll(corpus.slice(0, 600), HARD_NEGATIVE_PHRASES);
-  const titleNegatives = matchAll(discovery.title, HARD_NEGATIVE_PHRASES);
 
   // 7. Title dominated by hard negative: reject unless ≥2 ONWRD deliverables
   //    are explicitly named in the description body
-  if (titleNegatives.length > 0) {
-    const descPositives = matchAll(discovery.description, CORE_SERVICE_PHRASES);
-    if (descPositives.length < 2) {
-      rejectionReasons.push(
-        `Title is dominated by out-of-scope category ("${titleNegatives[0]}"). ` +
-          `Need ≥2 explicit ONWRD deliverables in description (found ${descPositives.length}).`,
-      );
-    }
-  }
+  const outOfScope = titleOutOfScopeReason(discovery.title, discovery.description);
+  if (outOfScope) rejectionReasons.push(outOfScope);
 
   // 8. Require explicit scope evidence for every recommendation. A high
   //    deterministic score cannot make generic language qualify on its own.
