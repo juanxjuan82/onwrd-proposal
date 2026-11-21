@@ -15,6 +15,8 @@ import { BahamasGovAdapter } from "./bahamas-gov.js";
 import { CTOAdapter } from "./cto.js";
 import { CARICOMAdapter } from "./caricom.js";
 import { EUCaribbeanAdapter } from "./eu-caribbean.js";
+import { CanadaBuysAdapter } from "./canadabuys.js";
+import { EmailAlertAdapter } from "./email-alerts.js";
 import { BELIZE_TOURISM_FEED, JTBAdapter, WpFeedAdapter } from "./jtb.js";
 import { LISTING_SOURCES, ListingAdapter, getListingSource } from "./listing-adapter.js";
 import {
@@ -52,6 +54,8 @@ function getAdapter(adapterType: string): TenderSourceAdapter | null {
     case "eu_caribbean": return new EUCaribbeanAdapter();
     case "jtb":          return new JTBAdapter();
     case "belize_tourism": return new WpFeedAdapter(BELIZE_TOURISM_FEED);
+    case "canadabuys":   return new CanadaBuysAdapter();
+    case "email_alerts": return new EmailAlertAdapter();
     default: {
       const listingSource = getListingSource(adapterType);
       return listingSource ? new ListingAdapter(listingSource) : null;
@@ -142,6 +146,8 @@ export const SOURCE_ADAPTER_CATALOG: readonly SourceAdapterDefinition[] = [
   { adapterType: "eu_caribbean", label: "EU Caribbean Development Fund", sourceType: "development_fund", allowedHosts: ["cariforum.org"], supportsBrowser: false, recommended: false, blockedReason: "The current EU Caribbean web source is blocked. Verify an official authenticated API/feed replacement before reactivation." },
   { adapterType: "jtb", label: "Jamaica Tourist Board", sourceType: "regional", allowedHosts: ["jtbonline.org"], supportsBrowser: false, recommended: false },
   { adapterType: "belize_tourism", label: "Belize Tourism Board", sourceType: "regional", allowedHosts: ["belizetourismboard.org"], supportsBrowser: false, recommended: false },
+  { adapterType: "email_alerts", label: "Tender alert emails (UN, Cayman, Jamaica, IDB…)", sourceType: "email", allowedHosts: ["resend.com"], supportsBrowser: false, recommended: false },
+  { adapterType: "canadabuys", label: "CanadaBuys (Government of Canada tenders)", sourceType: "government", allowedHosts: ["canadabuys.canada.ca"], supportsBrowser: false, recommended: false },
   // Listing-page sources: one shared adapter, configured in listing-adapter.ts.
   ...LISTING_SOURCES.map((source): SourceAdapterDefinition => ({
     adapterType: source.adapterType,
@@ -258,6 +264,7 @@ function computeGeoScore(country?: string | null, contextText?: string): {
     "fiji", "vanuatu", "samoa", "tonga", "kiribati", "micronesia",
     "atlantic caribbean",
   ];
+  const northAmericaSignals = ["united states", "usa", "u.s.", "canada"];
   const latamSignals = [
     "latin america", "central america", "south america",
     "mexico", "colombia", "peru", "brazil", "ecuador", "bolivia",
@@ -277,6 +284,12 @@ function computeGeoScore(country?: string | null, contextText?: string): {
   }
   for (const s of latamSignals) {
     if (text.includes(s)) return { geographyScore: 35, geoRegion: "latam" };
+  }
+  // Only the stated country decides North America: US notices mention many
+  // other places in their text.
+  const countryOnly = (country ?? "").toLowerCase();
+  if (northAmericaSignals.some((s) => countryOnly.includes(s))) {
+    return { geographyScore: 20, geoRegion: "north_america" };
   }
   return { geographyScore: 20, geoRegion: "global" };
 }
@@ -338,24 +351,9 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
   const { geographyScore, geoRegion } = computeGeoScore(
     opp.country, [opp.title, opp.description, opp.sector ?? ""].join(" "),
   );
-  const isLocalRegion = geographyScore >= 75;
-  if (!isLocalRegion) {
-    const remoteIndicators = [
-      "remote", "virtual delivery", "international bidders", "international firms",
-      "worldwide", "global firms", "open to all", "any country",
-    ];
-    const multilateralOrgs = [
-      "inter-american development bank", "idb", "world bank", "ibrd", "ifc",
-      "united nations", "undp", "unicef", "unfpa", "unwomen", "unep",
-      "european union", "eu ", "caribbean development bank", "cdb",
-      "caricom", "cto", "oecs",
-    ];
-    const hasRemote = remoteIndicators.some((kw) => text.includes(kw));
-    const isMultilateral = multilateralOrgs.some((kw) => text.includes(kw));
-    if (!hasRemote && !isMultilateral) {
-      return { fitScore: 0, recommendation: "SKIP", reasoning: "International RFP with no remote delivery or multilateral viability — delivery logistics not feasible.", geographyScore, geoRegion, bahamasAdvantageScore: 0, confidence: "LOW" };
-    }
-  }
+  // Leads outside the Bahamas and Caribbean are kept (ONWRD will consider
+  // them) but flagged, and they earn the lowest geography points.
+  const isExtraRegional = geographyScore < 75;
 
   const geoComponent = geographyScore === 100 ? 35
     : geographyScore >= 75 ? 28
@@ -462,10 +460,10 @@ function keywordScore(opp: TenderOpportunity): ScoringResult {
 
   const geoLabel: Record<string, string> = {
     bahamas: "🇧🇸 Bahamas", caribbean: "🌴 Caribbean",
-    sids: "🏝️ SIDS", latam: "🌎 Latin America", global: "🌐 Global",
+    sids: "🏝️ SIDS", latam: "🌎 Latin America", north_america: "🇺🇸 North America", global: "🌐 Global",
   };
   const topMatches = [...new Set(matchedTerms)].slice(0, 4);
-  const reasoning = `${geoLabel[geoRegion] ?? geoRegion} (geo ${geoComponent}/35). Capabilities ${capComponent}/30. Industry ${industryComponent}/20. Scale ${scaleComponent}/15.${urgencyBoost ? ` ⏰ Urgency +${urgencyBoost}.` : ""}${topMatches.length ? ` Keywords: ${topMatches.join(", ")}.` : ""} (Keyword engine)`;
+  const reasoning = `${isExtraRegional ? "⚠ Outside the Caribbean. " : ""}${geoLabel[geoRegion] ?? geoRegion} (geo ${geoComponent}/35). Capabilities ${capComponent}/30. Industry ${industryComponent}/20. Scale ${scaleComponent}/15.${urgencyBoost ? ` ⏰ Urgency +${urgencyBoost}.` : ""}${topMatches.length ? ` Keywords: ${topMatches.join(", ")}.` : ""} (Keyword engine)`;
 
   return { fitScore, recommendation, reasoning, geographyScore, geoRegion, bahamasAdvantageScore, confidence };
 }
@@ -1115,6 +1113,22 @@ function listingSourceSeeds() {
     active: false,
     browserEnabled: false,
     approvedDomains: ["belizetourismboard.org"],
+  }, {
+    name: "Tender alert emails",
+    sourceType: "email",
+    url: "https://resend.com/emails/receiving",
+    adapterType: "email_alerts",
+    active: false,
+    browserEnabled: false,
+    approvedDomains: ["resend.com"],
+  }, {
+    name: "CanadaBuys (Government of Canada tenders)",
+    sourceType: "government",
+    url: "https://canadabuys.canada.ca/en/tender-opportunities",
+    adapterType: "canadabuys",
+    active: false,
+    browserEnabled: false,
+    approvedDomains: ["canadabuys.canada.ca"],
   }, ...LISTING_SOURCES.map((source) => ({
     name: source.label,
     sourceType: source.adapterType.endsWith("_gov") ? "government" : "regional",

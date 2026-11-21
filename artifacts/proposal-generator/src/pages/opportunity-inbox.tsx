@@ -58,6 +58,7 @@ const GEO_FILTERS = [
   { value: "caribbean", label: "🌴 Caribbean" },
   { value: "sids", label: "🏝️ SIDS" },
   { value: "global", label: "🌐 Global" },
+  { value: "outside", label: "⚠ Outside Caribbean" },
 ];
 
 const GEO_LABELS: Record<string, string> = {
@@ -65,8 +66,14 @@ const GEO_LABELS: Record<string, string> = {
   caribbean: "🌴 Caribbean",
   sids: "🏝️ SIDS",
   latam: "🌎 Lat Am",
+  north_america: "🇺🇸 North America",
   global: "🌐 Global",
 };
+
+// Leads from outside the Bahamas and Caribbean are shown, but flagged.
+function isOutsideCaribbean(region?: string | null): boolean {
+  return Boolean(region) && region !== "bahamas" && region !== "caribbean";
+}
 
 function ScoreBadge({ score, rec }: { score?: number | null; rec?: string | null }) {
   if (score == null) return <span className="text-muted-foreground text-xs">–</span>;
@@ -103,9 +110,16 @@ function GeoBadge({ region }: { region?: string | null }) {
   if (!label) return null;
   const isHighPrio = region === "bahamas" || region === "caribbean";
   return (
-    <span className={`text-xs ${isHighPrio ? "text-amber-400 font-medium" : "text-muted-foreground"}`}>
-      {label}
-    </span>
+    <>
+      <span className={`text-xs ${isHighPrio ? "text-amber-400 font-medium" : "text-muted-foreground"}`}>
+        {label}
+      </span>
+      {isOutsideCaribbean(region) && (
+        <Badge variant="outline" className="text-xs py-0 border-orange-500/60 text-orange-300" title="This lead is outside the Bahamas and Caribbean">
+          ⚠ Outside Caribbean
+        </Badge>
+      )}
+    </>
   );
 }
 
@@ -142,7 +156,9 @@ export default function OpportunityInbox() {
   // Client-side geo filter
   const items = geoFilter === "all"
     ? rawItems
-    : rawItems.filter((i) => i.geoRegion === geoFilter);
+    : geoFilter === "outside"
+      ? rawItems.filter((i) => isOutsideCaribbean(i.geoRegion))
+      : rawItems.filter((i) => i.geoRegion === geoFilter);
 
   const updateStatus = useMutation({
     mutationFn: async ({ id, status }: { id: number; status: string }) => {

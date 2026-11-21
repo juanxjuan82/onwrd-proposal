@@ -56,3 +56,11 @@ Checked and rejected on the same date:
 - Cayman Islands: Department of Tourism tenders are on `cayman.bonfirehub.com`, whose robots.txt is `Disallow: /`. Do not crawl.
 - Saint Lucia `govt.lc/tenders` and `/consultancies`: the page returns "No Vacancies to display" to a plain fetch and the site publishes no robots.txt. Not added.
 - Barbados Tourism Marketing Inc. and the Bahamas Ministry of Tourism have no tender page; their agency reviews are announced through press releases only.
+
+**Leads outside the Caribbean (decided by the user 2026-11-21):** ONWRD wants 2–3 strong leads a week and is open to leads outside the Caribbean, **flagged**. The scorer no longer SKIPs a lead for being outside the region; it scores it with the lowest geography points, prefixes the reasoning with "⚠ Outside the Caribbean", and the inbox shows an "Outside Caribbean" badge and filter. US/Canada leads get `geoRegion = "north_america"` (decided by the stated country only).
+
+**Volume sources added 2026-11-21:**
+- `odwyers_rfps` — O'Dwyer's free list of open PR/marketing agency searches (odwyerpr.com/rfps/, robots.txt allows all). About 3 new a week; on the test date 9 were open and 5 passed the promotion gate. Only the list and a short public summary are read: the full RFP document is for O'Dwyer's members, so a person must get it from the issuer or a membership. Dates on the site are US month/day/year.
+- `canadabuys` — the federal open-data file of all open tenders (~900 rows, 6 MB), filtered to marketing/communications titles. A few leads at any time.
+- `email_alerts` — reads tender-alert emails from the Resend *receiving* mailbox using the existing `resend` SDK (`emails.receiving.list/get`) and RESEND_API_KEY. Senders must be a built-in tender platform domain or listed in the `ALERT_EMAIL_SENDERS` secret (comma-separated addresses or domains — needed for forwarded mail). Links in emails are stored, never fetched. The parser was written without real alert samples from UNGM/Bonfire/GOJEP; expect to tune it against the first real emails.
+- Checked and not added: Discover Puerto Rico and Brand USA return 403 to automated requests; TTRA's RFP board had one item.

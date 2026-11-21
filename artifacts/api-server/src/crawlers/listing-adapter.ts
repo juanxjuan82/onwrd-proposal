@@ -42,6 +42,10 @@ export interface ListingSourceConfig {
   postedFromUrl?: RegExp;
   /** Removed from the start of link text to leave the notice name. */
   titlePrefix?: RegExp;
+  /** The site writes dates the US way (month/day/year). */
+  usDates?: boolean;
+  /** Keep the listing row (type, region, dates) alongside the detail text. */
+  appendListingSummary?: boolean;
   /** Undated notices older than this many days (by posted date) are dropped. */
   maxUndatedAgeDays?: number;
 }
@@ -69,7 +73,7 @@ export function decodeEntities(value: string): string {
 function blockText(html: string, maxLen: number): string {
   // Decode numeric entities before stripHtml blanks them out.
   return stripHtml(decodeEntities(html.replace(/<svg\b[\s\S]*?<\/svg>/gi, " ")), maxLen)
-    .replace(/\s+/g, " ").trim();
+    .replace(/-->|<!--/g, " ").replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -80,12 +84,15 @@ export function readListingDeadline(text: string): Date | undefined {
   const normalised = text
     .replace(/\b(?:mon|tues|wednes|thurs|fri|satur|sun)day,?\s+/gi, "")
     .replace(/\b(?:closes|closing|close date|submission date)\b\s*:?\s*/gi, "Closing date: ")
+    .replace(/\bdue\b(?!\s+date)\s*:?\s*/gi, "Closing date: ")
     .replace(/(\d{1,2})(?:st|nd|rd|th)\b/gi, "$1")
     .replace(/\s*,\s*/g, ", ");
   return extractDeadline(normalised);
 }
 
 function readPostedDate(text: string): Date | undefined {
+  const iso = text.match(/\b(?:issued|posted|published)\b\s*:?\s*(\d{4}-\d{2}-\d{2})/i)?.[1];
+  if (iso) return extractDeadline(`Deadline: ${iso}`);
   const labelled = text.match(/\b(?:issued|posted|published)\b\s*:?\s*(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})/i)?.[1]
     ?? text.match(/^\s*(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4})\b/)?.[1];
   return labelled ? extractDeadline(`Deadline: ${labelled}`) : undefined;
@@ -128,7 +135,12 @@ export function parseListingPage(
     const key = chosen.url.replace(/\/+$/, "").toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    const summary = blockText(block, 1_500);
+    let summary = blockText(block, 1_500);
+    if (config.usDates) {
+      // 12/11/2026 means 11 December in the US; rewrite so it cannot be misread.
+      summary = summary.replace(/\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/g, (_, month: string, day: string, year: string) =>
+        `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`);
+    }
     results.push({
       ...chosen,
       summary,
@@ -218,7 +230,10 @@ export class ListingAdapter implements TenderSourceAdapter {
         const combined = prioritizeDocumentContent(detail.content, detail.documents, 4_000);
         const detailHasScope = hasSubstantiveScope(combined, listing.title);
         const listingHasScope = hasSubstantiveScope(listing.summary, listing.title);
-        const description = detailHasScope ? combined : listingHasScope ? listing.summary : "";
+        const baseDescription = detailHasScope ? combined : listingHasScope ? listing.summary : "";
+        const description = baseDescription && detailHasScope && config.appendListingSummary
+          ? `${baseDescription}\n\nListing: ${listing.summary}`.slice(0, 4_000)
+          : baseDescription;
         results.push({
           externalId: stableExternalId(config.adapterType, listing.url),
           title: listing.title,
@@ -464,6 +479,26 @@ export const LISTING_SOURCES: readonly ListingSourceConfig[] = [
     noticePath: /^\/(?!category\/|opportunities\/?$)[^/]+\/?$/,
     skipBlock: /<a\b[^>]*>\s*Expired:/i,
     maxUndatedAgeDays: 120,
+  },
+  {
+    // O'Dwyer's publishes a free running list of open PR/marketing agency
+    // searches, mostly from US public bodies. The list and a short summary of
+    // each are public; the full RFP document is for O'Dwyer's members.
+    adapterType: "odwyers_rfps",
+    label: "O'Dwyer's PR & Marketing RFP List (US)",
+    organization: "US agency search (listed by O'Dwyer's)",
+    country: "United States",
+    sector: "Agency search — PR / marketing",
+    origin: "https://www.odwyerpr.com",
+    listingUrls: ["https://www.odwyerpr.com/rfps/"],
+    approvedDomains: ["odwyerpr.com"],
+    blockPattern: /<tr style="background-color:#[0-9a-f]{6}">[\s\S]*?<\/tr>\s*<!--[\s\S]*?-->/gi,
+    noticePath: /^\/story\/public\/\d+\//,
+    // The article is followed by a long site-wide category list; stop before it.
+    contentPattern: /<article\b[\s\S]*?(?=More stories from|Not a Subscriber|<\/article>)/i,
+    usDates: true,
+    appendListingSummary: true,
+    maxUndatedAgeDays: 60,
   },
 ] as const;
 

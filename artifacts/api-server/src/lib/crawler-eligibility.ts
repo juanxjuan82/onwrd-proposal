@@ -117,6 +117,14 @@ const CORE_SERVICE_PHRASES: string[] = [
   "website design",
   "website development",
   "publication design",
+  // ── How agency searches are worded (tourism boards, US/Canada public bodies)
+  "pr firm", "pr agency", "pr services", "pr support", "pr partner", "pr rep",
+  "tourism pr", "destination pr", "travel pr",
+  "marketing agency", "marketing firm", "marketing partner", "marketing representation",
+  "advertising agency", "ad agency", "agency of record", "communications agency",
+  "brand campaign", "branding services", "tourism campaign", "marketing and advertising",
+  "marketing communications", "marketing program", "communications program",
+  "reputation campaign", "sales & marketing", "sales and marketing",
   // ── International procurement / development-sector synonyms ──────────────
   // These are how World Bank, UNDP, IDB, CDB, etc. describe the same services
   "outreach activities",
